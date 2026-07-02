@@ -1,6 +1,10 @@
 import os
 import requests
+from dotenv import load_dotenv
 from google.adk.agents import Agent
+
+# Explicitly load the .env file from this directory
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 def detect_grafana_dashboards() -> str:
     """Detects and returns a list of Grafana dashboards on localhost:3000."""
