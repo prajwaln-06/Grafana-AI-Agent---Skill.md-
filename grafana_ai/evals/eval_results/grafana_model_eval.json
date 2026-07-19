@@ -1,0 +1,52 @@
+{
+  "generated_at": "2026-07-16 15:37:57",
+  "project_goals": [
+    "Chat with Grafana data through grounded tool calls.",
+    "Return graphable metrics/log outputs for quick visual summaries.",
+    "Support operator workflows with safe discovery, troubleshooting, and human review points."
+  ],
+  "cases": [
+    {
+      "id": "datasource_discovery",
+      "category": "chat_with_data",
+      "prompt": "List the available Grafana datasources. Use a tool.",
+      "expected_tools": [
+        "list_datasources"
+      ],
+      "required_tools": [
+        "list_datasources"
+      ],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Low-ambiguity MCP discovery call."
+    }
+  ],
+  "runs": [
+    {
+      "case_id": "datasource_discovery",
+      "category": "chat_with_data",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "List the available Grafana datasources. Use a tool.",
+      "latency_sec": 20.108,
+      "score": 1,
+      "max_score": 10,
+      "function_calls": [],
+      "function_responses": [],
+      "final_text": "",
+      "error": "Timed out after 20s",
+      "scoring_notes": [
+        "Run errored before completion.",
+        "No tool call emitted.",
+        "No expected tool was called.",
+        "Missing required tool(s): list_datasources.",
+        "No known hallucinated/forbidden tool names.",
+        "No tool response returned."
+      ]
+    }
+  ]
+}

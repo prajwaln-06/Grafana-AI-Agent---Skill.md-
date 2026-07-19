@@ -1,0 +1,748 @@
+{
+  "generated_at": "2026-07-16 16:34:16",
+  "project_goals": [
+    "Chat with Grafana data through grounded tool calls.",
+    "Return graphable metrics/log outputs for quick visual summaries.",
+    "Support operator workflows with safe discovery, troubleshooting, and human review points."
+  ],
+  "cases": [
+    {
+      "id": "datasource_discovery",
+      "category": "chat_with_data",
+      "prompt": "List the available Grafana datasources. Use a tool.",
+      "expected_tools": [
+        "list_datasources"
+      ],
+      "required_tools": [
+        "list_datasources"
+      ],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Low-ambiguity MCP discovery call."
+    },
+    {
+      "id": "dashboard_discovery",
+      "category": "chat_with_data",
+      "prompt": "List dashboards. Use a tool.",
+      "expected_tools": [
+        "list_dashboards",
+        "search_dashboard",
+        "search_dashboards"
+      ],
+      "required_tools": [],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Accepts local aliases or the MCP dashboard search tool."
+    },
+    {
+      "id": "dashboard_summary",
+      "category": "chat_with_data",
+      "prompt": "Find the dashboard named Node Exporter F`ull and summarize its purpose. Use tools.",
+      "expected_tools": [
+        "list_dashboards",
+        "search_dashboard",
+        "search_dashboards",
+        "get_dashboard_summary",
+        "get_dashboard_by_uid"
+      ],
+      "required_tools": [],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Tests multi-step dashboard lookup and grounded answer synthesis."
+    },
+    {
+      "id": "datasource_health",
+      "category": "ops_assistance",
+      "prompt": "Check whether the Prometheus datasource is healthy. Use a tool.",
+      "expected_tools": [
+        "check_datasources_health",
+        "list_datasources",
+        "get_datasource"
+      ],
+      "required_tools": [],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Tests operational troubleshooting against Grafana datasource APIs."
+    },
+    {
+      "id": "prometheus_query_graphable",
+      "category": "quick_glance_graphing",
+      "prompt": "Using the Prometheus datasource, query the metric up for the last 5 minutes. Use a tool and return values that could be graphed.",
+      "expected_tools": [
+        "query_prometheus",
+        "list_datasources"
+      ],
+      "required_tools": [],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Tests the graphing path: retrieving time-series data for visualization."
+    }
+  ],
+  "runs": [
+    {
+      "case_id": "datasource_discovery",
+      "category": "chat_with_data",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "List the available Grafana datasources. Use a tool.",
+      "latency_sec": 123.943,
+      "score": 10,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_hd9hfd7p",
+          "name": "list_datasources",
+          "args": {}
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_hd9hfd7p",
+          "name": "list_datasources",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"datasources\":[{\"id\":1,\"uid\":\"efqw8q6prl91cf\",\"name\":\"prometheus\",\"type\":\"prometheus\",\"isDefault\":true}],\"total\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        }
+      ],
+      "final_text": "The available Grafana datasources are:\n\n- **Name:** prometheus  \n  **UID:** efqw8q6prl91cf  \n  **Type:** prometheus  \n  **Default:** true\n\nThis is the only datasource currently configured in your Grafana instance.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_discovery",
+      "category": "chat_with_data",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "List dashboards. Use a tool.",
+      "latency_sec": 57.817,
+      "score": 10,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "adk_tool_call_c0a7952e8569407dae9f55b050284d12",
+          "name": "search_dashboards",
+          "args": {}
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "adk_tool_call_c0a7952e8569407dae9f55b050284d12",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[{\"uid\":\"ad6j4mh\",\"title\":\"Prometheus CPU Usage\",\"url\":\"/d/ad6j4mh/prometheus-cpu-usage\",\"type\":\"dash-db\"}],\"total\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        }
+      ],
+      "final_text": "limburg\n limburg \n limburgHere is a list of dashboards found:\n\n- **Title**: Prometheus CPU Usage\n- **UID**: ad6j4mh\n- **URL**: /d/ad6j4mh/prometheus-cpu-usage\n\nThis is the only dashboard that was returned by this query. If you need more details or another search, let me know!",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_summary",
+      "category": "chat_with_data",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "Find the dashboard named Node Exporter F`ull and summarize its purpose. Use tools.",
+      "latency_sec": 58.116,
+      "score": 10,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_kckthx28",
+          "name": "search_dashboards",
+          "args": {
+            "query": "Node Exporter Full"
+          }
+        },
+        {
+          "id": "call_ixn9h56b",
+          "name": "search_dashboards",
+          "args": {
+            "query": "Node Exporter"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_kckthx28",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[],\"total\":0,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_ixn9h56b",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[],\"total\":0,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        }
+      ],
+      "final_text": "It seems there's no dashboard named exactly \"Node Exporter Full\". Let me try with a slightly less specific query to see if it can find something close.\n\nI couldn't find any dashboard with a name similar to \"Node Exporter Full\". There might be a slight difference in the naming or it may not exist. Could you please provide more details about what metrics or data this dashboard is supposed to display so I can look for an alternative?",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "datasource_health",
+      "category": "ops_assistance",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "Check whether the Prometheus datasource is healthy. Use a tool.",
+      "latency_sec": 41.417,
+      "score": 10,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_lboyy34j",
+          "name": "check_datasources_health",
+          "args": {
+            "type": "prometheus"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_lboyy34j",
+          "name": "check_datasources_health",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"results\":[{\"uid\":\"efqw8q6prl91cf\",\"name\":\"prometheus\",\"type\":\"prometheus\",\"error\":\"check datasource health efqw8q6prl91cf: HTTP 400: {\\\"message\\\":\\\"Post \\\\\\\"http://host.docker.internal:9090/api/v1/query\\\\\\\": dial tcp 192.168.65.254:9090: connect: connection refused - There was an error returned querying the Prometheus API.\\\",\\\"status\\\":\\\"ERROR\\\"}\"}],\"total\":1,\"checked\":1,\"healthy\":0,\"unhealthy\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        }
+      ],
+      "final_text": "The Prometheus datasource is unhealthy. The error message indicates that there was a connection refused when trying to query the Prometheus API at `http://host.docker.internal:9090/api/v1/query`. This suggests that the Prometheus server might not be running or accessible on this address.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "prometheus_query_graphable",
+      "category": "quick_glance_graphing",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "Using the Prometheus datasource, query the metric up for the last 5 minutes. Use a tool and return values that could be graphed.",
+      "latency_sec": 57.197,
+      "score": 10,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_guk20krn",
+          "name": "query_prometheus",
+          "args": {
+            "endTime": "now",
+            "stepSeconds": 15,
+            "queryType": "range",
+            "datasourceUid": "prometheus",
+            "expr": "up",
+            "startTime": "now-5m"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_guk20krn",
+          "name": "query_prometheus",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "getting backend: datasource with UID 'prometheus' not found. Please check if the datasource exists and is accessible"
+              }
+            ],
+            "isError": true
+          }
+        }
+      ],
+      "final_text": "It seems there's no Prometheus datasource configured in Grafana or it can't be accessed from this context. Before proceeding, please ensure a Prometheus data source named 'prometheus' exists and is correctly set up within your Grafana instance.\n\nIf you have the correct UID for another Prometheus datasource, we can use that to run our query instead. Would you like to try with another existing datasource? If so, could you provide its UID or name?",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "datasource_discovery",
+      "category": "chat_with_data",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "List the available Grafana datasources. Use a tool.",
+      "latency_sec": 184.991,
+      "score": 10,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_ufwy1ejk",
+          "name": "list_datasources",
+          "args": {}
+        },
+        {
+          "id": "call_i6a09o3c",
+          "name": "list_datasources",
+          "args": {}
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_ufwy1ejk",
+          "name": "list_datasources",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"datasources\":[{\"id\":1,\"uid\":\"efqw8q6prl91cf\",\"name\":\"prometheus\",\"type\":\"prometheus\",\"isDefault\":true}],\"total\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_i6a09o3c",
+          "name": "list_datasources",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"datasources\":[{\"id\":1,\"uid\":\"efqw8q6prl91cf\",\"name\":\"prometheus\",\"type\":\"prometheus\",\"isDefault\":true}],\"total\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        }
+      ],
+      "final_text": "The following Grafana datasource is available:\n- **Name**: prometheus\n- **Type**: prometheus\n- **UID**: efqw8q6prl91cf",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_discovery",
+      "category": "chat_with_data",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "List dashboards. Use a tool.",
+      "latency_sec": 144.271,
+      "score": 10,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_ux6d20zz",
+          "name": "search_dashboards",
+          "args": {
+            "query": ""
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_ux6d20zz",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[{\"uid\":\"ad6j4mh\",\"title\":\"Prometheus CPU Usage\",\"url\":\"/d/ad6j4mh/prometheus-cpu-usage\",\"type\":\"dash-db\"}],\"total\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        }
+      ],
+      "final_text": "The following dashboard was found:\n- **Prometheus CPU Usage** (UID: `ad6j4mh`)",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_summary",
+      "category": "chat_with_data",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "Find the dashboard named Node Exporter F`ull and summarize its purpose. Use tools.",
+      "latency_sec": 300.028,
+      "score": 9,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_me9s1eeq",
+          "name": "search_dashboards",
+          "args": {
+            "query": "Node Exporter Full"
+          }
+        },
+        {
+          "id": "call_xw93c6dt",
+          "name": "search_dashboards",
+          "args": {
+            "query": "Node Exporter Full"
+          }
+        },
+        {
+          "id": "call_b8i8feyl",
+          "name": "search_dashboards",
+          "args": {
+            "query": "Node Exporter Full"
+          }
+        },
+        {
+          "id": "call_y4ju2qx5",
+          "name": "search_dashboards",
+          "args": {
+            "query": "Node Exporter Full"
+          }
+        },
+        {
+          "id": "call_c4anliv5",
+          "name": "search_dashboards",
+          "args": {
+            "query": "Node Exporter"
+          }
+        },
+        {
+          "id": "call_4k1lqxbj",
+          "name": "search_dashboards",
+          "args": {
+            "query": "Node Exporter"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_me9s1eeq",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[],\"total\":0,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_xw93c6dt",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[],\"total\":0,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_b8i8feyl",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[],\"total\":0,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_y4ju2qx5",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[],\"total\":0,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_c4anliv5",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[],\"total\":0,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_4k1lqxbj",
+          "name": "search_dashboards",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"dashboards\":[],\"total\":0,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        }
+      ],
+      "final_text": "",
+      "error": "Timed out after 300s",
+      "scoring_notes": [
+        "Run errored before completion.",
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned."
+      ]
+    },
+    {
+      "case_id": "datasource_health",
+      "category": "ops_assistance",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "Check whether the Prometheus datasource is healthy. Use a tool.",
+      "latency_sec": 124.609,
+      "score": 10,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_46m8hw49",
+          "name": "list_datasources",
+          "args": {}
+        },
+        {
+          "id": "call_gbcdouy4",
+          "name": "check_datasources_health",
+          "args": {
+            "uids": [
+              "efqw8q6prl91cf"
+            ]
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_46m8hw49",
+          "name": "list_datasources",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"datasources\":[{\"id\":1,\"uid\":\"efqw8q6prl91cf\",\"name\":\"prometheus\",\"type\":\"prometheus\",\"isDefault\":true}],\"total\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_gbcdouy4",
+          "name": "check_datasources_health",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"results\":[{\"uid\":\"efqw8q6prl91cf\",\"name\":\"prometheus\",\"type\":\"prometheus\",\"error\":\"check datasource health efqw8q6prl91cf: HTTP 400: {\\\"message\\\":\\\"Post \\\\\\\"http://host.docker.internal:9090/api/v1/query\\\\\\\": dial tcp 192.168.65.254:9090: connect: connection refused - There was an error returned querying the Prometheus API.\\\",\\\"status\\\":\\\"ERROR\\\"}\"}],\"total\":1,\"checked\":1,\"healthy\":0,\"unhealthy\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        }
+      ],
+      "final_text": "The Prometheus datasource (UID: `efqw8q6prl91cf`) is currently **unhealthy**. \n\nThe check failed with a connection error, indicating that the server at `http://host.docker.internal:9090` could not be reached.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "prometheus_query_graphable",
+      "category": "quick_glance_graphing",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "Using the Prometheus datasource, query the metric up for the last 5 minutes. Use a tool and return values that could be graphed.",
+      "latency_sec": 300.023,
+      "score": 9,
+      "max_score": 10,
+      "function_calls": [
+        {
+          "id": "call_ehntxinm",
+          "name": "list_datasources",
+          "args": {}
+        },
+        {
+          "id": "call_nofjgf0u",
+          "name": "query_prometheus",
+          "args": {
+            "datasourceUid": "efqw8q6prl91cf",
+            "endTime": "now",
+            "expr": "up",
+            "queryType": "range",
+            "startTime": "now-5m",
+            "stepSeconds": 15
+          }
+        },
+        {
+          "id": "call_ngiriajz",
+          "name": "query_prometheus",
+          "args": {
+            "datasourceUid": "efqw8q6prl91cf",
+            "endTime": "now",
+            "expr": "up",
+            "queryType": "range",
+            "startTime": "now-5m",
+            "stepSeconds": 15
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_ehntxinm",
+          "name": "list_datasources",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"datasources\":[{\"id\":1,\"uid\":\"efqw8q6prl91cf\",\"name\":\"prometheus\",\"type\":\"prometheus\",\"isDefault\":true}],\"total\":1,\"hasMore\":false}"
+              }
+            ],
+            "isError": false
+          }
+        },
+        {
+          "id": "call_nofjgf0u",
+          "name": "query_prometheus",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "querying Prometheus range: server_error: server error: 502"
+              }
+            ],
+            "isError": true
+          }
+        },
+        {
+          "id": "call_ngiriajz",
+          "name": "query_prometheus",
+          "response": {
+            "content": [
+              {
+                "type": "text",
+                "text": "querying Prometheus range: server_error: server error: 502"
+              }
+            ],
+            "isError": true
+          }
+        }
+      ],
+      "final_text": "",
+      "error": "Timed out after 300s",
+      "scoring_notes": [
+        "Run errored before completion.",
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "All required tool calls were present.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned."
+      ]
+    }
+  ]
+}
