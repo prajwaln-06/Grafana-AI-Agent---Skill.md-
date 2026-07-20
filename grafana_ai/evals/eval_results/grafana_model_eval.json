@@ -1,51 +1,455 @@
 {
-  "generated_at": "2026-07-16 15:37:57",
-  "project_goals": [
-    "Chat with Grafana data through grounded tool calls.",
-    "Return graphable metrics/log outputs for quick visual summaries.",
-    "Support operator workflows with safe discovery, troubleshooting, and human review points."
-  ],
+  "generated_at": "2026-07-20 14:41:19",
   "cases": [
     {
-      "id": "datasource_discovery",
+      "id": "dashboard_discovery",
       "category": "chat_with_data",
-      "prompt": "List the available Grafana datasources. Use a tool.",
+      "prompt": "List dashboards. Use a tool.",
       "expected_tools": [
-        "list_datasources"
+        "list_dashboards"
       ],
-      "required_tools": [
-        "list_datasources"
-      ],
+      "required_tools": [],
       "required_any_tool_groups": [],
       "forbidden_tools": [
         "google:search",
         "web_search",
         "browser"
       ],
-      "notes": "Low-ambiguity MCP discovery call."
+      "notes": "Tests basic list_dashboards wrapper."
+    },
+    {
+      "id": "dashboard_search",
+      "category": "chat_with_data",
+      "prompt": "Find dashboards related to cpu. Use a tool.",
+      "expected_tools": [
+        "search_dashboards"
+      ],
+      "required_tools": [],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Tests search_dashboards wrapper."
+    },
+    {
+      "id": "dashboard_panels",
+      "category": "chat_with_data",
+      "prompt": "What panels are in dashboard UID xyz? Use a tool.",
+      "expected_tools": [
+        "get_dashboard_panels"
+      ],
+      "required_tools": [],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Tests get_dashboard_panels wrapper."
+    },
+    {
+      "id": "prometheus_query_metric",
+      "category": "quick_glance_graphing",
+      "prompt": "What is the CPU usage? Use a tool.",
+      "expected_tools": [
+        "query_prometheus_metric"
+      ],
+      "required_tools": [],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Tests query_prometheus_metric with natural language metric."
+    },
+    {
+      "id": "prometheus_query_expr",
+      "category": "quick_glance_graphing",
+      "prompt": "Query the PromQL 'up' for 5 minutes. Use a tool.",
+      "expected_tools": [
+        "query_prometheus_metric"
+      ],
+      "required_tools": [],
+      "required_any_tool_groups": [],
+      "forbidden_tools": [
+        "google:search",
+        "web_search",
+        "browser"
+      ],
+      "notes": "Tests query_prometheus_metric with explicit PromQL expr."
     }
   ],
   "runs": [
     {
-      "case_id": "datasource_discovery",
+      "case_id": "dashboard_discovery",
       "category": "chat_with_data",
       "model": "ollama_chat/qwen2.5:14b",
       "trial": 1,
-      "prompt": "List the available Grafana datasources. Use a tool.",
-      "latency_sec": 20.108,
-      "score": 1,
-      "max_score": 10,
-      "function_calls": [],
-      "function_responses": [],
-      "final_text": "",
-      "error": "Timed out after 20s",
+      "prompt": "List dashboards. Use a tool.",
+      "latency_sec": 73.214,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_lhzr1jv0",
+          "name": "list_dashboards",
+          "args": {}
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_lhzr1jv0",
+          "name": "list_dashboards",
+          "response": {
+            "result": "No dashboards were found in this Grafana instance.\nCheck that GRAFANA_URL and GRAFANA_SERVICE_ACCOUNT_TOKEN are correct and that at least one dashboard exists."
+          }
+        }
+      ],
+      "final_text": "There are no dashboards available in this Grafana instance. Please ensure the configuration is correct and that there are existing dashboards to list.",
+      "error": null,
       "scoring_notes": [
-        "Run errored before completion.",
-        "No tool call emitted.",
-        "No expected tool was called.",
-        "Missing required tool(s): list_datasources.",
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
         "No known hallucinated/forbidden tool names.",
-        "No tool response returned."
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_search",
+      "category": "chat_with_data",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "Find dashboards related to cpu. Use a tool.",
+      "latency_sec": 10.86,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_4b4gw3kk",
+          "name": "search_dashboards",
+          "args": {
+            "query": "cpu"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_4b4gw3kk",
+          "name": "search_dashboards",
+          "response": {
+            "result": "Error: Tool execution failed: search dashboards for &{GrafanaHTTPAPI:0x32598c5c8588 PublicURL:}: Get \"http://localhost:3000/api/search?limit=50&page=1&query=cpu&type=dash-db\": dial tcp [::1]:3000: connectex: No connection could be made because the target machine actively refused it."
+          }
+        }
+      ],
+      "final_text": "I encountered an issue accessing the dashboard search functionality. It seems there's a connection problem with the server. Could you please try again later or specify another keyword if needed? If the problem persists, there might be a temporary service disruption.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_panels",
+      "category": "chat_with_data",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "What panels are in dashboard UID xyz? Use a tool.",
+      "latency_sec": 12.505,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_zcluvne4",
+          "name": "get_dashboard_panels",
+          "args": {
+            "uid": "xyz"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_zcluvne4",
+          "name": "get_dashboard_panels",
+          "response": {
+            "result": "Error: Dashboard not found or MCP unavailable."
+          }
+        }
+      ],
+      "final_text": "It seems there was an issue accessing the dashboard with UID xyz. Either the dashboard does not exist, or the Multi-Cluster Prometheus (MCP) is currently unavailable. Please check the UID and try again later.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "prometheus_query_metric",
+      "category": "quick_glance_graphing",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "What is the CPU usage? Use a tool.",
+      "latency_sec": 13.809,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_mkl3ad78",
+          "name": "query_prometheus_metric",
+          "args": {
+            "metric": "CPU usage"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_mkl3ad78",
+          "name": "query_prometheus_metric",
+          "response": {
+            "result": "No panel matching 'CPU usage' was found. No dashboards are available in this Grafana instance."
+          }
+        }
+      ],
+      "final_text": "It looks like there's no specific metric or dashboard available for direct CPU usage queries in this Grafana instance at the moment. If you have a particular query or time range, we might find more information indirectly. Could you specify what exactly you're looking for?",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "prometheus_query_expr",
+      "category": "quick_glance_graphing",
+      "model": "ollama_chat/qwen2.5:14b",
+      "trial": 1,
+      "prompt": "Query the PromQL 'up' for 5 minutes. Use a tool.",
+      "latency_sec": 15.471,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_4gt3lbqb",
+          "name": "query_prometheus_metric",
+          "args": {
+            "step_seconds": 10,
+            "expr": "up",
+            "lookback": "5m"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_4gt3lbqb",
+          "name": "query_prometheus_metric",
+          "response": {
+            "result": "Error: Could not resolve a datasource for this panel.\n\nAvailable datasources:\n(no datasources discovered)"
+          }
+        }
+      ],
+      "final_text": "It seems there are no available data sources to query the 'up' metric with PromQL. Please ensure that a Prometheus data source is configured and try again.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_discovery",
+      "category": "chat_with_data",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "List dashboards. Use a tool.",
+      "latency_sec": 54.1,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_x90j6lff",
+          "name": "list_dashboards",
+          "args": {}
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_x90j6lff",
+          "name": "list_dashboards",
+          "response": {
+            "result": "No dashboards were found in this Grafana instance.\nCheck that GRAFANA_URL and GRAFANA_SERVICE_ACCOUNT_TOKEN are correct and that at least one dashboard exists."
+          }
+        }
+      ],
+      "final_text": "No dashboards were found in this Grafana instance. Please check your configuration or ensure that at least one dashboard exists.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_search",
+      "category": "chat_with_data",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "Find dashboards related to cpu. Use a tool.",
+      "latency_sec": 19.306,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_zohxyz7h",
+          "name": "search_dashboards",
+          "args": {
+            "query": "cpu"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_zohxyz7h",
+          "name": "search_dashboards",
+          "response": {
+            "result": "Error: Tool execution failed: search dashboards for &{GrafanaHTTPAPI:0x32598c5c8588 PublicURL:}: Get \"http://localhost:3000/api/search?limit=50&page=1&query=cpu&type=dash-db\": dial tcp [::1]:3000: connectex: No connection could be made because the target machine actively refused it."
+          }
+        }
+      ],
+      "final_text": "I couldn't find any dashboards related to \"cpu\" at the moment. This might be due to a connection issue or no matching results in the system.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "dashboard_panels",
+      "category": "chat_with_data",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "What panels are in dashboard UID xyz? Use a tool.",
+      "latency_sec": 30.073,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_kt2jyy6v",
+          "name": "get_dashboard_panels",
+          "args": {
+            "uid": "xyz"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_kt2jyy6v",
+          "name": "get_dashboard_panels",
+          "response": {
+            "result": "Error: Dashboard not found or MCP unavailable."
+          }
+        }
+      ],
+      "final_text": "I'm sorry, but I couldn't find any information for the dashboard with UID \"xyz\". Please double-check the ID and try again.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "prometheus_query_metric",
+      "category": "quick_glance_graphing",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "What is the CPU usage? Use a tool.",
+      "latency_sec": 21.232,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_a25qj73l",
+          "name": "query_prometheus_metric",
+          "args": {
+            "metric": "CPU usage"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_a25qj73l",
+          "name": "query_prometheus_metric",
+          "response": {
+            "result": "No panel matching 'CPU usage' was found. No dashboards are available in this Grafana instance."
+          }
+        }
+      ],
+      "final_text": "I'm sorry, but I cannot find any data for CPU usage as there are currently no dashboards or metrics available in the system to query.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
+      ]
+    },
+    {
+      "case_id": "prometheus_query_expr",
+      "category": "quick_glance_graphing",
+      "model": "ollama_chat/gemma4:12b",
+      "trial": 1,
+      "prompt": "Query the PromQL 'up' for 5 minutes. Use a tool.",
+      "latency_sec": 24.748,
+      "score": 9,
+      "max_score": 9,
+      "function_calls": [
+        {
+          "id": "call_us95euzv",
+          "name": "query_prometheus_metric",
+          "args": {
+            "expr": "up",
+            "lookback": "5m"
+          }
+        }
+      ],
+      "function_responses": [
+        {
+          "id": "call_us95euzv",
+          "name": "query_prometheus_metric",
+          "response": {
+            "result": "Error: Could not resolve a datasource for this panel.\n\nAvailable datasources:\n(no datasources discovered)"
+          }
+        }
+      ],
+      "final_text": "I cannot retrieve the data for the PromQL 'up' because no valid data sources were found to execute the query.",
+      "error": null,
+      "scoring_notes": [
+        "Model emitted at least one tool call.",
+        "Model called an expected tool.",
+        "No known hallucinated/forbidden tool names.",
+        "At least one tool response was returned.",
+        "Final answer was produced after tool output."
       ]
     }
   ]

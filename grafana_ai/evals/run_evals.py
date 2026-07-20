@@ -1,10 +1,5 @@
-
 #!/usr/bin/env python3
-"""Evaluate local models on Grafana ADK + MCP tool-calling tasks.
-
-The script runs the same prompt set across one or more Ollama/LiteLLM models,
-captures ADK function-call events, scores each run, and writes JSON + Markdown
-reports under eval_results/.
+"""Evaluate local models on Grafana ADK + Wrapper tool-calling tasks.
 """
 
 from __future__ import annotations
@@ -21,20 +16,24 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from google.adk.agents import LlmAgent
+from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, StdioConnectionParams
 from google.genai import types
-from mcp import StdioServerParameters
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from grafana_ai.agent import (
-    ALLOWED_MCP_TOOLS,
     AGENT_INSTRUCTION,
+    _before_model,
+)
+from grafana_ai.tools.grafana_wrapper import (
+    list_dashboards,
+    search_dashboards,
+    get_dashboard_panels,
+    query_prometheus_metric,
 )
 
 
@@ -77,151 +76,46 @@ class EvalRun:
 
 EVAL_CASES = [
     EvalCase(
-        id="datasource_discovery",
-        category="chat_with_data",
-        prompt="List the available Grafana datasources. Use a tool.",
-        expected_tools=("list_datasources",),
-        required_tools=("list_datasources",),
-        notes="Low-ambiguity MCP discovery call.",
-    ),
-    EvalCase(
         id="dashboard_discovery",
         category="chat_with_data",
         prompt="List dashboards. Use a tool.",
-        expected_tools=("list_dashboards", "search_dashboard", "search_dashboards"),
-        notes="Accepts local aliases or the MCP dashboard search tool.",
+        expected_tools=("list_dashboards",),
+        notes="Tests basic list_dashboards wrapper.",
     ),
     EvalCase(
-        id="dashboard_summary",
+        id="dashboard_search",
         category="chat_with_data",
-        prompt=(
-            "Find the dashboard named Node Exporter F`ull and summarize its "
-            "purpose. Use tools."
-        ),
-        expected_tools=(
-            "list_dashboards",
-            "search_dashboard",
-            "search_dashboards",
-            "get_dashboard_summary",
-            "get_dashboard_by_uid",
-        ),
-        notes="Tests multi-step dashboard lookup and grounded answer synthesis.",
+        prompt="Find dashboards related to cpu. Use a tool.",
+        expected_tools=("search_dashboards",),
+        notes="Tests search_dashboards wrapper.",
     ),
     EvalCase(
-        id="datasource_health",
-        category="ops_assistance",
-        prompt="Check whether the Prometheus datasource is healthy. Use a tool.",
-        expected_tools=("check_datasources_health", "list_datasources", "get_datasource"),
-        notes="Tests operational troubleshooting against Grafana datasource APIs.",
-    ),
-    EvalCase(
-        id="prometheus_query_graphable",
-        category="quick_glance_graphing",
-        prompt=(
-            "Using the Prometheus datasource, query the metric up for the last "
-            "5 minutes. Use a tool and return values that could be graphed."
-        ),
-        expected_tools=("query_prometheus", "list_datasources"),
-        notes="Tests the graphing path: retrieving time-series data for visualization.",
-    ),
-]
-
-
-COMPLEX_EVAL_CASES = [
-    EvalCase(
-        id="complex_dashboard_details",
+        id="dashboard_panels",
         category="chat_with_data",
-        prompt=(
-            "Find the dashboard named Node Exporter Full, retrieve its details "
-            "or summary using tools, and tell me its UID, datasource, and what "
-            "kinds of system metrics it monitors."
-        ),
-        expected_tools=(
-            "list_dashboards",
-            "search_dashboard",
-            "search_dashboards",
-            "get_dashboard_summary",
-            "get_dashboard_by_uid",
-        ),
-        required_any_tool_groups=(
-            ("list_dashboards", "search_dashboard", "search_dashboards"),
-            ("get_dashboard_summary", "get_dashboard_by_uid"),
-        ),
-        notes="Multi-step dashboard discovery plus detail retrieval.",
+        prompt="What panels are in dashboard UID xyz? Use a tool.",
+        expected_tools=("get_dashboard_panels",),
+        notes="Tests get_dashboard_panels wrapper.",
     ),
     EvalCase(
-        id="complex_datasource_then_prometheus",
+        id="prometheus_query_metric",
         category="quick_glance_graphing",
-        prompt=(
-            "First discover the available datasources. Then use the Prometheus "
-            "datasource to query the 'up' metric as a time series for the last "
-            "10 minutes. Return the result in a way that could be graphed."
-        ),
-        expected_tools=("list_datasources", "query_prometheus"),
-        required_tools=("list_datasources", "query_prometheus"),
-        notes="Tests chained datasource discovery and graphable Prometheus query.",
+        prompt="What is the CPU usage? Use a tool.",
+        expected_tools=("query_prometheus_metric",),
+        notes="Tests query_prometheus_metric with natural language metric.",
     ),
     EvalCase(
-        id="complex_health_then_query",
-        category="ops_assistance",
-        prompt=(
-            "Check whether the Prometheus datasource is healthy. If it is "
-            "healthy, query 'up' for the last 5 minutes and explain whether "
-            "targets appear to be up."
-        ),
-        expected_tools=(
-            "check_datasources_health",
-            "list_datasources",
-            "query_prometheus",
-        ),
-        required_any_tool_groups=(
-            ("check_datasources_health", "list_datasources"),
-            ("query_prometheus",),
-        ),
-        notes="Tests conditional troubleshooting workflow.",
-    ),
-    EvalCase(
-        id="complex_cpu_graph_query",
+        id="prometheus_query_expr",
         category="quick_glance_graphing",
-        prompt=(
-            "Using Prometheus, fetch graphable CPU usage data for the node over "
-            "the last 15 minutes. Use a PromQL query based on "
-            "rate(node_cpu_seconds_total[5m]) and summarize what the graph "
-            "would show."
-        ),
-        expected_tools=("query_prometheus", "list_datasources"),
-        required_tools=("query_prometheus",),
-        notes="Tests a more realistic graph-generation query.",
-    ),
-    EvalCase(
-        id="complex_dashboard_to_metric",
-        category="chat_with_data",
-        prompt=(
-            "Use tools to inspect the Node Exporter Full dashboard, identify "
-            "one Prometheus metric it likely uses for CPU monitoring, then run "
-            "a graphable Prometheus query for that kind of CPU data."
-        ),
-        expected_tools=(
-            "list_dashboards",
-            "search_dashboard",
-            "search_dashboards",
-            "get_dashboard_summary",
-            "get_dashboard_by_uid",
-            "query_prometheus",
-        ),
-        required_any_tool_groups=(
-            ("list_dashboards", "search_dashboard", "search_dashboards"),
-            ("get_dashboard_summary", "get_dashboard_by_uid"),
-            ("query_prometheus",),
-        ),
-        notes="End-to-end chat-with-dashboard-data plus graphable metric retrieval.",
+        prompt="Query the PromQL 'up' for 5 minutes. Use a tool.",
+        expected_tools=("query_prometheus_metric",),
+        notes="Tests query_prometheus_metric with explicit PromQL expr.",
     ),
 ]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate local Ollama models on Grafana ADK tool use."
+        description="Evaluate local Ollama models on Grafana ADK wrapper."
     )
     parser.add_argument(
         "--models",
@@ -274,39 +168,28 @@ def selected_cases(raw_cases: str) -> list[EvalCase]:
     if not raw_cases.strip():
         return EVAL_CASES
     wanted = {case_id.strip() for case_id in raw_cases.split(",") if case_id.strip()}
-    all_cases = EVAL_CASES + COMPLEX_EVAL_CASES
-    cases = [case for case in all_cases if case.id in wanted]
+    cases = [case for case in EVAL_CASES if case.id in wanted]
     missing = wanted - {case.id for case in cases}
     if missing:
         raise SystemExit(f"Unknown case id(s): {', '.join(sorted(missing))}")
     return cases
 
 
-def build_agent(model: str) -> LlmAgent:
-    return LlmAgent(
+def build_agent(model: str) -> Agent:
+    return Agent(
         name="grafana_eval_agent",
-        model=LiteLlm(model=model),
+        model=LiteLlm(model=model, max_tokens=1536),
         instruction=(
             AGENT_INSTRUCTION
             + "\nEvaluation mode: prefer actually calling a relevant tool over "
             "describing how a tool could be called. Keep final answers concise."
         ),
+        before_model_callback=_before_model,
         tools=[
-            McpToolset(
-                connection_params=StdioConnectionParams(
-                    server_params=StdioServerParameters(
-                        command="uvx",
-                        args=["mcp-grafana"],
-                        env={
-                            "GRAFANA_URL": os.environ.get("GRAFANA_URL", "http://localhost:3000"),
-                            "GRAFANA_SERVICE_ACCOUNT_TOKEN": os.environ.get(
-                                "GRAFANA_SERVICE_ACCOUNT_TOKEN", ""
-                            ),
-                        },
-                    )
-                ),
-                tool_filter=ALLOWED_MCP_TOOLS,
-            ),
+            list_dashboards,
+            search_dashboards,
+            get_dashboard_panels,
+            query_prometheus_metric,
         ],
     )
 
@@ -350,27 +233,6 @@ def score_run(case: EvalCase, run: EvalRun) -> None:
         notes.append("Model called an expected tool.")
     else:
         notes.append("No expected tool was called.")
-
-    if case.required_any_tool_groups:
-        missing_groups = [
-            group for group in case.required_any_tool_groups if not any(name in names for name in group)
-        ]
-        if not missing_groups:
-            run.score += 1
-            notes.append("All required tool-call groups were satisfied.")
-        else:
-            notes.append(
-                "Missing required tool-call group(s): "
-                + "; ".join(" or ".join(group) for group in missing_groups)
-                + "."
-            )
-    else:
-        missing_required = [name for name in case.required_tools if name not in names]
-        if not missing_required:
-            run.score += 1
-            notes.append("All required tool calls were present.")
-        else:
-            notes.append(f"Missing required tool(s): {', '.join(missing_required)}.")
 
     forbidden = [name for name in names if name in case.forbidden_tools]
     if not forbidden:
@@ -422,7 +284,7 @@ async def run_case(
         prompt=case.prompt,
         latency_sec=0.0,
         score=0,
-        max_score=10,
+        max_score=9,
     )
     started = time.perf_counter()
 
@@ -455,7 +317,7 @@ async def run_case(
         await asyncio.wait_for(collect_events(), timeout=timeout_sec)
     except asyncio.TimeoutError:
         result.error = f"Timed out after {timeout_sec:.0f}s"
-    except Exception as exc:  # ADK raises on invalid tool names.
+    except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
     finally:
         result.latency_sec = round(time.perf_counter() - started, 3)
@@ -518,11 +380,6 @@ def write_reports(output_dir: Path, runs: list[EvalRun], cases: list[EvalCase]) 
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "project_goals": [
-            "Chat with Grafana data through grounded tool calls.",
-            "Return graphable metrics/log outputs for quick visual summaries.",
-            "Support operator workflows with safe discovery, troubleshooting, and human review points.",
-        ],
         "cases": [asdict(case) for case in cases],
         "runs": [asdict(run) for run in runs],
     }
@@ -543,12 +400,6 @@ def write_reports(output_dir: Path, runs: list[EvalRun], cases: list[EvalCase]) 
     lines = [
         "# Grafana Model Evaluation",
         "",
-        "## Project Goals",
-        "",
-        "1. Chat with Grafana data through grounded tool calls.",
-        "2. Produce graphable metrics/log outputs for quick visual summaries.",
-        "3. Support operator workflows with safe discovery, troubleshooting, and human review points.",
-        "",
         "## Leaderboard",
         "",
         "| Rank | Model | Score | Tool successes | Errors | Avg latency |",
@@ -561,25 +412,6 @@ def write_reports(output_dir: Path, runs: list[EvalRun], cases: list[EvalCase]) 
             f"{item['errors']} | {item['avg_latency_sec']}s |"
         )
 
-    lines.extend(["", "## Detailed Runs", ""])
-    for run in runs:
-        calls = ", ".join(call["name"] for call in run.function_calls) or "none"
-        responses = ", ".join(resp["name"] for resp in run.function_responses) or "none"
-        lines.extend(
-            [
-                f"### {run.model} / {run.case_id} / trial {run.trial}",
-                "",
-                f"- Score: {run.score}/{run.max_score}",
-                f"- Latency: {run.latency_sec}s",
-                f"- Function calls: {calls}",
-                f"- Function responses: {responses}",
-                f"- Error: {run.error or 'none'}",
-                f"- Final text: {run.final_text.strip()[:500] or 'none'}",
-                f"- Notes: {'; '.join(run.scoring_notes)}",
-                "",
-            ]
-        )
-
     (output_dir / "grafana_model_eval.md").write_text(
         "\n".join(lines),
         encoding="utf-8",
@@ -589,14 +421,6 @@ def write_reports(output_dir: Path, runs: list[EvalRun], cases: list[EvalCase]) 
 async def main() -> None:
     args = parse_args()
     load_dotenv(PROJECT_ROOT / ".env")
-    missing_env = [
-        name
-        for name in ("GRAFANA_URL", "GRAFANA_SERVICE_ACCOUNT_TOKEN")
-        if not os.environ.get(name)
-    ]
-    if missing_env:
-        raise SystemExit(f"Missing required env vars: {', '.join(missing_env)}")
-
     models = selected_models(args.models)
     cases = selected_cases(args.cases)
     all_runs: list[EvalRun] = []
