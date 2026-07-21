@@ -1,11 +1,3 @@
-# Prometheus Metric Reference — Agent Query-Construction Guide
-
-**Version:** 2.0
-**Scope:** 4 skills — CPU Usage (infra), Memory Usage (infra), Process CPU Usage (app), Process Memory Usage (app)
-**Status:** Phase 1 draft, pending verification (Phase 2)
-
----
-
 ## 0. Purpose and How To Use This Document
 
 This file is a **one-stop reference for constructing PromQL queries** — not a fixed list of the only questions this agent can answer. Each skill below has two layers:
@@ -395,8 +387,3 @@ predict_linear(process_resident_memory_bytes{job="prometheus"}[1h], 2*3600) > 10
 
 - Infra skills (CPU/Memory) answer *"is the machine under pressure?"* Process skills answer *"which specific process is causing it?"* A thorough "why is the server slow" answer often checks infra first, then drills into the relevant process skill if infra shows pressure.
 - All four skills share the exact same *shape* of advanced capability (smoothing, comparison, top-N, threshold, forecast) because they all draw on the same Section 1 Fundamentals — a future 5th skill should follow this same two-layer structure for consistency.
-
-## 7. Changelog
-
-- **v2.0** — Added routing-metadata layer (Purpose/Trigger Examples/Do Not Use/Known Information/Expected Behaviour) to every skill. Split the old combined "Process CPU & Memory" skill into two clean single-topic skills. Added Skill Directory and explicit generalization-scope note.
-- **v1.0** — Initial release: CPU (infra), Memory (infra), Process CPU/Memory (combined). Cookbook-only, no routing metadata.
