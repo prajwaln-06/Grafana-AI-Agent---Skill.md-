@@ -109,7 +109,11 @@ The detailed metric definitions below are authoritative for final metric selecti
 | Memory | Used framebuffer memory | `DCGM_FI_DEV_FB_USED` |
 | Memory | Available framebuffer memory | `DCGM_FI_DEV_FB_FREE` |
 | Tensor Cores | Tensor Core activity | `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` |
-
+| GPU | Compute/graphics engine (SM) active time — profiling-based | `DCGM_FI_PROF_GR_ENGINE_ACTIVE` |
+| Memory | Memory controller / bandwidth utilization | `DCGM_FI_DEV_MEM_COPY_UTIL` |
+| Temperature | Memory (HBM/VRAM) temperature | `DCGM_FI_DEV_MEMORY_TEMP` |
+| Power | Instantaneous GPU power draw | `DCGM_FI_DEV_POWER_USAGE` |
+| Power | Cumulative time spent power-throttled | `DCGM_FI_DEV_POWER_VIOLATION` |
 ---
 
 ## 4. Derived / Composed Measurements
@@ -200,6 +204,29 @@ may require clarification because multiple GPU-related measurements could reason
 
 Where the user's wording clearly identifies GPU utilization or GPU temperature, select only that measurement.
 
+#### GPU Utilization: Overall vs. Profiling-Based Engine Activity
+
+`DCGM_FI_DEV_GPU_UTIL` and `DCGM_FI_PROF_GR_ENGINE_ACTIVE` both describe GPU compute activity but come from different measurement subsystems within DCGM — the former is the general-purpose utilization signal, the latter is a profiling-based measurement of the graphics/SM engine specifically. The precise relationship and relative accuracy between these two signals should be treated as requiring verification against the DCGM reference/schema rather than asserted definitively.
+
+Select `DCGM_FI_PROF_GR_ENGINE_ACTIVE` when the request specifically references the compute/graphics engine, SM activity, or profiling-based utilization. Select `DCGM_FI_DEV_GPU_UTIL` for general "GPU utilization" or "how busy is the GPU" phrasing, consistent with its existing Intent Examples.
+
+A bare request such as "Show GPU utilization." should continue to resolve to `DCGM_FI_DEV_GPU_UTIL` unless the phrasing specifically invokes the compute/graphics engine.
+
+#### GPU Core Temperature vs. Memory Temperature
+
+`DCGM_FI_DEV_GPU_TEMP` measures the GPU core/die temperature. `DCGM_FI_DEV_MEMORY_TEMP` measures the temperature of a different physical component — the HBM/VRAM memory chips. These are not interchangeable and are not the same sensor.
+
+Generic phrasing ("How hot is the GPU?", "Show GPU temperature.") should resolve to `DCGM_FI_DEV_GPU_TEMP`, consistent with its existing Intent Examples. Select `DCGM_FI_DEV_MEMORY_TEMP` only when the request specifically references memory, VRAM, or HBM temperature.
+
+#### GPU Memory: Capacity vs. Bandwidth Utilization
+
+Framebuffer memory measurements (`DCGM_FI_DEV_FB_USED`, `DCGM_FI_DEV_FB_FREE`) describe memory *capacity* — how much space is occupied or free. `DCGM_FI_DEV_MEM_COPY_UTIL` describes memory *bandwidth* — how busy the memory controller/bus is, expressed as a percentage. These are fundamentally different physical quantities that happen to share the word "memory," and must not be treated as interchangeable despite both falling under the Memory category.
+
+A request for "GPU memory" alone remains ambiguous per **Local Fundamentals → Framebuffer Memory Measurements**, and that ambiguity now also includes distinguishing capacity from bandwidth when the request could plausibly mean either.
+
+#### GPU Power Measurements
+
+`DCGM_FI_DEV_POWER_USAGE` measures instantaneous power draw. `DCGM_FI_DEV_POWER_VIOLATION` measures cumulative time spent power-throttled — a materially different measurement (a rate/duration signal, not a power reading). A bare request such as "Show power." should be treated as ambiguous between these two; a request specifically about throttling, limits, or violations should resolve to `DCGM_FI_DEV_POWER_VIOLATION`.
 ---
 
 ### 5.4 Framebuffer Memory Measurements
@@ -358,6 +385,7 @@ MiB
 
 **Do Not Use / Confusable With:**
 - Available framebuffer memory -> `DCGM_FI_DEV_FB_FREE`
+- Memory bandwidth/controller utilization (not capacity) -> `DCGM_FI_DEV_MEM_COPY_UTIL`
 
 For broader distinctions between framebuffer memory measurements, see **Local Fundamentals → Framebuffer Memory Measurements**.
 
@@ -411,6 +439,7 @@ MiB
 
 **Do Not Use / Confusable With:**
 - Used framebuffer memory -> `DCGM_FI_DEV_FB_USED`
+- Memory bandwidth/controller utilization (not capacity) -> `DCGM_FI_DEV_MEM_COPY_UTIL`
 
 For broader distinctions between framebuffer memory measurements, see **Local Fundamentals → Framebuffer Memory Measurements**.
 
@@ -493,6 +522,255 @@ The resulting value represents Tensor Core activity as a percentage.
 
 No additional metric-specific transformation is specified by the project reference.
 
+### 6.6 `DCGM_FI_PROF_GR_ENGINE_ACTIVE`
+
+**Category:**  
+GPU
+
+**Purpose:**  
+Measures the fraction of time the compute/graphics (SM) engine was active, as a profiling-based measurement.
+
+**Type:**  
+Gauge
+
+**Unit:**  
+Percent
+
+**Use When:**
+- The user requests compute engine utilization specifically.
+- The user wants a profiling-based measurement of graphics/SM engine activity.
+- The user explicitly distinguishes this from general GPU utilization.
+
+**Do Not Use / Confusable With:**
+- General/overall GPU utilization -> `DCGM_FI_DEV_GPU_UTIL`
+- Tensor Core activity -> `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`
+
+For broader distinctions, see **Local Fundamentals → Confusable Metric Families → GPU Utilization: Overall vs. Profiling-Based Engine Activity**.
+
+**Relevant Scope / Dimensions:**
+- GPU
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Show compute engine utilization."
+- "How active is the SM/graphics engine?"
+
+**Edge / Confusable Example:**
+- "Show GPU utilization." -> `DCGM_FI_DEV_GPU_UTIL`
+- "Show GPU." -> `AMBIGUOUS`
+
+**Metric-Specific Query / Result Semantics:**
+
+The raw Gauge value directly represents the requested measurement.
+
+The resulting value represents the fraction of time the compute/graphics engine was active, expressed as a percentage.
+
+No additional metric-specific transformation is specified by the project reference.
+
+---
+
+### 6.7 `DCGM_FI_DEV_MEM_COPY_UTIL`
+
+**Category:**  
+Memory
+
+**Purpose:**  
+Measures memory controller (bandwidth) utilization.
+
+**Type:**  
+Gauge
+
+**Unit:**  
+Percent
+
+**Use When:**
+- The user requests memory bandwidth utilization.
+- The user wants to know how busy the memory controller/bus is.
+- The user explicitly distinguishes bandwidth from memory capacity.
+
+**Do Not Use / Confusable With:**
+- Used framebuffer memory (capacity, not bandwidth) -> `DCGM_FI_DEV_FB_USED`
+- Available framebuffer memory (capacity, not bandwidth) -> `DCGM_FI_DEV_FB_FREE`
+
+For broader distinctions, see **Local Fundamentals → Confusable Metric Families → GPU Memory: Capacity vs. Bandwidth Utilization**.
+
+**Relevant Scope / Dimensions:**
+- GPU
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Show memory bandwidth utilization."
+- "How busy is the memory controller?"
+
+**Edge / Confusable Example:**
+- "Show GPU memory." -> `AMBIGUOUS`
+- "How much GPU memory is used?" -> `DCGM_FI_DEV_FB_USED`
+
+**Metric-Specific Query / Result Semantics:**
+
+The raw Gauge value directly represents the requested measurement.
+
+The resulting value represents memory controller utilization as a percentage.
+
+No additional metric-specific transformation is specified by the project reference.
+
+---
+
+### 6.8 `DCGM_FI_DEV_MEMORY_TEMP`
+
+**Category:**  
+Temperature
+
+**Purpose:**  
+Measures HBM/VRAM (memory) temperature.
+
+**Type:**  
+Gauge
+
+**Unit:**  
+Degrees Celsius
+
+**Use When:**
+- The user requests memory or VRAM temperature specifically.
+- The user wants to distinguish memory thermal conditions from core GPU temperature.
+
+**Do Not Use / Confusable With:**
+- GPU core/die temperature -> `DCGM_FI_DEV_GPU_TEMP`
+
+For broader distinctions, see **Local Fundamentals → Confusable Metric Families → GPU Core Temperature vs. Memory Temperature**.
+
+**Relevant Scope / Dimensions:**
+- GPU
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Show memory temperature."
+- "How hot is the VRAM?"
+
+**Edge / Confusable Example:**
+- "How hot is the GPU?" -> `DCGM_FI_DEV_GPU_TEMP`
+- "Show GPU temperature." -> `DCGM_FI_DEV_GPU_TEMP`
+
+**Metric-Specific Query / Result Semantics:**
+
+The raw Gauge value directly represents the requested measurement.
+
+The resulting value represents the current HBM/VRAM temperature in degrees Celsius.
+
+No additional metric-specific transformation is specified by the project reference.
+
+---
+
+### 6.9 `DCGM_FI_DEV_POWER_USAGE`
+
+**Category:**  
+Power
+
+**Purpose:**  
+Measures instantaneous GPU power draw.
+
+**Type:**  
+Gauge
+
+**Unit:**  
+Watts
+
+**Use When:**
+- The user requests current power consumption or power draw.
+- The user wants to monitor GPU power usage.
+
+**Do Not Use / Confusable With:**
+- Cumulative power-throttling time -> `DCGM_FI_DEV_POWER_VIOLATION`
+
+For broader distinctions, see **Local Fundamentals → Confusable Metric Families → GPU Power Measurements**.
+
+**Relevant Scope / Dimensions:**
+- GPU
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Show power consumption."
+- "How much power is the GPU drawing?"
+
+**Edge / Confusable Example:**
+- "Show power." -> `AMBIGUOUS`
+- "Has the GPU been power-throttled?" -> `DCGM_FI_DEV_POWER_VIOLATION`
+
+**Metric-Specific Query / Result Semantics:**
+
+The raw Gauge value directly represents the requested measurement.
+
+The resulting value represents instantaneous GPU power draw in watts.
+
+No additional metric-specific transformation is specified by the project reference.
+
+---
+
+### 6.10 `DCGM_FI_DEV_POWER_VIOLATION`
+
+**Category:**  
+Power
+
+**Purpose:**  
+Measures the cumulative time the GPU has spent power-throttled.
+
+**Type:**  
+Counter
+
+**Unit:**  
+Cumulative time (unit as exposed by the datasource — confirm before charting)
+
+**Use When:**
+- The user wants to detect or monitor power throttling over time.
+- The user asks whether the GPU has been limited by power constraints.
+
+**Do Not Use / Confusable With:**
+- Instantaneous power draw -> `DCGM_FI_DEV_POWER_USAGE`
+
+For broader distinctions, see **Local Fundamentals → Confusable Metric Families → GPU Power Measurements**.
+
+**Relevant Scope / Dimensions:**
+- GPU
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Has the GPU been power-throttled?"
+- "Detect power throttling over time."
+
+**Edge / Confusable Example:**
+- "How much power is being drawn?" -> `DCGM_FI_DEV_POWER_USAGE`
+- "Show power." -> `AMBIGUOUS`
+
+**Metric-Specific Query / Result Semantics:**
+
+This Counter represents cumulative time spent power-throttled since the last reset.
+
+The raw Counter value does not directly represent a meaningful current measurement. A meaningful user-facing measurement (e.g., throttling rate or whether throttling occurred recently) requires interpretation as a rate or increase over a time interval, following the shared Counter handling defined by the main skill.
 ---
 
 ## 7. Sub-Skill Guardrails

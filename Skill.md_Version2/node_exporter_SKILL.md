@@ -110,7 +110,11 @@ The detailed metric definitions below are authoritative for final metric selecti
 | Memory | Available system memory | `node_memory_MemAvailable_bytes` |
 | Filesystem | Available filesystem space | `node_filesystem_avail_bytes` |
 | Filesystem | Total filesystem capacity | `node_filesystem_size_bytes` |
-
+| Load | 5-minute operating-system load average | `node_load5` |
+| Load | 15-minute operating-system load average | `node_load15` |
+| CPU | Context-switch / scheduling activity | `node_context_switches_total` |
+| CPU | Interrupt activity | `node_intr_total` |
+| Memory | Total physical memory | `node_memory_MemTotal_bytes` |
 ---
 
 ## 4. Derived / Composed Measurements
@@ -201,19 +205,38 @@ may require clarification because multiple CPU-related measurements could reason
 
 Where the user's wording clearly identifies CPU utilization or load average, select only that measurement.
 
+Node Exporter also exposes lower-level kernel activity counters — context switches (`node_context_switches_total`) and interrupts (`node_intr_total`) — representing scheduler and interrupt-handling activity respectively. These are distinct from both CPU utilization and load average, and from each other. They are typically requested using specific technical language ("context switching," "interrupt activity") rather than generic phrasing like "show CPU."
+
+#### Load-Average Time Windows
+
+Node Exporter exposes operating-system load average at three time windows: 1-minute (`node_load1`), 5-minute (`node_load5`), and 15-minute (`node_load15`). These represent the same underlying measurement sampled over different windows — not three materially different measurements in the way CPU utilization and load average are different from each other.
+
+Select a specific window when the user's wording indicates one:
+
+- immediate/current load -> `node_load1`
+- sustained load over several minutes -> `node_load5`
+- long-term or trend-oriented load -> `node_load15`
+
+A bare request such as "Show the load average." with no further qualifier should be treated as ambiguous among the three windows, since each is a separately exposed metric rather than a parameter of a single metric.
+
 ---
 
 ### 5.4 Memory Measurements
 
 Memory measurements represent different aspects of system memory.
 
-This sub-skill currently supports **available system memory**.
+This sub-skill currently supports:
 
-Other memory measurements exposed by Node Exporter are semantically distinct and are not represented by the metrics defined in this sub-skill.
+- available system memory;
+- total physical memory.
+
+These measurements are semantically distinct.
+
+When the requested memory measurement is clear, select the corresponding metric.
 
 If the user explicitly requests a memory measurement that is not represented by this sub-skill, classify the request as unsupported.
 
-If the user requests only "memory" without indicating the intended measurement, request clarification rather than assuming which measurement is desired.
+When the request simply asks for "memory" without indicating the intended measurement, and multiple memory measurements are supported by this sub-skill, request clarification rather than assuming which measurement is desired.
 
 ---
 
@@ -364,6 +387,7 @@ Bytes
 - The user wants to monitor available system memory.
 
 **Do Not Use / Confusable With:**
+- Total physical memory -> `node_memory_MemTotal_bytes`
 
 For broader distinctions between memory measurements, see **Local Fundamentals → Memory Measurements**.
 
@@ -502,6 +526,260 @@ The resulting value represents the total filesystem capacity, expressed in bytes
 
 No additional metric-specific transformation is specified by the project reference.
 
+### 6.6 `node_load5`
+
+**Category:**  
+Load
+
+**Purpose:**  
+Measures the 5-minute operating-system load average.
+
+**Type:**  
+Gauge
+
+**Unit:**  
+Load average
+
+**Use When:**
+- The user requests the 5-minute load average.
+- The user wants to know about sustained system load over several minutes.
+- The user wants a smoothed view of load beyond the immediate moment.
+
+**Do Not Use / Confusable With:**
+- 1-minute load average -> `node_load1`
+- 15-minute load average -> `node_load15`
+- CPU utilization -> `node_cpu_seconds_total`
+
+For broader distinctions between load-average windows, see **Local Fundamentals → Confusable Metric Families → Load-Average Time Windows**.
+
+**Relevant Scope / Dimensions:**
+- Host
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Show sustained system load."
+- "What's the 5-minute load average?"
+
+**Edge / Confusable Example:**
+- "Show the load average." -> `AMBIGUOUS`
+- "Show the long-term load trend." -> `node_load15`
+- "Is the system overloaded right now?" -> `node_load1`
+
+**Metric-Specific Query / Result Semantics:**
+
+The raw Gauge value directly represents the requested measurement.
+
+The resulting value represents the current 5-minute operating-system load average.
+
+No additional metric-specific transformation is specified by the project reference.
+
+---
+
+### 6.7 `node_load15`
+
+**Category:**  
+Load
+
+**Purpose:**  
+Measures the 15-minute operating-system load average.
+
+**Type:**  
+Gauge
+
+**Unit:**  
+Load average
+
+**Use When:**
+- The user requests the 15-minute load average.
+- The user wants to know about long-term system load trends.
+- The user wants to distinguish a sustained trend from a brief spike.
+
+**Do Not Use / Confusable With:**
+- 1-minute load average -> `node_load1`
+- 5-minute load average -> `node_load5`
+- CPU utilization -> `node_cpu_seconds_total`
+
+For broader distinctions between load-average windows, see **Local Fundamentals → Confusable Metric Families → Load-Average Time Windows**.
+
+**Relevant Scope / Dimensions:**
+- Host
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Show the long-term load trend."
+- "What's the 15-minute load average?"
+
+**Edge / Confusable Example:**
+- "Show the load average." -> `AMBIGUOUS`
+- "Show sustained load over the last few minutes." -> `node_load5`
+- "Is the system overloaded right now?" -> `node_load1`
+
+**Metric-Specific Query / Result Semantics:**
+
+The raw Gauge value directly represents the requested measurement.
+
+The resulting value represents the current 15-minute operating-system load average.
+
+No additional metric-specific transformation is specified by the project reference.
+
+---
+
+### 6.8 `node_context_switches_total`
+
+**Category:**  
+CPU
+
+**Purpose:**  
+Measures the cumulative total number of context switches performed by the kernel scheduler.
+
+**Type:**  
+Counter
+
+**Unit:**  
+Count (cumulative)
+
+**Use When:**
+- The user requests context-switch activity.
+- The user wants to know whether the system is experiencing high scheduling activity.
+- The user wants to monitor kernel scheduler overhead.
+
+**Do Not Use / Confusable With:**
+- CPU utilization -> `node_cpu_seconds_total`
+- Interrupt activity -> `node_intr_total`
+- Operating-system load average -> `node_load1`
+
+**Relevant Scope / Dimensions:**
+- Host
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Show context switches."
+- "Is the system doing a lot of context switching?"
+
+**Edge / Confusable Example:**
+- "How busy is the CPU?" -> `node_cpu_seconds_total`
+- "Show interrupt activity." -> `node_intr_total`
+
+**Metric-Specific Query / Result Semantics:**
+
+This Counter represents the cumulative number of context switches since boot.
+
+The raw Counter value does not directly represent a meaningful current measurement. A meaningful user-facing measurement (context switches per second) requires interpretation as a rate over a time interval, following the shared Counter handling defined by the main skill.
+
+---
+
+### 6.9 `node_intr_total`
+
+**Category:**  
+CPU
+
+**Purpose:**  
+Measures the cumulative total number of interrupts handled by the system.
+
+**Type:**  
+Counter
+
+**Unit:**  
+Count (cumulative)
+
+**Use When:**
+- The user requests interrupt activity.
+- The user wants to know whether the system is handling an unusually high volume of interrupts.
+- The user wants to monitor interrupt-heavy workload behavior.
+
+**Do Not Use / Confusable With:**
+- CPU utilization -> `node_cpu_seconds_total`
+- Context-switch activity -> `node_context_switches_total`
+- Operating-system load average -> `node_load1`
+
+**Relevant Scope / Dimensions:**
+- Host
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "Show interrupt activity."
+- "Is this an interrupt-heavy workload?"
+
+**Edge / Confusable Example:**
+- "How busy is the CPU?" -> `node_cpu_seconds_total`
+- "Show context switches." -> `node_context_switches_total`
+
+**Metric-Specific Query / Result Semantics:**
+
+This Counter represents the cumulative number of interrupts handled since boot.
+
+As with other Counters, the raw value does not directly represent a meaningful current measurement. A meaningful user-facing measurement (interrupts per second) requires interpretation as a rate over a time interval, following the shared Counter handling defined by the main skill.
+
+---
+
+### 6.10 `node_memory_MemTotal_bytes`
+
+**Category:**  
+Memory
+
+**Purpose:**  
+Measures the total amount of physical memory installed on the host.
+
+**Type:**  
+Gauge
+
+**Unit:**  
+Bytes
+
+**Use When:**
+- The user requests total physical memory.
+- The user wants to know the total amount of RAM installed.
+- The user wants to compare total memory capacity across hosts.
+
+**Do Not Use / Confusable With:**
+- Available system memory -> `node_memory_MemAvailable_bytes`
+
+For broader distinctions between memory measurements, see **Local Fundamentals → Memory Measurements**.
+
+**Relevant Scope / Dimensions:**
+- Host
+
+**Known Labels:**
+
+Not yet verified from the available datasource/schema.
+
+Do not infer or invent label names.
+
+**Intent Examples:**
+- "How much total RAM does this host have?"
+- "Show total physical memory."
+
+**Edge / Confusable Example:**
+- "Show memory." -> `AMBIGUOUS`
+- "How much memory is available?" -> `node_memory_MemAvailable_bytes`
+
+**Metric-Specific Query / Result Semantics:**
+
+The raw Gauge value directly represents the requested measurement.
+
+The resulting value represents the total physical memory installed on the host, expressed in bytes. This value is expected to remain effectively constant per host and should not be treated as a live/fluctuating measurement.
+
+No additional metric-specific transformation is specified by the project reference.
 ---
 
 ## 7. Sub-Skill Guardrails
