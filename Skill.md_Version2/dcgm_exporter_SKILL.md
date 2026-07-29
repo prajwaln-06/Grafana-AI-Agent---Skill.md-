@@ -13,7 +13,7 @@ version: 1.0
 
 This sub-skill interprets user requests related to NVIDIA GPU observability using metrics exposed by the DCGM Exporter.
 
-It covers GPU utilization, GPU temperature, framebuffer memory usage, Tensor Core activity, and other GPU resource measurements represented by the metrics defined in this sub-skill.
+It covers GPU utilization, GPU temperature, GPU memory capacity, memory bandwidth utilization, GPU power measurements, Tensor Core activity, and other GPU resource measurements represented by the metrics defined in this sub-skill.
 
 ### Trigger Examples
 
@@ -26,6 +26,8 @@ Examples of user requests that should route to this sub-skill:
 - "How much GPU memory is available?"
 - "Show Tensor Core utilization."
 - "Compare GPU utilization across all GPUs."
+- "Show GPU power consumption."
+- "How busy is the memory controller?"
 
 These examples illustrate intent and are not an exhaustive whitelist.
 
@@ -104,13 +106,13 @@ The detailed metric definitions below are authoritative for final metric selecti
 
 | Category | Intent / Measurement | Metric |
 |---|---|---|
-| GPU | GPU utilization | `DCGM_FI_DEV_GPU_UTIL` |
+| GPU Utilization| GPU utilization | `DCGM_FI_DEV_GPU_UTIL` |
 | Temperature | GPU temperature | `DCGM_FI_DEV_GPU_TEMP` |
-| Memory | Used framebuffer memory | `DCGM_FI_DEV_FB_USED` |
-| Memory | Available framebuffer memory | `DCGM_FI_DEV_FB_FREE` |
+| GPU Memory | Used framebuffer memory | `DCGM_FI_DEV_FB_USED` |
+| GPU Memory | Available framebuffer memory | `DCGM_FI_DEV_FB_FREE` |
 | Tensor Cores | Tensor Core activity | `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` |
-| GPU | Compute/graphics engine (SM) active time — profiling-based | `DCGM_FI_PROF_GR_ENGINE_ACTIVE` |
-| Memory | Memory controller / bandwidth utilization | `DCGM_FI_DEV_MEM_COPY_UTIL` |
+| GPU Utilization | Compute/graphics engine (SM) active time — profiling-based | `DCGM_FI_PROF_GR_ENGINE_ACTIVE` |
+| GPU Memory | Memory controller / bandwidth utilization | `DCGM_FI_DEV_MEM_COPY_UTIL` |
 | Temperature | Memory (HBM/VRAM) temperature | `DCGM_FI_DEV_MEMORY_TEMP` |
 | Power | Instantaneous GPU power draw | `DCGM_FI_DEV_POWER_USAGE` |
 | Power | Cumulative time spent power-throttled | `DCGM_FI_DEV_POWER_VIOLATION` |
@@ -236,7 +238,10 @@ Framebuffer memory measurements represent different aspects of GPU memory.
 This sub-skill currently supports:
 
 - used framebuffer memory;
-- available framebuffer memory.
+- available framebuffer memory;
+- memory controller/bandwidth utilization.
+
+If the user explicitly requests a GPU memory measurement that is not represented by this sub-skill, classify the request as unsupported.
 
 These measurements are semantically distinct.
 
@@ -261,7 +266,7 @@ Requests that explicitly mention Tensor Cores should always select the Tensor Co
 ### 6.1 `DCGM_FI_DEV_GPU_UTIL`
 
 **Category:**  
-GPU
+GPU Utilization
 
 **Purpose:**  
 Measures GPU utilization.
@@ -280,6 +285,7 @@ Percent
 **Do Not Use / Confusable With:**
 - Tensor Core activity -> `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`
 - GPU temperature -> `DCGM_FI_DEV_GPU_TEMP`
+- Compute/graphics (SM) engine activity -> `DCGM_FI_PROF_GR_ENGINE_ACTIVE`
 
 For broader distinctions between GPU-related measurements, see **Local Fundamentals → Confusable Metric Families**.
 
@@ -300,6 +306,7 @@ Do not infer or invent label names.
 - "Show GPU." -> `AMBIGUOUS`
 - "How hot is the GPU?" -> `DCGM_FI_DEV_GPU_TEMP`
 - "Are Tensor Cores being used?" -> `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`
+- "Show compute engine utilization." -> `DCGM_FI_PROF_GR_ENGINE_ACTIVE`
 - "Show GPU utilization and temperature." -> Select both metrics.
 
 **Metric-Specific Query / Result Semantics:**
@@ -333,6 +340,7 @@ Degrees Celsius
 
 **Do Not Use / Confusable With:**
 - GPU utilization -> `DCGM_FI_DEV_GPU_UTIL`
+- Memory (HBM/VRAM) temperature -> `DCGM_FI_DEV_MEMORY_TEMP`
 
 For broader distinctions between GPU-related measurements, see **Local Fundamentals → Confusable Metric Families**.
 
@@ -352,6 +360,7 @@ Do not infer or invent label names.
 **Edge / Confusable Examples:**
 - "Show GPU." -> `AMBIGUOUS`
 - "How busy is the GPU?" -> `DCGM_FI_DEV_GPU_UTIL`
+- "Show memory temperature." -> `DCGM_FI_DEV_MEMORY_TEMP`
 - "Show GPU temperature and utilization." -> Select both metrics.
 
 **Metric-Specific Query / Result Semantics:**
@@ -367,7 +376,7 @@ No additional metric-specific transformation is specified by the project referen
 ### 6.3 `DCGM_FI_DEV_FB_USED`
 
 **Category:**  
-Memory
+GPU Memory
 
 **Purpose:**  
 Measures the amount of framebuffer memory currently in use.
@@ -376,7 +385,7 @@ Measures the amount of framebuffer memory currently in use.
 Gauge
 
 **Unit:**  
-MiB
+Bytes
 
 **Use When:**
 - The user requests used GPU memory.
@@ -412,7 +421,7 @@ Do not infer or invent label names.
 
 The raw Gauge value directly represents the requested measurement.
 
-The resulting value represents the amount of framebuffer memory currently in use, expressed in MiB.
+The resulting value represents the amount of framebuffer memory currently in use, expressed in Bytes.
 
 No additional metric-specific transformation is specified by the project reference.
 
@@ -421,7 +430,7 @@ No additional metric-specific transformation is specified by the project referen
 ### 6.4 `DCGM_FI_DEV_FB_FREE`
 
 **Category:**  
-Memory
+GPU Memory
 
 **Purpose:**  
 Measures the amount of framebuffer memory currently available.
@@ -430,7 +439,7 @@ Measures the amount of framebuffer memory currently available.
 Gauge
 
 **Unit:**  
-MiB
+Bytes
 
 **Use When:**
 - The user requests available GPU memory.
@@ -465,7 +474,7 @@ Do not infer or invent label names.
 
 The raw Gauge value directly represents the requested measurement.
 
-The resulting value represents the amount of framebuffer memory currently available, expressed in MiB.
+The resulting value represents the amount of framebuffer memory currently available, expressed in Bytes.
 
 No additional metric-specific transformation is specified by the project reference.
 
@@ -522,10 +531,12 @@ The resulting value represents Tensor Core activity as a percentage.
 
 No additional metric-specific transformation is specified by the project reference.
 
+---
+
 ### 6.6 `DCGM_FI_PROF_GR_ENGINE_ACTIVE`
 
 **Category:**  
-GPU
+GPU Utilization
 
 **Purpose:**  
 Measures the fraction of time the compute/graphics (SM) engine was active, as a profiling-based measurement.
@@ -534,7 +545,7 @@ Measures the fraction of time the compute/graphics (SM) engine was active, as a 
 Gauge
 
 **Unit:**  
-Percent
+Fraction of time active (representation as a percentage or 0–1 fraction should be verified against the datasource/schema before charting)
 
 **Use When:**
 - The user requests compute engine utilization specifically.
@@ -560,7 +571,7 @@ Do not infer or invent label names.
 - "Show compute engine utilization."
 - "How active is the SM/graphics engine?"
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "Show GPU utilization." -> `DCGM_FI_DEV_GPU_UTIL`
 - "Show GPU." -> `AMBIGUOUS`
 
@@ -568,7 +579,9 @@ Do not infer or invent label names.
 
 The raw Gauge value directly represents the requested measurement.
 
-The resulting value represents the fraction of time the compute/graphics engine was active, expressed as a percentage.
+The resulting value represents the fraction of time the compute/graphics engine was active.
+
+The exact numerical representation (for example, percentage or 0–1 fraction) should be verified against the datasource/schema before presentation.
 
 No additional metric-specific transformation is specified by the project reference.
 
@@ -577,7 +590,7 @@ No additional metric-specific transformation is specified by the project referen
 ### 6.7 `DCGM_FI_DEV_MEM_COPY_UTIL`
 
 **Category:**  
-Memory
+GPU Memory
 
 **Purpose:**  
 Measures memory controller (bandwidth) utilization.
@@ -612,7 +625,7 @@ Do not infer or invent label names.
 - "Show memory bandwidth utilization."
 - "How busy is the memory controller?"
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "Show GPU memory." -> `AMBIGUOUS`
 - "How much GPU memory is used?" -> `DCGM_FI_DEV_FB_USED`
 
@@ -662,7 +675,7 @@ Do not infer or invent label names.
 - "Show memory temperature."
 - "How hot is the VRAM?"
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "How hot is the GPU?" -> `DCGM_FI_DEV_GPU_TEMP`
 - "Show GPU temperature." -> `DCGM_FI_DEV_GPU_TEMP`
 
@@ -712,7 +725,7 @@ Do not infer or invent label names.
 - "Show power consumption."
 - "How much power is the GPU drawing?"
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "Show power." -> `AMBIGUOUS`
 - "Has the GPU been power-throttled?" -> `DCGM_FI_DEV_POWER_VIOLATION`
 
@@ -762,7 +775,7 @@ Do not infer or invent label names.
 - "Has the GPU been power-throttled?"
 - "Detect power throttling over time."
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "How much power is being drawn?" -> `DCGM_FI_DEV_POWER_USAGE`
 - "Show power." -> `AMBIGUOUS`
 
