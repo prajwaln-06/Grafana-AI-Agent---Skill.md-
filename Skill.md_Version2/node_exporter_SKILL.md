@@ -173,7 +173,7 @@ By contrast, requests such as:
 
 - "Show CPU utilization."
 - "How much memory is available?"
-- "Show load average."
+- "Show the 1-minute load average."
 
 identify a single measurement even if they omit details such as host selection or time range.
 
@@ -253,6 +253,8 @@ These measurements are semantically distinct.
 
 When the requested filesystem measurement is clear, select the corresponding metric.
 
+If the user explicitly requests a filesystem measurement that is not represented by this sub-skill, classify the request as unsupported.
+
 When the request simply asks for "disk" or "storage" and multiple filesystem measurements are supported by this sub-skill, request clarification.
 
 ---
@@ -280,6 +282,8 @@ Seconds
 
 **Do Not Use / Confusable With:**
 - Operating-system load average -> `node_load1`
+- Context-switch activity -> `node_context_switches_total`
+- Interrupt activity -> `node_intr_total`
 
 For broader distinctions between CPU-related measurements, see **Local Fundamentals → Confusable Metric Families**.
 
@@ -335,6 +339,8 @@ Load average
 
 **Do Not Use / Confusable With:**
 - CPU utilization -> `node_cpu_seconds_total`
+- 5-minute load average -> `node_load5`
+- 15-minute load average -> `node_load15`
 
 For broader distinctions between CPU-related measurements, see **Local Fundamentals → Confusable Metric Families**.
 
@@ -565,7 +571,7 @@ Do not infer or invent label names.
 - "Show sustained system load."
 - "What's the 5-minute load average?"
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "Show the load average." -> `AMBIGUOUS`
 - "Show the long-term load trend." -> `node_load15`
 - "Is the system overloaded right now?" -> `node_load1`
@@ -619,7 +625,7 @@ Do not infer or invent label names.
 - "Show the long-term load trend."
 - "What's the 15-minute load average?"
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "Show the load average." -> `AMBIGUOUS`
 - "Show sustained load over the last few minutes." -> `node_load5`
 - "Is the system overloaded right now?" -> `node_load1`
@@ -671,7 +677,7 @@ Do not infer or invent label names.
 - "Show context switches."
 - "Is the system doing a lot of context switching?"
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "How busy is the CPU?" -> `node_cpu_seconds_total`
 - "Show interrupt activity." -> `node_intr_total`
 
@@ -720,7 +726,7 @@ Do not infer or invent label names.
 - "Show interrupt activity."
 - "Is this an interrupt-heavy workload?"
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "How busy is the CPU?" -> `node_cpu_seconds_total`
 - "Show context switches." -> `node_context_switches_total`
 
@@ -769,7 +775,7 @@ Do not infer or invent label names.
 - "How much total RAM does this host have?"
 - "Show total physical memory."
 
-**Edge / Confusable Example:**
+**Edge / Confusable Examples:**
 - "Show memory." -> `AMBIGUOUS`
 - "How much memory is available?" -> `node_memory_MemAvailable_bytes`
 
