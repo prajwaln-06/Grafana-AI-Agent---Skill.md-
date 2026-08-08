@@ -12,6 +12,15 @@ trigger_keywords:
   - GPU clocks
   - GPU throttling
   - Tensor Core utilization
+  - FP32 utilization
+  - FP64 utilization
+  - FP16 utilization
+  - FP32 pipeline
+  - FP64 pipeline
+  - FP16 pipeline
+  - graphics engine activity
+  - GPU engine activity
+  - SM activity
 
 domains:
   - id: compute
