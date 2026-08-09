@@ -121,6 +121,15 @@ def execute_contract(contract, prometheus_base_url="http://localhost:9090",
     entry. Every other status passes through unchanged.
     """
     mode = contract.get("mode")
+    if mode is None and "status" in contract:
+        # Some statuses (ambiguous_metric, unsupported_metric, declined,
+        # out_of_scope_action) never strictly required "mode" to be a
+        # standalone response in earlier prompt phrasings, and models
+        # don't always include it even when instructed to. An object with
+        # a top-level "status" key and no "results" array is unambiguously
+        # a single-shape response, so default to that rather than raising
+        # over a field that adds no real information here.
+        mode = "single"
 
     if mode == "single":
         return _execute_one_entry(contract, prometheus_base_url, opensearch_base_url)
@@ -133,4 +142,4 @@ def execute_contract(contract, prometheus_base_url="http://localhost:9090",
         ]
         return enriched
 
-    raise ValueError(f"Contract has no valid 'mode' field: {contract!r}")
+    raise ValueError(f"Contract has no valid 'mode' field and isn't inferable: {contract!r}")

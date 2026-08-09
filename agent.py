@@ -115,13 +115,15 @@ def extract_routing_context(main_skill_text: str) -> str:
 
 def extract_generation_context(main_skill_text: str) -> str:
     """
-    Phase 2/3 need the actual rule text for Multi-Result Protocol,
-    Parameter Defaults, Error Handling, and the Output Contract itself
-    -- sending the real section text here (instead of only a paraphrased
-    summary) is what Steps 4-9 of the Construction Procedure assume
-    Phase 2 has already seen.
+    Phase 2/3 need the actual rule text for the Construction Procedure
+    itself, Multi-Result Protocol, Parameter Defaults, Error Handling,
+    and the Output Contract -- sending the real section text here
+    (instead of only a paraphrased summary) is what "Steps 4-9" in the
+    prompt refers to. Section 3 was missing from this list originally,
+    meaning the steps were referenced by name but their actual text was
+    never sent -- fixed here.
     """
-    return _extract_sections(main_skill_text, ("## 2.", "## 6.", "## 7.", "## 8.", "## 9."))
+    return _extract_sections(main_skill_text, ("## 2.", "## 3.", "## 6.", "## 7.", "## 8.", "## 9."))
 
 
 async def call_gemini_with_retry(system_instruction: str, prompt: str,
@@ -365,19 +367,40 @@ async def query_generator(user_question: str, routing_data: dict, domain_data: d
     --- END VERIFIED LIVE LABELS ---
 
     ADDITIONAL REINFORCEMENT (in addition to, never overriding, the Output Contract above):
-    1. State explicitly in `explanation` whether the chosen metric is a Counter or a Gauge, and why that
-       affects the query. Counters must be wrapped in rate()/increase(); Gauges must NEVER be wrapped in
-       rate(), irate(), or increase() -- if the question's wording implies a rate over a Gauge, ignore that
-       phrasing, return the plain Gauge value, and explain why in `explanation`.
-    2. Use ONLY label keys that appear in the VERIFIED LIVE LABELS block above for a given metric. If a
+    1. Copy the chosen metric's Type (Counter or Gauge) EXACTLY from that metric's own "#### Type" field in the
+       loaded domain content above -- never state it from memory or general Prometheus/GPU knowledge, even if
+       you are confident. State it explicitly in `explanation`. If a metric was selected but you cannot find
+       its "#### Type" field in the content above, treat that as a documentation gap and do not guess.
+    2. Counters must be wrapped in rate() or increase() BEFORE any aggregation, never aggregated raw. Correct:
+       `sum(increase(metric_name[1h])) by (gpu)`. WRONG: `sum(metric_name) by (gpu)` -- this aggregates the raw,
+       ever-increasing counter value, which is meaningless. Gauges must NEVER be wrapped in rate(), irate(), or
+       increase() -- if the question's wording implies a rate over a Gauge, ignore that phrasing, return the
+       plain Gauge value, and explain why in `explanation`.
+    3. A domain file's "Query Examples" section saying "no verified example available, do not invent a literal
+       query example" governs that DOCUMENTATION section only -- it is not an instruction to refuse building a
+       query at runtime. Construct the query normally using the Database Fundamentals' standard Counter/Gauge
+       rules, UNLESS that specific metric's own "Metric-Specific Query/Result Semantics" field explicitly
+       states construction cannot proceed. Delegating construction to "the Main Skill and Database Fundamentals"
+       (as many metrics do) means proceed with their standard rules, not refuse.
+    4. Use ONLY label keys that appear in the VERIFIED LIVE LABELS block above for a given metric. If a
        metric shows no live labels, or the user names an entity with no verified label to filter by, build
        the query at its safe aggregate/all-entities scope per Section 7's default, and say so in `explanation`
        -- never invent a label name.
-    3. For "ambiguous_metric", `candidates` must contain at least two objects. If only one real metric is
+    5. For "ambiguous_metric", `candidates` must contain at least two objects. If only one real metric is
        genuinely plausible, add a second generic candidate such as
        {{"name": "Other Unsupported Measurements", "purpose": "Other measurements not currently supported by this exporter"}}
        rather than fabricating a second real metric name.
-    4. Any exporter listed above under "NO MATCHING DOMAIN" must produce a result with status "unsupported_metric".
+    6. Any exporter listed above under "NO MATCHING DOMAIN" must produce a result with status "unsupported_metric".
+    7. `sub_file_used` MUST be EXACTLY the sub_file_id shown in the exporter/domain content above (e.g.
+       "node_exporter"). NEVER append a domain, slash, or category (e.g. "node_exporter/cpu" is WRONG).
+    8. `measurement_used.type` is "raw_metric" for ANY single documented metric -- this includes cases where
+       the query applies rate(), increase(), or arithmetic (like `100 - (...)  * 100`) to that one metric.
+       Wrapping a single metric in a formula does NOT make it "derived_measurement". `type` is
+       "derived_measurement" ONLY when the query combines two or more DISTINCT metric names together, AND
+       that specific combination is explicitly pre-defined in this exporter's own Derived/Composed
+       Measurements section. Since no derived/composed measurements are currently defined for this exporter,
+       `type` must currently always be "raw_metric" -- never invent a derived measurement that isn't
+       documented, and never label a single-metric formula as derived.
 
     Output ONLY the raw JSON contract. Do not wrap it in markdown code fences."""
 
@@ -429,6 +452,18 @@ async def validation_tester(user_question: str, routing_data: dict, domain_data:
     5. If status was ambiguous_metric, does candidates contain at least two objects with name and purpose?
        (Accept a generic candidate like "Other Unsupported Measurements" as valid.)
     6. For Gauge metrics, was rate()/irate()/increase() correctly avoided?
+    7. Is `sub_file_used` exactly a plain sub_file_id (e.g. "node_exporter"), with no domain or slash appended
+       (e.g. "node_exporter/cpu" is INVALID)? If yes, FAIL.
+    8. Is `measurement_used.type` "raw_metric" for any query touching only ONE documented metric name, even
+       if that query applies rate()/increase()/arithmetic to it? "derived_measurement" is valid ONLY when two
+       or more distinct metric names are combined AND that combination is explicitly pre-defined in the
+       exporter's Derived/Composed Measurements section. If a single-metric formula was labeled
+       "derived_measurement", FAIL.
+    9. Does the `explanation`'s stated Counter/Gauge type for the selected metric EXACTLY match that metric's
+       own "#### Type" field in the domain content above? If the explanation states a type that contradicts
+       the documented "#### Type" field, FAIL -- this is a factual hallucination, not a minor wording issue.
+    10. Is a Counter metric ever aggregated (sum/avg/etc.) WITHOUT first being wrapped in rate() or increase()?
+        (e.g. `sum(some_counter) by (label)` with no rate()/increase() inside is INVALID.) If yes, FAIL.
 
     Output a STRICTLY CONCISE report in this exact format, nothing else:
 
@@ -453,6 +488,24 @@ def _validation_passed(validation_report: str) -> bool:
 # ============================================================================
 # PHASE 4: EXECUTOR (deterministic -- no LLM call in this phase)
 # ============================================================================
+EXECUTABLE_STATUSES = {"ok", "panic_mode_best_effort"}
+
+
+def _contract_needs_execution(contract: dict) -> bool:
+    """
+    True if this contract (or, for mode:multi, at least one of its
+    results) actually has a query that needs running. Statuses like
+    ambiguous_metric, unsupported_metric, declined, and out_of_scope_action
+    never produced a runnable query in the first place, so there's nothing
+    for Phase 4 to do -- checked here, before execute_contract() is ever
+    called, so a missing/malformed 'mode' field on one of those statuses
+    can never cause a crash.
+    """
+    if contract.get("mode") == "multi":
+        return any(r.get("status") in EXECUTABLE_STATUSES for r in contract.get("results", []))
+    return contract.get("status") in EXECUTABLE_STATUSES
+
+
 async def query_executor(generated_contract: str, validation_report: str) -> dict:
     if not _validation_passed(validation_report):
         return {
@@ -464,6 +517,12 @@ async def query_executor(generated_contract: str, validation_report: str) -> dic
         contract = json.loads(generated_contract)
     except json.JSONDecodeError as e:
         return {"execution_skipped": True, "reason": f"Could not parse the generated contract as JSON: {e}"}
+
+    if not _contract_needs_execution(contract):
+        # Nothing to run (ambiguous_metric, unsupported_metric, declined,
+        # out_of_scope_action, or an unmapped domain) -- return the
+        # contract exactly as generated, with no execution block.
+        return contract
 
     try:
         return await asyncio.to_thread(
@@ -488,7 +547,18 @@ async def get_final_result(user_question: str) -> dict:
     boundary meant for handing off to a frontend.
     """
     routing_data = await intent_router(user_question)
-    domain_data = await domain_resolver(user_question, routing_data.get("target_sub_files", []))
+    target_sub_files = routing_data.get("target_sub_files", [])
+
+    # No point asking the Domain Resolver anything if Phase 1 found no
+    # exporter at all (unmapped/declined/out_of_scope_action) -- it has
+    # nothing to resolve against, and calling it anyway just wastes an
+    # LLM call and produces a confusing "please provide the metric
+    # directory" response instead of the JSON it's told to output.
+    if target_sub_files:
+        domain_data = await domain_resolver(user_question, target_sub_files)
+    else:
+        domain_data = {"domain_selections": [], "no_match_sub_files": []}
+
     generated_contract = await query_generator(user_question, routing_data, domain_data)
     validation_report = await validation_tester(user_question, routing_data, domain_data, generated_contract)
 
@@ -525,9 +595,14 @@ async def interactive_test_harness():
             print(f"Routing Decision: {routing_data.get('routing_type', '').upper()} -> "
                   f"{routing_data.get('target_sub_files', [])} (Panic: {routing_data.get('panic_mode')})")
 
-            print("\n[Phase 2a] Resolving domain file(s)...")
-            domain_data = await domain_resolver(user_input, routing_data.get("target_sub_files", []))
-            print(f"Domain Resolution: {json.dumps(domain_data)}")
+            target_sub_files = routing_data.get("target_sub_files", [])
+            if target_sub_files:
+                print("\n[Phase 2a] Resolving domain file(s)...")
+                domain_data = await domain_resolver(user_input, target_sub_files)
+                print(f"Domain Resolution: {json.dumps(domain_data)}")
+            else:
+                print("\n[Phase 2a] Skipped -- no exporter to resolve against.")
+                domain_data = {"domain_selections": [], "no_match_sub_files": []}
 
             print("\n[Phase 2b] Generating Output Contract...")
             generated_contract = await query_generator(user_input, routing_data, domain_data)
