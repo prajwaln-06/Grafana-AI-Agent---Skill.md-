@@ -134,7 +134,7 @@ This is not a label list.
 - `mode`
 
 These are in addition to the exporter-wide baseline labels documented in
-`_index.md` §5.1.
+`index.md` §5.1.
 
 #### Intent Examples
 

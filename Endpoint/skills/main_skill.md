@@ -80,7 +80,7 @@ The agent will receive the `data_source`, `version`, `purpose`, and `trigger_key
 
 ### 4.1 Interface Contract
 
-To participate in dynamic routing, every exporter's `_index.md` file must expose a lightweight interface contract in its frontmatter containing at least the following fields:
+To participate in dynamic routing, every exporter's `index.md` file must expose a lightweight interface contract in its frontmatter containing at least the following fields:
 
 - `name`: The unique identifier for the exporter.
 - `purpose`: A brief description of the observability domain covered.

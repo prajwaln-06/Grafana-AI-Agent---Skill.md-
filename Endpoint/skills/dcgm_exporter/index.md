@@ -1,6 +1,6 @@
 ---
 name: dcgm_exporter
-purpose: GPU observability provided by the NVIDIA DCGM Exporter.
+purpose: GPU observability provided by the DCGM Exporter.
 data_source: prometheus
 version: 1.0
 
@@ -93,41 +93,48 @@ After the Main Skill routes a request to this exporter:
    - explicitly requesting multiple independent measurements; or
    - a derived/composed measurement requiring multiple source metrics.
 
-5. Preserve all constraints explicitly provided by the user, such as:
+5. Classify a measurement as derived/composed only when its derivation is explicitly established in the relevant reference information. Treat a raw metric according to its documented measurement semantics.
 
-   - node
-   - GPU
-   - device
-   - time range
-   - comparison scope
+6. Preserve all constraints explicitly provided by the user, such as:
 
-6. Do not invent scope constraints that the user did not provide.
+   * node
+   * GPU
+   * device
+   * time range
+   * comparison scope
 
-7. Select multiple independent metrics **only when the user explicitly requests multiple distinct measurements**.
+7. Apply only scope constraints explicitly provided by the user or established by the available reference information.
 
-8. A single requested measurement may legitimately require multiple source metrics when it is defined as a **derived/composed measurement** in this exporter. This is **not** the same as the user requesting multiple independent measurements.
+8. Select multiple independent metrics **only when the user explicitly requests multiple distinct measurements**.
 
-9. Do not convert a vague or underspecified request into a multi-metric request merely to provide a more comprehensive answer.
+9. A single requested measurement may legitimately require multiple source metrics when it is defined as a **derived/composed measurement** in this exporter. This is **not** the same as the user requesting multiple independent measurements.
 
-10. If multiple materially different measurements could plausibly satisfy the request and the user has not indicated which one(s) they want, classify the request as **AMBIGUOUS** and request clarification.
+10. Keep a vague or underspecified request limited to the measurement that can be established from the user's wording and available reference information. Treat additional measurements as separate requests only when the user explicitly requests them.
 
-Ambiguity must not be resolved by:
+11. If multiple materially different measurements could plausibly satisfy the request and the user has not indicated which one(s) they want, classify the request as **AMBIGUOUS** and request clarification.
 
-- arbitrarily choosing one plausible metric;
-- selecting all plausible metrics;
-- assuming the user wants a comprehensive overview.
+Resolve ambiguity by requesting clarification when:
 
-11. If no metric or derived/composed measurement defined in this exporter represents the requested measurement, classify the request as **UNSUPPORTED**.
+* multiple materially different measurements remain plausible;
+* the user's wording does not establish which measurement they want.
 
-Do not invent:
+Do not resolve ambiguity by:
 
-- metric names;
-- labels;
-- measurements;
-- relationships between metrics;
-- query expressions.
+* arbitrarily choosing one plausible metric;
+* selecting all plausible metrics;
+* assuming the user wants a comprehensive overview.
 
-12. Once the metric(s), metric-specific semantics, and relevant scope are resolved, defer shared query construction, datasource syntax, time handling, aggregation, output formatting, and generic error handling to the Main Skill.
+12. If no metric or derived/composed measurement defined in this exporter represents the requested measurement, classify the request as **UNSUPPORTED**.
+
+Use only:
+
+* metric names defined by this exporter;
+* labels verified in the available datasource/schema or reference information;
+* measurements established by the available skill/reference information;
+* metric relationships established by the available skill/reference information;
+* query expressions supported by the applicable query-construction rules.
+
+13. Once the metric(s), metric-specific semantics, and relevant scope are resolved, defer shared query construction, datasource syntax, time handling, aggregation, output formatting, and generic error handling to the Main Skill.
 
 ---
 
@@ -139,7 +146,7 @@ The Metric Directory is exhaustive for the metrics currently supported by this D
 
 Every supported raw metric must appear here.
 
-A metric must not exist only inside a domain file without a corresponding Metric Directory entry.
+Every supported metric must have a corresponding Metric Directory entry in addition to its detailed definition in the relevant domain file.
 
 The detailed metric definitions inside each domain file remain authoritative for final metric selection.
 
@@ -174,7 +181,7 @@ This section contains concepts that are true across the **entire exporter**, or 
 
 If a concept applies only to one functional domain, it belongs inside that domain's **Domain Fundamentals** instead.
 
-Do not duplicate datasource syntax, PromQL/OpenSearch language rules, aggregation behaviour, Counter/Gauge handling, or other shared query-language concepts from the datasource fundamentals.
+Keep datasource syntax, PromQL/OpenSearch language rules, aggregation behaviour, Counter/Gauge handling, and other shared query-language concepts in the appropriate datasource fundamentals. Reference those fundamentals rather than duplicating them here.
 
 ---
 
@@ -201,17 +208,17 @@ Domain-specific additions belong only inside the corresponding Domain Fundamenta
 
 ### 5.2 Metric Ambiguity vs Parameter Vagueness
 
-Request clarification only when the **requested measurement itself cannot be determined**.
+Request clarification when the **requested measurement itself cannot be determined**.
 
-Do **not** classify a request as metric-ambiguous merely because optional query parameters were omitted.
+Treat omitted optional query parameters as parameter vagueness rather than metric ambiguity.
 
 Examples of omitted parameters include:
 
-- time range;
-- node;
-- GPU;
-- device;
-- aggregation scope.
+* time range;
+* node;
+* GPU;
+* device;
+* aggregation scope.
 
 If the requested measurement is already clear, defer parameter defaults and query construction to the Main Skill.
 
@@ -229,17 +236,16 @@ The current DCGM implementation does not require any additional cross-domain sem
 
 ## 6. Guardrails
 
-- Only route to metrics explicitly defined by this exporter.
-- Only use derived/composed measurements explicitly defined by this exporter.
-- Treat the project metric reference as authoritative.
-- Do not fabricate metric names, labels, units, dimensions, relationships, or metric semantics.
-- If required information has not been verified against the datasource/schema, mark it as requiring verification rather than guessing.
-- Do not assume node, GPU, device, or other scope constraints that the user did not specify.
-- Preserve all explicitly requested measurements.
-- Multiple plausible metrics do **not** imply the user requested multiple metrics.
-- A derived measurement requiring multiple source metrics is distinct from a request for multiple independent measurements.
-- If multiple materially different measurements remain plausible, request clarification.
-- Treat the Metric Directory as a routing aid only. Final metric selection must always be verified using the detailed metric definition in the relevant domain file.
-- Cross-domain semantic concepts belong in this file. Domain-specific semantic concepts belong in the corresponding domain file.
-- Defer datasource syntax, query construction, parameter defaults, output formatting, and generic error handling to the Main Skill and Prometheus Fundamentals.
-- Do not invent Prometheus label names. Use only labels verified from the actual datasource/schema.
+* Route requests only to metrics explicitly defined by this exporter.
+* Use derived/composed measurements only when they are explicitly defined by this exporter.
+* Treat the project metric reference as authoritative for metric names, measurements, semantics, and documented relationships.
+* Use only metric names, labels, units, dimensions, relationships, and metric semantics established in the available skill/reference information or verified against the datasource/schema.
+* When required information has not been verified against the datasource/schema, mark it as requiring verification rather than guessing.
+* Apply only node, GPU, device, or other scope constraints explicitly provided by the user or established by the available reference information.
+* Preserve every measurement explicitly requested by the user.
+* Treat multiple plausible metrics as candidate interpretations of a request, rather than as evidence that the user requested multiple metrics.
+* Treat a derived measurement requiring multiple source metrics as distinct from a request for multiple independent measurements.
+* When multiple materially different measurements remain plausible, request clarification.
+* Treat the Metric Directory as a routing aid only. Verify final metric selection using the detailed metric definition in the relevant domain file.
+* Keep cross-domain semantic concepts in this file and domain-specific semantic concepts in the corresponding domain file.
+* Defer datasource syntax, query construction, parameter defaults, output formatting, and generic error handling to the Main Skill and Prometheus Fundamentals.
