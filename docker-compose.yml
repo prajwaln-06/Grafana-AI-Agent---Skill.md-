@@ -1,0 +1,142 @@
+# Requires Docker Compose V2 (the `docker compose ...` plugin that ships
+# with current Docker Desktop / Docker Engine) -- the legacy standalone
+# `docker-compose` v1 binary does not support the depends_on health
+# conditions used below.
+#
+# ============================================================================
+# PUBLIC AGENT-FACING ENDPOINTS (this is the entire contract an external
+# agent needs -- everything else in this file is simulator-internal):
+#
+#     Prometheus  ->  http://localhost:9090
+#     OpenSearch  ->  http://localhost:9600
+#
+# Everything below (incident-controller:9500, node-00..03:9200-9203) is
+# test-harness / simulator-internal plumbing. See README.md.
+# ============================================================================
+
+services:
+  node-00:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ID: node-00
+      PORT: 9200
+      NUM_CPUS: "32"
+      NUM_GPUS: "8"
+      CONTROLLER_URL: http://incident-controller:9500
+    ports: ["9200:9200"]   # internal -- not part of the agent contract
+    depends_on:
+      incident-controller:
+        condition: service_healthy
+
+  node-01:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ID: node-01
+      PORT: 9200
+      NUM_CPUS: "32"
+      NUM_GPUS: "8"
+      CONTROLLER_URL: http://incident-controller:9500
+    ports: ["9201:9200"]   # internal
+    depends_on:
+      incident-controller:
+        condition: service_healthy
+
+  node-02:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ID: node-02
+      PORT: 9200
+      NUM_CPUS: "64"
+      NUM_GPUS: "4"
+      CONTROLLER_URL: http://incident-controller:9500
+    ports: ["9202:9200"]   # internal
+    depends_on:
+      incident-controller:
+        condition: service_healthy
+
+  node-03:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ID: node-03
+      PORT: 9200
+      NUM_CPUS: "16"
+      NUM_GPUS: "0"
+      CONTROLLER_URL: http://incident-controller:9500
+    ports: ["9203:9200"]   # internal
+    depends_on:
+      incident-controller:
+        condition: service_healthy
+
+  # --- PUBLIC: agent talks to this ---
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./prometheus.docker.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+    depends_on:
+      node-00: { condition: service_healthy }
+      node-01: { condition: service_healthy }
+      node-02: { condition: service_healthy }
+      node-03: { condition: service_healthy }
+
+  # --- INTERNAL: test/eval harness control plane only, NOT for the agent ---
+  incident-controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    ports: ["9500:9500"]   # INTERNAL / TEST CONTROL ONLY -- see README.
+                            # Safe to remove this port mapping entirely
+                            # once you no longer need host access for
+                            # triggering scenarios (docker compose exec
+                            # into the container still works without it).
+
+  # --- PUBLIC: agent talks to this ---
+  opensearch:
+    image: opensearchproject/opensearch:2.15.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"   # local simulator only -- do not
+                                         # use this setting outside a
+                                         # throwaway dev/demo environment
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports: ["9600:9200"]   # PUBLIC agent endpoint: http://localhost:9600
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 90s   # OpenSearch's JVM can genuinely take 30-90s on
+                           # first boot -- don't flag it unhealthy for that
+      retries: 10
+
+  logsim:
+    build:
+      context: .
+      dockerfile: Dockerfile.logsim
+    environment:
+      SINK: opensearch
+      OPENSEARCH_URL: http://opensearch:9200
+      CONTROLLER_URL: http://incident-controller:9500
+      NODES: node-00,node-01,node-02,node-03
+      GPU_COUNTS: "8,8,4,0"
+    depends_on:
+      incident-controller:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy

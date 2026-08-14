@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY incidents/ ./incidents/
+
+EXPOSE 9500
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=5 \
+    CMD python3 -c "import urllib.request as u; u.urlopen('http://localhost:9500/health', timeout=2)" || exit 1
+
+CMD ["python3", "-m", "incidents.controller", "--port", "9500"]

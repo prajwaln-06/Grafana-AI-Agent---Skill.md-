@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements-logsim.txt .
+RUN pip install --no-cache-dir -r requirements-logsim.txt
+
+COPY incidents/ ./incidents/
+COPY logsim/ ./logsim/
+
+ENV SINK=opensearch \
+    OPENSEARCH_URL=http://opensearch:9200 \
+    OPENSEARCH_USER=admin \
+    OPENSEARCH_PASSWORD=admin \
+    CONTROLLER_URL=http://incident-controller:9500 \
+    NODES=node-00,node-01,node-02,node-03 \
+    GPU_COUNTS=8,8,4,0
+
+# logsim has no HTTP server of its own; readiness is tracked via a
+# sentinel file written only after OpenSearch responded AND the initial
+# indices were created (logsim/main.py). start-period is generous because
+# OpenSearch's JVM can legitimately take 30-90s to come up on first boot,
+# and logsim retries indefinitely rather than crashing during that time
+# (spec section 5).
+HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=6 \
+    CMD test -f /tmp/logsim_ready || exit 1
+
+CMD ["python3", "-m", "logsim.main"]
