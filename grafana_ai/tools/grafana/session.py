@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import threading
 import time
 from typing import Any, Optional
@@ -12,7 +13,7 @@ from mcp import StdioServerParameters
 
 from .utils import require_env, extract_text, format_error, logger
 
-_ENABLED_TOOLS = "search,dashboard,prometheus,datasource,elasticsearch"
+_ENABLED_TOOLS = "search,dashboard,prometheus,datasource,elasticsearch,api"
 
 _loop = asyncio.new_event_loop()
 def _run_loop():
@@ -40,14 +41,19 @@ async def get_session_manager() -> MCPSessionManager:
             grafana_url = require_env("GRAFANA_URL")
             grafana_token = require_env("GRAFANA_SERVICE_ACCOUNT_TOKEN")
 
+            mcp_args = [
+                "mcp-grafana",
+                f"--enabled-tools={_ENABLED_TOOLS}",
+            ]
+            if os.environ.get("GRAFANA_MCP_ENABLE_WRITE", "").lower() not in {
+                "1", "true", "yes", "on"
+            }:
+                mcp_args.append("--disable-write")
+
             connection_params = StdioConnectionParams(
                 server_params=StdioServerParameters(
                     command="uvx",
-                    args=[
-                        "mcp-grafana",
-                        f"--enabled-tools={_ENABLED_TOOLS}",
-                        "--disable-write",
-                    ],
+                    args=mcp_args,
                     env={
                         "GRAFANA_URL": grafana_url,
                         "GRAFANA_SERVICE_ACCOUNT_TOKEN": grafana_token,

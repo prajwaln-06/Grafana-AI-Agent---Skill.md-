@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Optional
 
@@ -65,8 +66,32 @@ async def query_prometheus_histogram(expr: str, ds_uid: str, lookback: str) -> s
     )
 
 async def list_prometheus_metric_names(ds_uid: str) -> str:
-    """List all available metric names."""
-    return await mcp_call("list_prometheus_metric_names", {"datasourceUid": ds_uid})
+    """List all available metric names using Grafana MCP pagination."""
+    limit = 100
+    page = 1
+    metrics: list[str] = []
+    while True:
+        raw = await mcp_call(
+            "list_prometheus_metric_names",
+            {"datasourceUid": ds_uid, "limit": limit, "page": page},
+        )
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return raw
+        items = payload
+        if isinstance(payload, dict):
+            items = next(
+                (payload[key] for key in ("metrics", "metricNames", "result", "data") if isinstance(payload.get(key), list)),
+                [],
+            )
+        if not isinstance(items, list):
+            return raw
+        metrics.extend(str(item) for item in items if isinstance(item, str))
+        if len(items) < limit:
+            break
+        page += 1
+    return json.dumps(metrics)
 
 async def list_prometheus_metric_metadata(ds_uid: str, metric: str) -> str:
     """List metadata for a specific metric."""
@@ -78,8 +103,7 @@ async def list_prometheus_label_names(ds_uid: str) -> str:
 
 async def list_prometheus_label_values(ds_uid: str, label: str) -> str:
     """List all values for a specific label."""
-    return await mcp_call("list_prometheus_label_values", {"datasourceUid": ds_uid, "label": label})
-
+    return await mcp_call("list_prometheus_label_values", {"datasourceUid": ds_uid, "labelName": label})
 
 def format_prometheus_result(results: list[dict], context: str = "", hints: Optional[dict] = None) -> str:
     """Human-friendly summary of Prometheus range-query results."""

@@ -1,0 +1,49 @@
+version: "3.8"
+
+# Simulated 4-node cluster (32 CPUs / 8 GPUs each) + a real Prometheus
+# server scraping all of them. Adjust replicas / NUM_CPUS / NUM_GPUS per
+# node below to model your actual fleet shape.
+
+services:
+  node-00:
+    build: .
+    environment:
+      NODE_ID: node-00
+      PORT: 9200
+      NUM_CPUS: "32"
+      NUM_GPUS: "8"
+    ports: ["9200:9200"]
+
+  node-01:
+    build: .
+    environment:
+      NODE_ID: node-01
+      PORT: 9200
+      NUM_CPUS: "32"
+      NUM_GPUS: "8"
+    ports: ["9201:9200"]
+
+  node-02:
+    build: .
+    environment:
+      NODE_ID: node-02
+      PORT: 9200
+      NUM_CPUS: "64"
+      NUM_GPUS: "4"
+    ports: ["9202:9200"]
+
+  node-03:
+    build: .
+    environment:
+      NODE_ID: node-03
+      PORT: 9200
+      NUM_CPUS: "16"
+      NUM_GPUS: "0"
+    ports: ["9203:9200"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.docker.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    depends_on: [node-00, node-01, node-02, node-03]

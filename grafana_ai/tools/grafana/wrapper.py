@@ -14,7 +14,7 @@ from .discovery import ensure_panel_index
 from .scoring import score_and_select
 from .datasource import resolve_datasource, datasources_summary, _SUPPORTED_DS_TYPES
 from .prometheus import execute_prometheus, format_prometheus_result
-from .opensearch import execute_opensearch, format_opensearch_result
+from .opensearch import execute_opensearch, normalize_opensearch_result
 
 
 def list_dashboards() -> str:
@@ -175,16 +175,16 @@ async def _execute_query_router(
             f"Available datasources:\n{datasources_summary()}",
             ds_type
         )
+    if ds_type != "prometheus":
+        return (
+            f"Error: query_prometheus_metric requires a Prometheus datasource, but resolved '{ds_type}'.",
+            ds_type,
+        )
 
     logger.info(f"  Executing on: {resolved['name']} (type={ds_type}, uid={ds_uid})")
     
-    if ds_type in ("elasticsearch", "opensearch"):
-        res = await execute_opensearch(expr, ds_uid, lookback)
-        return res, ds_type
-    else:
-        # Default is Prometheus
-        res = await execute_prometheus(expr, ds_uid, lookback, step_seconds)
-        return res, ds_type
+    res = await execute_prometheus(expr, ds_uid, lookback, step_seconds)
+    return res, ds_type
 
 
 def query_prometheus_metric(
@@ -262,9 +262,7 @@ async def _query_prometheus_metric_async(
         data = json.loads(result_str)
         hints = data.get("hints") if isinstance(data, dict) and isinstance(data.get("hints"), dict) else None
         
-        if ds_type in ("elasticsearch", "opensearch"):
-            normalized = format_opensearch_result(data, discovery_context, hints)
-        elif "data" in data and "result" in data["data"]:
+        if "data" in data and "result" in data["data"]:
             normalized = format_prometheus_result(
                 data["data"]["result"], discovery_context, hints
             )
@@ -282,75 +280,86 @@ def _escape_lucene(text: str) -> str:
     escape_chars = r'([+\-&|!(){}\[\]^"~*?:\\/])'
     return re.sub(escape_chars, r'\\\1', text)
 
-def query_logs(
+def query_opensearch_logs(
     query: str = "*",
     service: str = "",
-    level: str = "",
+    host: str = "",
+    severity: str = "",
+    index: str = "consolelog-*,heartbeat,syslog-*",
     lookback: str = "1h",
     limit: int = 20,
-) -> str:
-    """Query OpenSearch application logs. Use this for errors, traces, and text events.
-    Provide an optional search query, service name, or log level (e.g. ERROR, INFO)."""
-    return run_sync(_query_logs_async(query, service, level, lookback, limit))
+) -> dict:
+    """Query OpenSearch documents through Grafana MCP and return normalized documents."""
+    return run_sync(_query_opensearch_logs_async(query, service, host, severity, index, lookback, limit))
 
-async def _query_logs_async(
+async def _query_opensearch_logs_async(
     query: str = "*",
     service: str = "",
-    level: str = "",
+    host: str = "",
+    severity: str = "",
+    index: str = "consolelog-*,heartbeat,syslog-*",
     lookback: str = "1h",
     limit: int = 20,
-) -> str:
-    logger.info(f"Wrapper: query_logs query='{query}' service='{service}' level='{level}' lookback='{lookback}' limit={limit}")
+) -> dict:
+    logger.info(f"Wrapper: query_opensearch_logs query='{query}' index='{index}' lookback='{lookback}' limit={limit}")
     start = time.perf_counter()
 
     if not re.match(r'^\d+[smhdw]$', lookback):
-        return f"Error: Invalid lookback format '{lookback}'. Please use Grafana formats like '15m', '1h', '7d'."
+        return {"status": "error", "error": f"Invalid lookback format '{lookback}'. Use values such as 15m, 1h, or 7d."}
+    if not index or not index.strip():
+        return {"status": "error", "error": "At least one OpenSearch index or index pattern is required."}
+    try:
+        normalized_limit = int(limit)
+    except (TypeError, ValueError):
+        return {"status": "error", "error": "limit must be an integer between 1 and 100."}
+    if not 1 <= normalized_limit <= 100:
+        return {"status": "error", "error": "limit must be between 1 and 100."}
 
-    ds = await resolve_datasource("opensearch")
+    ds = await resolve_datasource("opensearch", allow_generic_fallback=False)
     if not ds:
-        return (
-            "Error: Could not resolve OpenSearch datasource.\n\n"
-            f"Available datasources:\n{datasources_summary()}"
-        )
+        return {"status": "error", "error": "Could not resolve an OpenSearch/Elasticsearch datasource through Grafana MCP.", "availableDatasources": datasources_summary()}
 
+    stripped_query = (query or "*").strip() or "*"
+    if stripped_query.startswith("{") and ds["type"] == "opensearch":
+        return {"status": "error", "error": "The installed MCP tool supports Query DSL only for Elasticsearch datasources; OpenSearch queries must use Lucene syntax."}
     lucene_parts = []
-    
-    if query and query.strip() and query.strip() != "*":
-        if ":" not in query and '"' not in query:
-            safe_query = _escape_lucene(query.strip())
-            lucene_parts.append(f'message:({safe_query})')
+    if stripped_query != "*":
+        if stripped_query.startswith("{"):
+            if any((service, host, severity)):
+                return {"status": "error", "error": "Structured filters cannot be combined with an Elasticsearch Query DSL string."}
+            final_query = stripped_query
+        elif ":" not in stripped_query and '"' not in stripped_query:
+            lucene_parts.append(f'Body:({_escape_lucene(stripped_query)})')
         else:
-            lucene_parts.append(query.strip())
-            
+            lucene_parts.append(stripped_query)
     if service and service.strip():
-        safe_service = _escape_lucene(service.strip())
-        lucene_parts.append(f'service:"{safe_service}"')
-        
-    if level and level.strip():
-        lvl = level.strip().upper()
+        lucene_parts.append(f'Resource.service.name:"{_escape_lucene(service.strip())}"')
+    if host and host.strip():
+        lucene_parts.append(f'Resource.host.name:"{_escape_lucene(host.strip())}"')
+    if severity and severity.strip():
+        lvl = severity.strip().upper()
         if lvl not in ("INFO", "WARN", "WARNING", "ERROR", "DEBUG", "TRACE", "CRITICAL"):
-            return f"Error: Invalid log level '{lvl}'. Supported levels: INFO, WARN, WARNING, ERROR, DEBUG, TRACE, CRITICAL."
-        lucene_parts.append(f'level:"{lvl}"')
+            return {"status": "error", "error": f"Invalid severity '{lvl}'."}
+        lucene_parts.append(f'(Severity:"{lvl.lower()}" OR SeverityText:"{lvl}")')
 
-    final_query = " AND ".join(lucene_parts) if lucene_parts else "*"
-    logger.info(f"  Route: explicit Lucene -> {final_query}")
+    if not stripped_query.startswith("{"):
+        final_query = " AND ".join(lucene_parts) if lucene_parts else "*"
 
-    result_str = await execute_opensearch(final_query, ds["uid"], lookback, limit)
+    start_time = f"now-{lookback}"
+    result_str = await execute_opensearch(final_query, ds["uid"], index.strip(), start_time, "now", normalized_limit)
 
     if result_str.startswith("Error"):
-        elapsed = time.perf_counter() - start
-        logger.info(f"Wrapper query_logs failed in {elapsed:.3f}s")
-        return result_str
+        return {"status": "error", "error": result_str}
 
     try:
         data = json.loads(result_str)
-        hints = data.get("hints") if isinstance(data, dict) and isinstance(data.get("hints"), dict) else None
-        
-        context = f"Logs query: {final_query}"
-        normalized = format_opensearch_result(data, context, hints, limit)
+        normalized = normalize_opensearch_result(data, ds, final_query, index.strip(), start_time, "now")
     except json.JSONDecodeError:
-        normalized = normalize_to_text(result_str)
+        normalized = {"status": "error", "error": "Grafana MCP returned an invalid OpenSearch response."}
 
     elapsed = time.perf_counter() - start
-    logger.info(f"Wrapper query_logs done in {elapsed:.3f}s")
-    return cap(normalized)
+    logger.info(f"Wrapper query_opensearch_logs done in {elapsed:.3f}s")
+    return normalized
+
+
+query_logs = query_opensearch_logs

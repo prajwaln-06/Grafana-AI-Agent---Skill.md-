@@ -8,6 +8,12 @@ from grafana_ai.tools.grafana.wrapper import (
     get_dashboard_panels,
     query_prometheus_metric,
     query_logs,
+    query_opensearch_logs,
+)
+from grafana_ai.tools.grafana.dashboard_writing import (
+    execute_approved_dashboard,
+    propose_dashboard,
+    resolve_dashboard_intent,
 )
 
 __all__ = [
@@ -16,4 +22,8 @@ __all__ = [
     "get_dashboard_panels",
     "query_prometheus_metric",
     "query_logs",
+    "query_opensearch_logs",
+    "propose_dashboard",
+    "execute_approved_dashboard",
+    "resolve_dashboard_intent",
 ]

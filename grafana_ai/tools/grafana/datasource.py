@@ -36,11 +36,13 @@ async def ensure_datasource_registry() -> dict[str, list[dict]]:
                 for ds in sources:
                     if not isinstance(ds, dict):
                         continue
-                    ds_type = ds.get("type", "").lower()
+                    plugin_type = ds.get("type", "").lower()
+                    ds_type = "opensearch" if plugin_type == "grafana-opensearch-datasource" else plugin_type
                     entry = {
                         "uid": ds.get("uid", ""),
                         "name": ds.get("name", ""),
                         "type": ds_type,
+                        "plugin_type": plugin_type,
                         "is_default": ds.get("isDefault", False),
                     }
                     registry.setdefault(ds_type, []).append(entry)
@@ -55,7 +57,7 @@ async def ensure_datasource_registry() -> dict[str, list[dict]]:
         return registry
 
 
-async def resolve_datasource(ds_ref: Any) -> Optional[dict]:
+async def resolve_datasource(ds_ref: Any, *, allow_generic_fallback: bool = True) -> Optional[dict]:
     """Resolve a panel datasource reference to a registry entry."""
     registry = await ensure_datasource_registry()
 
@@ -99,10 +101,11 @@ async def resolve_datasource(ds_ref: Any) -> Optional[dict]:
             
         logger.debug(f"  -> TYPE fallback failed for '{ref_type}'")
 
-    for ds_type in _SUPPORTED_DS_TYPES:
-        if ds_type in registry:
-            logger.debug(f"  -> Fallback to generic default ({ds_type}): {registry[ds_type][0]['name']}")
-            return registry[ds_type][0]
+    if allow_generic_fallback:
+        for ds_type in _SUPPORTED_DS_TYPES:
+            if ds_type in registry:
+                logger.debug(f"  -> Fallback to generic default ({ds_type}): {registry[ds_type][0]['name']}")
+                return registry[ds_type][0]
 
     logger.debug("  -> Resolution failed, no match found")
     return None

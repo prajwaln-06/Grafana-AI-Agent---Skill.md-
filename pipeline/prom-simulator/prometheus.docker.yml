@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 10s
+
+scrape_configs:
+  - job_name: 'simulated_fleet'
+    static_configs:
+      - targets: ['node-00:9200']
+        labels: {node_id: 'node-00', cluster: 'simulated'}
+      - targets: ['node-01:9200']
+        labels: {node_id: 'node-01', cluster: 'simulated'}
+      - targets: ['node-02:9200']
+        labels: {node_id: 'node-02', cluster: 'simulated'}
+      - targets: ['node-03:9200']
+        labels: {node_id: 'node-03', cluster: 'simulated'}

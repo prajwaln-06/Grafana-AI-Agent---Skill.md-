@@ -10,22 +10,26 @@ _dashboard_list_time: float = 0.0
 _dashboard_details: dict[str, dict] = {}
 
 
-async def fetch_dashboard_list() -> list[dict]:
+async def fetch_dashboard_list(*, refresh: bool = False) -> list[dict]:
     """Fetch and cache the list of all dashboards (title, uid, tags)."""
     global _dashboard_list, _dashboard_list_time
-    if _dashboard_list is not None:
+    if _dashboard_list is not None and not refresh:
         return _dashboard_list
 
-    dash_str = await mcp_call("search_dashboards", {"query": ""}, raw=True)
+    dash_str = await mcp_call(
+        "grafana_api_request",
+        {"method": "GET", "endpoint": "/api/search?type=dash-db"},
+        raw=True,
+    )
     if not dash_str:
-        logger.warning("Discovery: search_dashboards returned empty string")
+        logger.warning("Discovery: Grafana dashboard-list API returned empty string")
         return []
 
     dashboards: list[dict] = []
     try:
         data = json.loads(dash_str)
     except json.JSONDecodeError as exc:
-        logger.warning(f"Discovery: search_dashboards returned invalid JSON: {exc}")
+        logger.warning(f"Discovery: Grafana dashboard-list API returned invalid JSON: {exc}")
         return []
 
     items: list = []
@@ -57,9 +61,9 @@ async def fetch_dashboard_list() -> list[dict]:
     return dashboards
 
 
-async def fetch_dashboard_detail(uid: str) -> Optional[dict]:
+async def fetch_dashboard_detail(uid: str, *, refresh: bool = False) -> Optional[dict]:
     """Fetch and cache full dashboard JSON for a single UID."""
-    if uid in _dashboard_details:
+    if uid in _dashboard_details and not refresh:
         return _dashboard_details[uid]
 
     detail_str = await mcp_call("get_dashboard_by_uid", {"uid": uid}, raw=True)
