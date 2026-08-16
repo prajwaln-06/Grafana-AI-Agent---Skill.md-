@@ -106,6 +106,9 @@ def _run_agent_turn(request: str, conversation_id: str, target: str | None, time
     Raises RuntimeError if the agent does not produce a proposal.
     No silent fallback to build_proposal().
     """
+    from .tools.grafana.wrapper import clear_raw_json, get_raw_json
+    clear_raw_json()
+
     # Build the user message — include target and time_range as context
     # so the agent has all the information it needs without us pre-parsing.
     user_text = request
@@ -197,17 +200,21 @@ def _run_agent_turn(request: str, conversation_id: str, target: str | None, time
         timings["toolSelectionMs"], timings["toolExecutionMs"], timings["finalContinuationMs"], timings["totalMs"],
     )
 
+    raw_jsons = get_raw_json()
+
     if proposal_id:
         return {
             "kind": "proposal",
             "status": (tool_outcome or {}).get("status", "success"),
             "text": "Here is the proposed dashboard. Review and modify it before applying.",
+            "agent_response": "Here is the proposed dashboard. Review and modify it before applying.",
+            "raw_json": raw_jsons,
             "proposal": PROPOSALS.get(proposal_id),
             "errors": (tool_outcome or {}).get("errors", []),
             "timings": timings,
         }
     if final_text:
-        return {"kind": "text", "text": final_text, "timings": timings}
+        return {"kind": "text", "text": final_text, "agent_response": final_text, "raw_json": raw_jsons, "timings": timings}
     if tool_outcome:
         status = tool_outcome.get("status", "error")
         if status == "clarification":
@@ -217,7 +224,7 @@ def _run_agent_turn(request: str, conversation_id: str, target: str | None, time
         else:
             errors = tool_outcome.get("errors", [])
             text = "; ".join(item.get("message", str(item)) if isinstance(item, dict) else str(item) for item in errors) or "Dashboard operation failed."
-        return {"kind": "text", "status": status, "text": text, "errors": tool_outcome.get("errors", []), "timings": timings}
+        return {"kind": "text", "status": status, "text": text, "agent_response": text, "raw_json": raw_jsons, "errors": tool_outcome.get("errors", []), "timings": timings}
     raise RuntimeError("The ADK agent returned no response. See server logs for the full agent trace.")
 
 
@@ -293,6 +300,10 @@ class Handler(SimpleHTTPRequestHandler):
                     assistant["proposalId"] = turn["proposal"]["proposalId"]
                 if turn.get("timings"):
                     assistant["timings"] = turn["timings"]
+                if "agent_response" in turn:
+                    assistant["agent_response"] = turn["agent_response"]
+                if "raw_json" in turn:
+                    assistant["raw_json"] = turn["raw_json"]
                 _append_message(conversation_id, assistant)
                 result = _public_conversation(conversation_id)
                 result["message"] = copy.deepcopy(result["messages"][-1])

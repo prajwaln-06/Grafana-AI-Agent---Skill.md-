@@ -16,6 +16,17 @@ from .datasource import resolve_datasource, datasources_summary, _SUPPORTED_DS_T
 from .prometheus import execute_prometheus, format_prometheus_result
 from .opensearch import execute_opensearch, normalize_opensearch_result
 
+_RAW_JSON_RESULTS = []
+
+def clear_raw_json():
+    _RAW_JSON_RESULTS.clear()
+
+def add_raw_json(data):
+    _RAW_JSON_RESULTS.append(data)
+
+def get_raw_json():
+    return list(_RAW_JSON_RESULTS)
+
 
 def list_dashboards() -> str:
     """Return every Grafana dashboard as a numbered human-readable list."""
@@ -253,6 +264,12 @@ async def _query_prometheus_metric_async(
 
     result_str, ds_type = await _execute_query_router(final_expr, ds_ref, lookback, step_seconds)
 
+    if not result_str.startswith("Error"):
+        try:
+            add_raw_json(json.loads(result_str))
+        except json.JSONDecodeError:
+            pass
+
     if result_str.startswith("Error"):
         elapsed = time.perf_counter() - start
         logger.info(f"Wrapper query_prometheus_metric failed in {elapsed:.3f}s")
@@ -347,6 +364,12 @@ async def _query_opensearch_logs_async(
 
     start_time = f"now-{lookback}"
     result_str = await execute_opensearch(final_query, ds["uid"], index.strip(), start_time, "now", normalized_limit)
+
+    if not result_str.startswith("Error"):
+        try:
+            add_raw_json(json.loads(result_str))
+        except json.JSONDecodeError:
+            pass
 
     if result_str.startswith("Error"):
         return {"status": "error", "error": result_str}
