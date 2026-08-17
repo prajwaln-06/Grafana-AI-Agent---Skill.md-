@@ -1,19 +1,161 @@
-# Grafana AI Agent Skill Draft
+# observability-query-builder backend
 
-This repository tracks the Prometheus metrics skill draft used for the Grafana AI Agent work.
+Standalone FastAPI service that takes a natural-language question, runs it
+through the `observability-query-builder` skill package (Router → Generator
+→ deterministic Validator → Executor), executes the resulting query against
+Prometheus and/or OpenSearch, and returns frontend-ready, chart-shaped JSON.
 
-## Contents
+**If you're on the frontend team, or just want the full picture (input/output
+contract, what's implemented vs. pending, how to test, how to update this
+folder later): read [`HANDOFF.md`](./HANDOFF.md) first.** This README is the
+short, developer-facing "how do I run this" version.
 
-- [skill_test_agent/prometheus_metrics_skill.md](skill_test_agent/prometheus_metrics_skill.md) - the repo-facing skill reference and PromQL cookbook for the four Prometheus metric areas.
-- [skill_test_agent/agent.py](skill_test_agent/agent.py) - the local test agent that loads the skill file.
+## Before trying real questions: verify the two things that couldn't be tested from a sandbox
 
-## Covered Skills
+Neither the Gemini API call nor a live Prometheus/OpenSearch connection could
+be exercised while building or reviewing this (no network path to either from
+that environment). Run these two scripts, in order, before trying real
+questions — they isolate exactly which layer is broken if something doesn't
+work, instead of debugging a full pipeline run blind:
 
-1. CPU Usage (Infra)
-2. Memory Usage (Infra)
-3. Process CPU Usage
-4. Process Memory Usage
+```bash
+python3 scripts/smoke_test_gemini.py       # is the SDK call itself working?
+python3 scripts/smoke_test_prometheus.py   # is Prometheus reachable the way the code expects?
+```
 
-## Notes
+Once both pass, work through `skills/evals/regression-cases.md` — the skill
+package's own hand-authored test questions, covering routing, ambiguity,
+comparisons, panic mode, and label-fabrication prevention. That's the
+concrete, ready-made test plan; no need to invent test questions from
+scratch. `HANDOFF.md` has a fuller step-by-step testing checklist.
 
-The repo is intentionally focused on the skill document and its related updates. The main README now lives at the repository root, where it is easier to find.
+## Quickstart
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt   # includes prod requirements + pytest/httpx
+
+cp .env.example .env                  # fill in a real GEMINI_API_KEY
+# Confirm PROMETHEUS_URL / OPENSEARCH_URL match your local setup
+# (defaults: http://localhost:9090, http://localhost:9600)
+
+uvicorn app.api.main:app --reload --port 8000
+```
+
+Then:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "compare CPU utilization on node-1 and node-2 over the last hour"}'
+```
+
+## Running tests
+
+```bash
+pytest
+```
+
+All tests are deterministic (every backend and LLM call is mocked) — no live
+Prometheus/OpenSearch/Gemini connection required to run the suite. Run
+`pytest -q` and check the final count yourself; don't trust a number typed
+here, since it drifts every time a test is added.
+
+## Project layout
+
+```
+app/
+  skill_index.py        Parses SKILL.md's routing table + sections. The
+                         single source of truth for "what does this skill
+                         cover and where does each piece live" -- nothing
+                         about specific exporters/metrics is hardcoded here.
+                         This is what makes a new domain file "automatically
+                         known" after adding a routing row + restart/reload.
+  time_utils.py          Relative time expression resolution (now, now-1h,
+                          now/d, ...), shared by both backends.
+  prometheus_client.py   Prometheus HTTP client: instant + range queries,
+                          automatic step-widening on "too many samples".
+  opensearch_client.py   OpenSearch HTTP client: search/aggregation
+                          execution, plus live index/mapping discovery.
+  label_discovery.py     Live Prometheus label-key discovery (Principle 9).
+  field_discovery.py     Live OpenSearch Attributes.* key discovery.
+  normalizer.py          Converts raw backend responses into the three
+                          frontend-facing shapes: series / buckets / hits.
+                          Also where NaN/Infinity sanitization happens.
+  validator.py            Deterministic (no-LLM) contract validation --
+                          structural conformance, fabricated-metric and
+                          fabricated-label detection, time-grammar checks.
+  executor.py             Deterministic dispatch: runs a validated contract
+                          entry against the right backend, per-entry
+                          failure isolation.
+  llm_client.py           The only module that calls the Gemini API.
+  pipeline.py             Router -> Generator -> Validator orchestration,
+                          plus partial-datasource-coverage handling (see
+                          pipeline.py's module docstring).
+  session_store.py        In-memory clarification/follow-up session store.
+  config.py                Typed settings (env vars, see .env.example).
+  api/
+    main.py                FastAPI app, startup, CORS, error handling.
+    routes_query.py        POST /api/v1/query
+    routes_health.py       /healthz, /readyz, /api/v1/capabilities
+    routes_admin.py         POST /api/v1/admin/reload-skill
+    schemas.py              Request/response models.
+skills/                    The observability-query-builder skill package
+                            (SKILL.md + references/). Replace this directory
+                            wholesale to update the skill; nothing in app/
+                            needs to change for routing-table-level updates.
+tests/                     Unit + integration tests for every module above,
+                            run with `pytest`.
+```
+
+## API
+
+### `POST /api/v1/query`
+
+```json
+{"question": "compare CPU utilization on node-1 and node-2 over the last hour"}
+```
+
+Returns `{"result": {...}, "session_id": null}`. `result` is SKILL.md §9's
+Output Contract with an `execution` block attached to every `ok`/
+`panic_mode_best_effort` entry. If the result needs a clarifying answer
+(`ambiguous_metric`, or `declined` with reason
+`parameter_requires_clarification`), `session_id` is non-null and the query
+is NOT executed yet — send it back as:
+
+```json
+{"question": "the available one, not free", "session_id": "<the returned id>"}
+```
+
+See `HANDOFF.md` for the full, worked-example breakdown of every shape
+`result` can take.
+
+### `GET /healthz` / `GET /readyz`
+
+Liveness / readiness. `/readyz` confirms the skill package loaded.
+
+### `GET /api/v1/capabilities`
+
+Introspection: the currently-loaded skill's routing table, so a frontend
+can know what's covered without learning it from a failed query.
+
+### `POST /api/v1/admin/reload-skill`
+
+Re-parses SKILL.md's routing table without a process restart — needed after
+adding a brand-new routing row (a new exporter, a new previously-unrouted
+domain file). Editing the *content* of an already-routed reference file
+needs no action at all — it's read fresh from disk every request. See
+`HANDOFF.md`'s "Adding new coverage" section for the full explanation of
+which is which.
+
+## What's implemented vs. pending
+
+See `HANDOFF.md` for the full breakdown. Short version: the entire
+Prometheus path is implemented end-to-end. The OpenSearch EXECUTION layer
+(client, discovery, normalizer) is implemented and unit-tested against
+realistic mocked responses — but no `opensearch-*` domain rows exist in
+SKILL.md's routing table yet, so the pipeline can't currently route a real
+question to OpenSearch data. A question that needs OpenSearch-backed data
+gets an explicit `unmapped` result explaining that, rather than silently
+failing or being dropped — including when it's only PART of a larger
+question that also needs Prometheus data (see `HANDOFF.md`).
