@@ -146,8 +146,9 @@ power-violation counter as the current power consumption value.
 - **Category:** Power
 - **Purpose:** Measures time spent power throttled.
 - **Type:** `Counter`
-- **Unit:** Time spent power throttled; exact exposed unit should be verified
-  from the datasource before conversion or presentation.
+- - **Unit:** Time spent power throttled; exact exposed unit should be verified
+  from the datasource before presenting a specific duration or performing
+  conversion.
 - **Use when:** the user asks whether a GPU has been power throttling; wants
   to detect power throttling over time; or asks about the history/trend of
   power-related throttling.
@@ -162,25 +163,25 @@ power-violation counter as the current power consumption value.
 - **Metric-specific query/result semantics:** this is a Counter representing
   accumulated time spent power throttled.
 
-  **Per-metric override — construction blocked.** The exact exposed unit for
-  this counter has not been verified against the live datasource (see Unit
-  above). Whether to present this as a raw `increase()`, a `rate()`, or a
-  converted duration depends on knowing that unit, so this cannot be decided
-  from Prometheus Fundamentals' generic Counter rules alone the way an
-  ordinary Counter can. Do NOT construct a query for this metric on assumed
-  semantics.
+  **Per-metric override — unit-dependent interpretation is restricted.** The
+  exact exposed unit for this counter has not been verified against the live
+  datasource. Queries that only determine whether the Counter increased over a
+  time range do not require the unit to be known. Unit-dependent presentation,
+  conversion, or interpretation requires the exposed unit to be verified first.
 
-  Resolve any request that selects this metric as `status: "unsupported_metric"`
-  instead of `"ok"` — do not build a `query` field at all. The metric was
-  correctly identified; only query construction is blocked. State plainly in
-  `explanation` that `DCGM_FI_DEV_POWER_VIOLATION` is a Counter whose exposed
-  unit is unverified, so no query can be safely constructed until that is
-  confirmed against the live datasource.
+  For requests such as whether the GPU has been power throttling or whether
+  power-throttling activity occurred over a specified time range, query
+  construction may proceed using the Counter's documented accumulated-time
+  semantics. Do not claim a specific duration unit unless that unit is verified
+  against the live datasource.
 
-  This is the concrete case exercised by `SKILL.md` §5 Principle 8 / §6 Step 5:
-  "query/result semantics themselves stated as unverified" (not merely "no
-  verified example") — construction is blocked here specifically because the
-  unit itself is unverified, not because no example exists.
+  For requests that require a specific unit, duration conversion, or a
+  unit-dependent quantitative result, verify the exposed unit before
+  constructing or presenting that result.
+
+  This metric remains distinct from `DCGM_FI_DEV_POWER_USAGE`: the latter
+  represents instantaneous power draw, while this Counter represents
+  accumulated time spent power throttled.
 
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
@@ -237,10 +238,11 @@ power-violation counter as the current power consumption value.
 - Do not treat SM/core clock and memory clock as the same measurement.
 - Do not interpret the power-violation Counter as instantaneous power
   consumption.
-- `DCGM_FI_DEV_POWER_VIOLATION` specifically: its exposed unit is unverified
-  (see its Metric-Specific Query/Result Semantics above). Never construct a
-  query for it — resolve as `unsupported_metric` instead, even though the
-  metric itself is correctly identified.
+- `DCGM_FI_DEV_POWER_VIOLATION` specifically: its exposed unit is unverified.
+  Queries that only determine whether the Counter increased over a time range
+  may still be constructed. Require unit verification before presenting a
+  specific duration, performing unit conversion, or otherwise relying on the
+  unverified unit.
 - Do not invent Prometheus label names or label values — label keys must be
   confirmed by the runtime, never assumed from this reference (`SKILL.md` §5
   Principle 9).
