@@ -94,6 +94,8 @@ the general GPU utilization metric.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_PROF_GR_ENGINE_ACTIVE`
 
 - **Category:** GPU Utilization
@@ -120,6 +122,8 @@ the general GPU utilization metric.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`
 
 - **Category:** Tensor Cores
@@ -143,6 +147,8 @@ the general GPU utilization metric.
   defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
+
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `DCGM_FI_PROF_PIPE_FP64_ACTIVE`
 
@@ -169,6 +175,8 @@ the general GPU utilization metric.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_PROF_PIPE_FP32_ACTIVE`
 
 - **Category:** Compute
@@ -194,6 +202,8 @@ the general GPU utilization metric.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_PROF_PIPE_FP16_ACTIVE`
 
 - **Category:** Compute
@@ -218,6 +228,8 @@ the general GPU utilization metric.
   defaults is currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
+
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ## Domain-Specific Guardrails
 

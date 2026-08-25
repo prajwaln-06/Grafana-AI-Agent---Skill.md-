@@ -134,6 +134,26 @@ Repeat this shape for every metric in the domain:
   verified against a live datasource, or state exactly "No verified [...] query
   example is currently available. Do not invent a literal query example." —
   never leave this ambiguous by omission.
+- **Alert query/threshold:** whether a verified alert *condition query* exists
+  for this metric — i.e. an expression suitable for evaluating as a Grafana
+  alert rule condition (SKILL.md §12), as distinct from a read-only Query
+  Example above. Never leave this field blank or omit it — an empty-looking
+  field must never be misread as "not checked." Two cases only:
+  - **A verified Query Example exists for this metric** (per the field
+    above): state explicitly that the SAME verified base query may be reused
+    as the alert condition's expression, and explain the reasoning in one or
+    two sentences. Never assert a default threshold *value* or comparison
+    *direction* (`>`, `<`, etc.) unless the authoritative project material
+    itself documents one — those almost never exist even when the base query
+    is verified, so the overwhelmingly common phrasing is: "no default
+    threshold value or comparison direction is established by the
+    authoritative project material — both must be explicitly supplied by the
+    user; do not invent either."
+  - **No verified Query Example exists for this metric:** state exactly "No
+    verified alert query or threshold is currently defined for this metric.
+    Do not invent one." Do not attempt to derive an alert condition from an
+    unverified query example — SKILL.md §5 Principle 1's "never fabricate"
+    rule applies to alert conditions exactly as it does to read queries.
 
 ## Domain-Specific Guardrails
 

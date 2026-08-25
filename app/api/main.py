@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes_admin import router as admin_router
+from app.api.routes_alerts import router as alerts_router
 from app.api.routes_health import router as health_router
 from app.api.routes_query import router as query_router
 from app.config import get_settings
@@ -84,3 +85,4 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 app.include_router(health_router)
 app.include_router(query_router)
 app.include_router(admin_router)
+app.include_router(alerts_router)

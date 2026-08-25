@@ -35,6 +35,54 @@ class Settings(BaseSettings):
     prometheus_timeout_seconds: float = Field(default=15.0)
     opensearch_timeout_seconds: float = Field(default=15.0)
 
+    # --- Grafana (alert-rule creation -- SKILL.md Section 12) ---
+    alert_rule_creation_enabled: bool = Field(
+        default=False,
+        description="Feature flag for the alert-rule-creation capability (SKILL.md Section "
+                    "12). Defaults to OFF: while False, the Router/Generator prompts are "
+                    "built WITHOUT the alert-rule-creation addendum at all (see "
+                    "pipeline.py's _build_router_instructions/_build_generator_instructions), "
+                    "so an alert-creation request is classified exactly as it was before "
+                    "this capability existed (out_of_scope_action) -- there is no partial "
+                    "or inconsistent state. Turning this on does not by itself expose "
+                    "anything to end users beyond a PROPOSAL that still requires a separate, "
+                    "explicit confirmation call (see app/api/routes_alerts.py); it only "
+                    "controls whether that proposal step is reachable at all.",
+    )
+    grafana_url: str = Field(
+        default="http://localhost:3000",
+        description="Base URL of the Grafana instance alert rules are created against. "
+                    "Required (and must point at a real, reachable Grafana) only if "
+                    "alert_rule_creation_enabled is True.",
+    )
+    grafana_service_account_token: str | None = Field(
+        default=None,
+        description="Grafana service-account token used to authenticate provisioning-API "
+                    "requests (Authorization: Bearer <token>). Required if "
+                    "alert_rule_creation_enabled is True; grafana_client.py fails closed "
+                    "(returns a clear configuration-error outcome, never a silent no-op) "
+                    "if this is unset while the feature is enabled.",
+    )
+    grafana_default_folder_uid: str | None = Field(
+        default=None,
+        description="Grafana folder UID that newly-created alert rules are provisioned "
+                    "into when the request doesn't (and SKILL.md Section 12.5 says it "
+                    "never does) specify one itself. Required if alert_rule_creation_enabled "
+                    "is True.",
+    )
+    grafana_default_datasource_uid: str | None = Field(
+        default=None,
+        description="Grafana UID of the Prometheus datasource alert rule conditions are "
+                    "evaluated against -- this MUST be a datasource already configured in "
+                    "Grafana and pointing at the same Prometheus this backend queries via "
+                    "prometheus_url, or a proposed rule's condition_query will be evaluated "
+                    "against the wrong series entirely. Required if "
+                    "alert_rule_creation_enabled is True; resolved at confirmation time only "
+                    "(app/grafana_client.py), never by the Router or Generator (Section "
+                    "12.5's datasource_uid: null rule).",
+    )
+    grafana_timeout_seconds: float = Field(default=15.0)
+
     # --- Response safety limits ---
     max_points_per_series: int = Field(default=11_000,
                                         description="Prometheus's own default sample cap; also applied "

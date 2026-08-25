@@ -19,6 +19,11 @@ charts, buckets for bar charts/tables, or raw log hits for a log viewer. The
 frontend's job starts where this backend's response ends — deciding chart
 type, summarizing, rendering. This backend never does that.
 
+One narrow exception to "read-only": if `ALERT_RULE_CREATION_ENABLED` is
+set, the same question can also PROPOSE creating a brand-new Grafana alert
+rule — never automatically, always behind a separate explicit confirmation
+call. See §9. Off by default; skip §9 entirely if you're not using it yet.
+
 ---
 
 ## 2. Running it / connecting to it
@@ -59,8 +64,11 @@ anywhere reachable outside your own machine.
 | `question` | yes | Free-text. Also used as the answer to a clarifying question — see §6. |
 | `session_id` | no | Only present when replying to a clarification (§6). Omit for a fresh question. |
 
-That's the entire input contract. One field, one endpoint, for every kind of
-question — single-metric, multi-metric, comparison, follow-up clarification.
+That's the entire input contract for `POST /api/v1/query` — one field, one
+endpoint, for every kind of question — single-metric, multi-metric,
+comparison, follow-up clarification. `POST /api/v1/alerts/confirm` (§9.2)
+is a separate endpoint with its own, deliberately narrower, input contract
+(`session_id` + optional `confirm`) — it's not reachable through this one.
 
 ---
 
@@ -99,7 +107,8 @@ for (const entry of entries) {
 | `unsupported_metric` | The question wants something this skill package explicitly does not cover (see the matched reference's Do-Not-Use list). | No | Show `entry.explanation`. Nothing to retry — this isn't a "not implemented yet," it's "not applicable." |
 | `unmapped` | Nothing in the currently-loaded skill covers this measurement. **This is the status OpenSearch questions get today** — see §7. | No | Show `entry.explanation`. This is expected and will resolve itself once OpenSearch domain coverage ships — no frontend change needed then. |
 | `declined` | Nonsensical input, a prompt-injection attempt, or a parameter that needs clarifying (`entry.reason` tells you which). | No | If `reason === "parameter_requires_clarification"`, treat exactly like `ambiguous_metric` (`entry.clarification`, reply with `session_id`). Otherwise just show `entry.explanation`. |
-| `out_of_scope_action` | Asked for a write/mutating action (delete, restart, silence, etc.) — this backend is read-only, always. | No | Show `entry.explanation`. Never retryable. |
+| `out_of_scope_action` | Asked to silence, acknowledge, delete, restart, or otherwise modify something that already exists — this backend never mutates an existing resource, no exception. (Creating a brand-new alert rule is a separate, narrow exception — see the `alert_rule_proposed` row below and §9.) | No | Show `entry.explanation`. Never retryable. |
+| `alert_rule_proposed` | **Only when `ALERT_RULE_CREATION_ENABLED=true` (§9).** A brand-new Grafana alert rule was resolved from a verified metric and is ready to create — but hasn't been yet. | No — never executed by `POST /api/v1/query` | Show `entry.alert_rule` (title, condition, threshold, duration) for the user to review, then send `session_id` to `POST /api/v1/alerts/confirm` (§9.2) to actually create it, or to discard it (`"confirm": false`). |
 | `validation_failed` | **Not part of the skill's own status vocabulary** — see the callout below. | No | Treat exactly like `declined`: show `entry.explanation`, nothing to retry. |
 
 > **What is `validation_failed`?** Before any query reaches Prometheus/
@@ -233,7 +242,10 @@ same pass/fail result. It mechanically confirms:
   `instance` was ever actually confirmed),
 - the time range and step match the documented grammar and resolve to a
   sane start-before-end range,
-- the response shape matches SKILL.md's Output Contract exactly.
+- the response shape matches SKILL.md's Output Contract exactly,
+- (only for `alert_rule_proposed`, §9) the alert condition actually
+  references the resolved metric, and a threshold/comparison/duration/
+  folder are all present — never fabricated, and never silently left out.
 
 If any of that fails, the frontend gets a clean `validation_failed` result
 (§4.1) instead of a chart built on a query that might be wrong. This is also
@@ -277,6 +289,12 @@ In `mode: "multi"` responses, if even ONE entry needs clarification, the
 **entire** response holds off on execution (all entries), not just that one
 — answering the clarification can change how the whole multi-part question
 gets resolved, not just patch one piece of it.
+
+**This same session mechanism is also reused for `alert_rule_proposed`**
+(§9.2) — but answered by a *different* endpoint
+(`POST /api/v1/alerts/confirm`, not `POST /api/v1/query`), since confirming
+an alert-rule creation is a fundamentally different action than answering a
+clarifying question, even though both hold a session the same way.
 
 ---
 
@@ -370,7 +388,103 @@ of truth for how to author new skill content correctly.
 
 ---
 
-## 9. New-version replacement policy
+## 9. Alert Rule Creation (SKILL.md §12) — read this before turning it on
+
+**Disabled by default** (`ALERT_RULE_CREATION_ENABLED=false` in
+`.env.example`). This is the one narrow, explicit exception to this
+backend's read-only nature: with the flag on, a question like "alert me if
+CPU exceeds 90%" can PROPOSE creating a brand-new Grafana alert rule. It is
+never created automatically — a separate, explicit confirmation call is
+always required — and it never extends to silencing, deleting, or modifying
+an alert that already exists, flag on or off.
+
+### 9.1 Required Grafana-side setup
+
+You need a running Grafana instance with a Prometheus datasource pointing
+at the **same** Prometheus this backend already queries via
+`PROMETHEUS_URL` — a proposed rule's condition is plain PromQL evaluated by
+Grafana against whatever datasource UID you configure, so a mismatch here
+doesn't error, it just silently evaluates against the wrong series. Before
+setting `ALERT_RULE_CREATION_ENABLED=true`:
+
+1. Create a Grafana **service account** (Administration → Service
+   accounts) with at least the **Alert Rule Writer** role, and generate a
+   token from it.
+2. Note the **folder UID** you want new rules created into (Alerting →
+   Alert rules → your folder; the UID is in the URL, not the folder's
+   display name).
+3. Note the **datasource UID** of the Prometheus datasource pointing at
+   your existing Prometheus (Connections → Data sources → your datasource;
+   again, the UID is in the URL).
+4. Fill in `.env`'s `GRAFANA_URL`, `GRAFANA_SERVICE_ACCOUNT_TOKEN`,
+   `GRAFANA_DEFAULT_FOLDER_UID`, and `GRAFANA_DEFAULT_DATASOURCE_UID` — all
+   four are required once the flag is on; `app/grafana_client.py` fails
+   closed with a clear error rather than guessing if any is missing.
+5. Run `python3 scripts/smoke_test_grafana.py` — confirms the token is
+   valid and both UIDs actually exist and are visible to it, before you
+   try a real question.
+6. Set `ALERT_RULE_CREATION_ENABLED=true`.
+
+### 9.2 The propose → confirm flow
+
+This is a **two-step** flow, deliberately — the same shape as the
+clarification flow in §6, reusing the exact same session mechanism, but
+answered by a different endpoint because confirming is a fundamentally
+different action than answering a clarifying question:
+
+1. Ask a normal question through `POST /api/v1/query`:
+   `{"question": "alert me if CPU exceeds 90% on node-1 for 5 minutes"}`.
+2. If it resolves cleanly, you get back `result.status ===
+   "alert_rule_proposed"` (new row in §4.1's table below) with a non-null
+   `session_id` — **nothing has been created in Grafana yet.** Show the
+   user `result.alert_rule` (title, condition, threshold, duration) and ask
+   them to confirm.
+3. Send their confirmation to a **different** endpoint,
+   `POST /api/v1/alerts/confirm`, with just the `session_id`:
+   `{"session_id": "<the id from step 2>"}`. This is the only call in the
+   whole flow that actually writes to Grafana. Set `"confirm": false`
+   instead to discard the proposal without creating anything.
+4. On success: `{"status": "created", "rule_uid": "...", "deeplink":
+   "http://.../alerting/grafana/.../view"}` — safe to link the user
+   straight to the rule in Grafana. See README.md's API section for the
+   full response shape, including every non-success `status` value.
+5. Like a clarification session, this is single-use and TTL-bound
+   (`SESSION_TTL_SECONDS`, same 600s default) — an expired/already-used
+   `session_id` gets HTTP 410 from either endpoint, same as §6.
+
+**Why a plain question can't create a rule in one call:** every alert
+rule's condition and threshold has to trace back to something explicitly
+verified (SKILL.md §12.4) and the user has to see and explicitly agree to
+exactly what will be created — a threshold, folder, or condition is never
+guessed on their behalf. If a required piece (threshold value, comparison
+direction) is missing from the question, you get `status: "declined"`,
+`reason: "parameter_requires_clarification"` instead — handle it exactly
+like any other clarification (§6), it just happens to be gathering
+information for an eventual alert proposal rather than a chart.
+
+### 9.3 What you will and won't see
+
+Most metrics today don't have a verified alert condition yet — only
+`node_cpu_seconds_total` does, as of this version (see
+`skills/references/node-exporter/cpu.md`'s Alert query/threshold field).
+Asking to create an alert for anything else currently comes back
+`status: "unsupported_metric"`, explaining plainly that no verified alert
+query is defined for that metric yet — this is expected, not a bug, and
+matches the same "never fabricate" discipline every other part of this
+skill package already follows for query construction. As more metrics get
+a verified Alert query/threshold field (`skills/EXTENDING.md`'s authoring
+conventions cover this field the same way they cover Query Examples),
+alert-rule creation becomes available for them automatically — no code
+change, same mechanism as §8.
+
+**Silencing, deleting, or modifying an existing alert is never in scope,**
+flag on or off — a request like "silence this alert" or "delete that alert
+rule" always comes back `status: "out_of_scope_action"`, unchanged from
+every prior version of this backend.
+
+---
+
+## 10. New-version replacement policy
 
 You said the plan is: hand this off, keep improving OpenSearch coverage
 separately, and later just replace the `backend/` folder wholesale in the
@@ -394,15 +508,19 @@ frontend team's copy of the repo. That's exactly how this was built to work:
   rename one (would need updating). Everything in `.env.example` has an
   inline comment explaining what it does.
 - **This version's specific contract additions**, for the record: the
-  `unresolved_topics` → `unmapped`-entries mechanism in §7/§8, and the
-  `validation_failed` status in §4.1. Both are additive — nothing already
-  built against `ok`/`ambiguous_metric`/etc. needs to change.
+  `unresolved_topics` → `unmapped`-entries mechanism in §7/§8, the
+  `validation_failed` status in §4.1, and (this version) the
+  `alert_rule_proposed` status plus the new `POST /api/v1/alerts/confirm`
+  endpoint (§9) — disabled by default via `ALERT_RULE_CREATION_ENABLED`,
+  so it changes nothing for a deployment that doesn't opt in. All are
+  additive — nothing already built against `ok`/`ambiguous_metric`/etc.
+  needs to change.
 
 ---
 
-## 10. Testing this before you hand it off
+## 11. Testing this before you hand it off
 
-### 10.1 Automated tests (run these first, always)
+### 11.1 Automated tests (run these first, always)
 
 ```bash
 pip install -r requirements-dev.txt
@@ -425,12 +543,12 @@ correct; it can't verify the AI model's behavior, because the AI model
 itself is mocked out on purpose (that's what makes it possible to run this
 suite in a few seconds with no API key at all).
 
-### 10.2 Live testing (do this before trusting real answers)
+### 11.2 Live testing (do this before trusting real answers)
 
 **Neither I nor the previous version of this backend could reach Google's
 Gemini API or your local Prometheus/OpenSearch from the sandbox environment
 this was built in — no network path to either.** This is stated plainly so
-you know exactly what has and hasn't been verified: everything in §10.1 has
+you know exactly what has and hasn't been verified: everything in §11.1 has
 been run and passes; nothing that requires a live Gemini/Prometheus/
 OpenSearch connection has been. Run these, in order, on your own machine:
 
@@ -458,8 +576,18 @@ OpenSearch connection has been. Run these, in order, on your own machine:
 5. **Specifically test a clarification round-trip** (§6) — ask something
    genuinely ambiguous, confirm you get `session_id` back, send the
    follow-up, confirm it resolves using the combined context.
+6. **If you turned on `ALERT_RULE_CREATION_ENABLED`:** run
+   `python3 scripts/smoke_test_grafana.py` first (§9.1), then test the
+   full propose → confirm round-trip (§9.2) — ask "alert me if CPU exceeds
+   90% on node-1 for 5 minutes", confirm you get `status:
+   "alert_rule_proposed"` with a `session_id` and nothing yet created in
+   Grafana, then `POST /api/v1/alerts/confirm` with that `session_id` and
+   confirm the rule actually appears in Grafana's alert list. Also test
+   `"confirm": false` and confirm nothing gets created. Also re-confirm
+   "silence this alert" still comes back `out_of_scope_action` — this flag
+   must never change that.
 
-### 10.3 What "ready to hand to the frontend team" looks like
+### 11.3 What "ready to hand to the frontend team" looks like
 
 - [ ] `pytest -q` passes completely, on a clean checkout.
 - [ ] Both smoke-test scripts pass against your real Gemini key and local Prometheus.
@@ -470,9 +598,12 @@ OpenSearch connection has been. Run these, in order, on your own machine:
 - [ ] The clarification round-trip in §6 works end-to-end.
 - [ ] `GET /api/v1/capabilities` returns your current routing table (sanity
       check that the skill loaded correctly).
+- [ ] If `ALERT_RULE_CREATION_ENABLED=true`: the propose → confirm
+      round-trip in §9.2 works end-to-end against your real Grafana, and
+      "silence this alert" still comes back `out_of_scope_action`.
 
 If all six pass, this is in a good state to hand off. If something in
-category 10.2 doesn't pass, it's very likely a prompt-tuning issue (the
+category 11.2 doesn't pass, it's very likely a prompt-tuning issue (the
 Router/Generator not interpreting a specific question the way you'd want),
 not a structural bug — those are the parts that could genuinely not be
 verified without your real credentials, and are the most likely place for
@@ -480,7 +611,7 @@ rough edges to surface on first real use.
 
 ---
 
-## 11. File manifest (what's in this folder and why)
+## 12. File manifest (what's in this folder and why)
 
 ```
 app/            All backend logic. See README.md's "Project layout" for the
@@ -490,21 +621,34 @@ skills/         The skill package (SKILL.md + references/). This is DATA,
                 domain knowledge (metrics, exporters, routing) lives. This
                 is what you keep editing for OpenSearch coverage; app/ does
                 not need to change for that.
-  SKILL.md                    The routing table + all behavioral rules.
+  SKILL.md                    The routing table + all behavioral rules,
+                                including alert-rule-creation (§12 in
+                                SKILL.md itself -- yes, same number as this
+                                document's own §9 on the same topic; they're
+                                independently numbered documents).
   EXTENDING.md                 How to author new skill content correctly --
                                 read this, not this handoff doc, when adding
-                                OpenSearch domains.
+                                OpenSearch domains or a new metric's Alert
+                                query/threshold field.
   references/                  Per-exporter/per-domain/per-backend content.
   assets/templates/            Copy these when authoring new reference files.
   evals/regression-cases.md    Hand-authored test questions -- your primary
-                                live-testing tool (§10.2).
+                                live-testing tool (§11.2).
   scripts/check_metric_directory.py  Run after editing a Metric Directory --
                                 catches drift between it and the domain file
                                 (dangling/missing entries) before it reaches
                                 a real conversation.
-tests/          Automated tests (§10.1). Mirrors app/'s module structure.
-scripts/        smoke_test_gemini.py, smoke_test_prometheus.py (§10.2).
-.env.example    Every setting, documented inline. Copy to .env and fill in.
+tests/          Automated tests (§11.1). Mirrors app/'s module structure.
+                Includes test_grafana_client.py and test_alerts_api.py for
+                the alert-rule-creation feature (§9).
+scripts/        smoke_test_gemini.py, smoke_test_prometheus.py,
+                smoke_test_grafana.py (§9.1, §11.2) -- the last one only
+                relevant if ALERT_RULE_CREATION_ENABLED is set.
+.env.example    Every setting, documented inline, including the GRAFANA_*
+                block (§9.1). Copy to .env and fill in. Did not exist before
+                this version -- created fresh alongside the alert-rule-
+                creation feature since no prior version had introduced
+                enough settings to need it as its own file.
 README.md       Short developer-facing quickstart. This file (HANDOFF.md) is
                 the complete picture; README.md is the fast path back to a
                 running server.

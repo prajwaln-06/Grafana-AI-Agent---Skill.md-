@@ -38,6 +38,17 @@ WHAT THIS FILE CHECKS, and where each rule comes from:
   5. prometheus-fundamentals.md's "Time Expression Grammar (Tightened)" --
      `time_range.from` / `.to` / `.step` must match the documented grammar
      and `time_utils` must be able to resolve them.
+  6. SECTION 12's ALERT-RULE-CREATION NON-FABRICATION RULES -- for
+     `alert_rule_proposed` results only: `alert_rule.condition_query` must
+     reference the resolved metric (never a different, invented
+     expression), and `alert_rule.comparison` (operator + threshold),
+     `alert_rule.for_duration`, and `alert_rule.folder` must all be present
+     -- none of these four are ever supplied by a reference file or invented
+     mid-generation, so their absence here means the Generator should have
+     produced `declined`/`parameter_requires_clarification` instead. This
+     status is never in EXECUTABLE_STATUSES (executor.py) and this module
+     has no say over what happens after validation passes -- see
+     app/api/routes_alerts.py for the separate confirmation step.
 
 DESIGN PRINCIPLE -- prefer a warning over a false rejection: any check this
 module cannot confidently evaluate (e.g. an OpenSearch field name -- there
@@ -69,14 +80,18 @@ class ValidationResult:
 
 _VALID_STATUSES = {
     "ok", "panic_mode_best_effort", "ambiguous_metric", "unsupported_metric",
-    "unmapped", "declined", "out_of_scope_action",
+    "unmapped", "declined", "out_of_scope_action", "alert_rule_proposed",
 }
 _EXECUTABLE_STATUSES = {"ok", "panic_mode_best_effort"}
-_ALWAYS_SINGLE_STATUSES = {"unmapped", "declined", "out_of_scope_action"}
+# NOTE: "alert_rule_proposed" (SKILL.md §12) is deliberately absent from
+# _EXECUTABLE_STATUSES -- see executor.py's module docstring. It must never
+# be auto-executed; it is validated here for shape/non-fabrication only.
+_ALWAYS_SINGLE_STATUSES = {"unmapped", "declined", "out_of_scope_action", "alert_rule_proposed"}
 _VALID_DECLINED_REASONS = {
     "nonsensical_input", "prompt_injection_attempt", "parameter_requires_clarification",
 }
 _VALID_MEASUREMENT_TYPES = {"raw_metric", "derived_measurement"}
+_VALID_COMPARISON_OPERATORS = {">", "<", ">=", "<=", "==", "!="}
 
 # Matches label="value" / label!="value" / label=~"value" / label!~"value"
 # selector clauses, wherever they occur in the query string -- this syntax
@@ -207,6 +222,9 @@ def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: d
         return _validate_declined(entry)
     if status == "out_of_scope_action":
         return _require_fields(entry, ["requested_action", "explanation"], status)
+    if status == "alert_rule_proposed":
+        return _validate_alert_rule_proposed(entry, known_references=known_references,
+                                              known_datasources=known_datasources)
     return ValidationResult(False, f"No validation rule implemented for status {status!r} -- this is a gap in "
                                     f"validator.py, not necessarily a bad contract; treat as fail-safe.")
 
@@ -241,6 +259,138 @@ def _validate_declined(entry: dict) -> ValidationResult:
         return ValidationResult(False, f"'declined' reason {reason!r} is not one of {sorted(_VALID_DECLINED_REASONS)}.")
     if reason == "parameter_requires_clarification" and not entry.get("clarification"):
         return ValidationResult(False, "declined/parameter_requires_clarification must include a non-empty 'clarification'.")
+    return ValidationResult(True)
+
+
+def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
+                                   known_datasources: set[str]) -> ValidationResult:
+    """SKILL.md Section 12 / Section 9's `alert_rule_proposed` status.
+
+    This result is NEVER auto-executed -- it's deliberately absent from
+    executor.py's EXECUTABLE_STATUSES. It only ever reaches a real Grafana
+    write via the separate, explicit confirmation flow described in Section
+    12.1 (app/api/routes_alerts.py + app/grafana_client.py). This function's
+    only job is confirming the PROPOSAL itself is well-formed and not
+    fabricated -- it has no opinion on what happens after confirmation.
+    """
+    required = ["reference_used", "measurement_used", "data_source", "alert_rule", "explanation"]
+    base = _require_fields(entry, required, "alert_rule_proposed")
+    if not base.passed:
+        return base
+
+    if known_references and entry["reference_used"] not in known_references:
+        return ValidationResult(
+            False,
+            f"reference_used {entry['reference_used']!r} was not one of the references this "
+            f"request actually opened ({sorted(known_references)}) -- looks fabricated or stale.",
+        )
+
+    measurement = entry.get("measurement_used")
+    if not isinstance(measurement, dict):
+        return ValidationResult(False, "'measurement_used' must be an object.")
+    m_type = measurement.get("type")
+    if m_type not in _VALID_MEASUREMENT_TYPES:
+        return ValidationResult(False, f"measurement_used.type {m_type!r} must be one of {sorted(_VALID_MEASUREMENT_TYPES)}.")
+    name = measurement.get("name")
+    if not name:
+        return ValidationResult(False, "measurement_used.name is required and must be non-empty.")
+    source_metrics = measurement.get("source_metrics", [])
+    if m_type == "derived_measurement" and not source_metrics:
+        return ValidationResult(False, "measurement_used.type is 'derived_measurement' but 'source_metrics' is empty; "
+                                        "Section 5 Principle 7 requires multiple distinct source metrics for that classification.")
+    if m_type == "raw_metric" and source_metrics:
+        return ValidationResult(False, "measurement_used.type is 'raw_metric' but 'source_metrics' is non-empty; "
+                                        "a raw metric with transformations applied is still 'raw_metric' per Principle 7.")
+
+    data_source = (entry.get("data_source") or "").strip().lower()
+    if known_datasources and data_source not in known_datasources:
+        return ValidationResult(
+            False,
+            f"data_source {data_source!r} was not among the datasources this request actually "
+            f"routed to ({sorted(known_datasources)}).",
+        )
+    if data_source != "prometheus":
+        # Grafana alert rules are provisioned against a Prometheus datasource
+        # in this deployment (grafana_client.py); no other backend is wired
+        # up for alert-rule creation yet.
+        return ValidationResult(
+            False,
+            f"'alert_rule_proposed' currently only supports data_source 'prometheus'; got {data_source!r}.",
+        )
+
+    alert_rule = entry.get("alert_rule")
+    if not isinstance(alert_rule, dict):
+        return ValidationResult(False, "'alert_rule' must be an object.")
+
+    if not alert_rule.get("title"):
+        return ValidationResult(False, "alert_rule.title is required and must be non-empty.")
+
+    condition_query = alert_rule.get("condition_query")
+    if not isinstance(condition_query, str) or not condition_query.strip():
+        return ValidationResult(False, "alert_rule.condition_query is required and must be a non-empty PromQL string.")
+
+    # Section 12.4: the condition must be derived from the SAME verified base
+    # expression as the resolved metric -- mirrors _validate_prometheus_entry's
+    # substring check for the same reason (a fabricated condition wouldn't
+    # mention the metric it claims to be about).
+    for metric_name in [name, *source_metrics]:
+        if metric_name and metric_name not in condition_query:
+            return ValidationResult(
+                False,
+                f"measurement_used references {metric_name!r} but that metric name does not appear "
+                f"anywhere in alert_rule.condition_query {condition_query!r} -- Section 12.4 requires "
+                f"the condition to be derived from that metric's own verified base expression.",
+            )
+
+    # Section 12.4/12.5: threshold and comparison direction are never
+    # supplied by a reference file and are never invented -- they must
+    # already have come from the user by the time this is validated.
+    comparison = alert_rule.get("comparison")
+    if not isinstance(comparison, dict):
+        return ValidationResult(False, "alert_rule.comparison is required and must be an object with 'operator' and 'threshold'.")
+    operator = comparison.get("operator")
+    if operator not in _VALID_COMPARISON_OPERATORS:
+        return ValidationResult(False, f"alert_rule.comparison.operator {operator!r} must be one of "
+                                        f"{sorted(_VALID_COMPARISON_OPERATORS)}.")
+    threshold = comparison.get("threshold")
+    # Defensive coercion: if the Generator produced a numeric string
+    # (e.g. "90", "90.5", or "90%" with a trailing unit) despite being told
+    # to emit a JSON number, coerce it here rather than fail validation --
+    # the underlying non-fabrication rule is about not INVENTING a
+    # threshold when none was given, not about JSON typing. A string that
+    # cleanly parses as a number carries exactly the same user-supplied
+    # information the number would.
+    if isinstance(threshold, str):
+        stripped = threshold.strip().rstrip("%").rstrip("°").strip()
+        try:
+            threshold = float(stripped)
+            comparison["threshold"] = threshold
+        except ValueError:
+            pass  # leave the original value; next check will reject it
+    if threshold is None or isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        return ValidationResult(False, "alert_rule.comparison.threshold is required and must be a number -- "
+                                        "Section 12.4 never invents a threshold, so it must come from the user, "
+                                        "never be missing.")
+
+    if not alert_rule.get("for_duration"):
+        return ValidationResult(False, "alert_rule.for_duration is required -- Section 12.5 never invents a "
+                                        "duration; it must come from the user, or the result should have been "
+                                        "'declined'/'parameter_requires_clarification' instead.")
+
+    # Section 12.5: folder is supplied by the surrounding application (from
+    # deployment config), never invented by the Generator; datasource_uid is
+    # always null at this stage, resolved only at confirmation time.
+    if not alert_rule.get("folder"):
+        return ValidationResult(False, "alert_rule.folder is required -- Section 12.5 expects the surrounding "
+                                        "application to have supplied the deployment's default alert folder by "
+                                        "this point (see app/config.py's GRAFANA_DEFAULT_FOLDER_UID).")
+    if alert_rule.get("datasource_uid") is not None:
+        return ValidationResult(
+            False,
+            "alert_rule.datasource_uid must be null at this stage (Section 12.5) -- resolving it is the "
+            "surrounding application's job at confirmation time (app/grafana_client.py), never the Generator's.",
+        )
+
     return ValidationResult(True)
 
 

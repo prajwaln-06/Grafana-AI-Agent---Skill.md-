@@ -144,6 +144,8 @@ Semantics below for which function, if any, applies.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`
 
 - **Category:** ECC
@@ -170,6 +172,8 @@ Semantics below for which function, if any, applies.
   of `SKILL.md` defaults beyond this is currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
+
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `DCGM_FI_DEV_RETIRED_SBE`
 
@@ -201,6 +205,8 @@ Semantics below for which function, if any, applies.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_DEV_RETIRED_DBE`
 
 - **Category:** Reliability
@@ -231,6 +237,8 @@ Semantics below for which function, if any, applies.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_DEV_RETIRED_PENDING`
 
 - **Category:** Reliability
@@ -258,6 +266,8 @@ Semantics below for which function, if any, applies.
   defaults.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
+
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL`
 
@@ -288,6 +298,8 @@ Semantics below for which function, if any, applies.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL`
 
 - **Category:** NVLink Health
@@ -317,6 +329,8 @@ Semantics below for which function, if any, applies.
   of `SKILL.md` defaults beyond this is currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
+
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ## Domain-Specific Guardrails
 

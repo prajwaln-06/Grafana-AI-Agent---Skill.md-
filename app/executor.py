@@ -8,6 +8,18 @@ the backend it targets. No LLM calls happen here -- this is why it's safe to
 run unconditionally after validation passes, and why a bug here is a code
 bug, not a model-output problem.
 
+`status: "alert_rule_proposed"` (SKILL.md §12) is deliberately excluded from
+EXECUTABLE_STATUSES below and therefore never reaches any of the
+`_execute_*` functions in this file -- it passes through `_execute_one_entry`
+unchanged, exactly like `ambiguous_metric`, `unsupported_metric`, `unmapped`,
+`declined`, and `out_of_scope_action` already do. This is intentional and
+load-bearing: an alert rule must never be created by this module or by
+anything in the Router -> Generator -> Validator -> Executor pipeline this
+file is the last stage of. Actual creation only ever happens via the
+separate, explicit confirmation endpoint described in SKILL.md §12.1 (see
+`app/api/routes_alerts.py` and `app/grafana_client.py`), which this module
+has no dependency on and never imports.
+
 Two hardening properties this module guarantees that the pre-migration
 executor did not:
 
@@ -31,6 +43,12 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
+# Deliberately does NOT include "alert_rule_proposed" (SKILL.md §12) -- that
+# status must stay pending, untouched by this module, until the separate
+# confirmation endpoint (app/api/routes_alerts.py) explicitly creates the
+# rule via app/grafana_client.py. Adding it here would defeat the entire
+# propose/confirm safety boundary §12 exists to enforce; do not add it
+# without re-reading §12.1 first.
 EXECUTABLE_STATUSES = {"ok", "panic_mode_best_effort"}
 
 

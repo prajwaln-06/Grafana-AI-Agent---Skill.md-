@@ -17,6 +17,16 @@ router = APIRouter()
 
 CLARIFICATION_STATUSES = {"ambiguous_metric"}
 CLARIFICATION_REASONS = {"parameter_requires_clarification"}
+CONFIRMATION_REQUIRED_STATUSES = {"alert_rule_proposed"}
+# SKILL.md Section 12: an alert_rule_proposed result is a PROPOSAL only and
+# must never be auto-executed (see executor.py's module docstring). It
+# needs a session held for the same *mechanical* reason CLARIFICATION_
+# STATUSES does below -- the caller needs a session_id to act on this
+# result in a second step -- but that second step is a different endpoint
+# (POST /api/v1/alerts/confirm, app/api/routes_alerts.py) doing a
+# fundamentally different thing: confirm-and-create, not answer-and-retry.
+# Kept as its own named set rather than merged into CLARIFICATION_STATUSES
+# so that distinction stays visible in code, not just in a comment.
 
 
 @router.post("/api/v1/query", response_model=QueryResponse)
@@ -63,7 +73,7 @@ async def query(request: Request, body: QueryRequest) -> QueryResponse:
         logger.exception("Pipeline failed for question: %s", body.question)
         raise HTTPException(status_code=502, detail="The query pipeline failed unexpectedly. Please try again.")
 
-    if _needs_clarification(contract):
+    if _needs_clarification(contract) or _needs_confirmation(contract):
         new_session_id = store.create(body.question, contract)
         return QueryResponse(result=contract, session_id=new_session_id)
 
@@ -96,3 +106,23 @@ def _entry_needs_clarification(entry: dict) -> bool:
     if entry.get("status") == "declined" and entry.get("reason") in CLARIFICATION_REASONS:
         return True
     return False
+
+
+def _needs_confirmation(contract: dict) -> bool:
+    """True if the contract itself (or, in a `mode: "multi"` response, any
+    entry within it) is `alert_rule_proposed` -- SKILL.md §12.5 says this
+    status is always `mode: "single"` on its own, but a compound request can
+    still merge it alongside an `unmapped` entry for an unrelated topic
+    (pipeline.py's unresolved-topics merge), so this checks both shapes
+    exactly like `_needs_clarification` does, for the same reason: don't
+    execute anything else in the response until the pending piece is
+    resolved one way or another."""
+    if _entry_needs_confirmation(contract):
+        return True
+    if contract.get("mode") == "multi":
+        return any(_entry_needs_confirmation(entry) for entry in contract.get("results", []))
+    return False
+
+
+def _entry_needs_confirmation(entry: dict) -> bool:
+    return entry.get("status") in CONFIRMATION_REQUIRED_STATUSES

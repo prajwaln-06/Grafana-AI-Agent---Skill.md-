@@ -28,7 +28,7 @@ def test_capabilities_exposes_routing_table():
         r = client.get("/api/v1/capabilities")
     assert r.status_code == 200
     body = r.json()
-    assert body["skill_version"] == "1.1"
+    assert body["skill_version"] == "1.2"
     assert len(body["routing_rows"]) >= 10
 
 

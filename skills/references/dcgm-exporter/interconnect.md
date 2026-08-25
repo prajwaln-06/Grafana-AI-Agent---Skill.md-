@@ -113,6 +113,8 @@ versa.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_PROF_PCIE_RX_BYTES`
 
 - **Category:** PCIe
@@ -139,6 +141,8 @@ versa.
   per-metric override of `SKILL.md` defaults is currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
+
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `DCGM_FI_PROF_NVLINK_TX_BYTES`
 
@@ -169,6 +173,8 @@ versa.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
+
 ### `DCGM_FI_PROF_NVLINK_RX_BYTES`
 
 - **Category:** NVLink
@@ -197,6 +203,8 @@ versa.
   per-metric override of `SKILL.md` defaults is currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
+
+- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ## Domain-Specific Guardrails
 
