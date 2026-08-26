@@ -224,6 +224,45 @@ export default function AdkAssistantTab({
             <div ref={bottomRef} />
           </div>
 
+          <div
+            className="sample-prompt-chips"
+            style={{
+              display: "flex",
+              gap: "6px",
+              flexWrap: "wrap",
+              padding: "6px 16px",
+              background: "rgba(0,0,0,0.15)",
+            }}
+          >
+            {[
+              { label: "📋 Create Dashboard", prompt: "Create a dashboard on Grafana." },
+              { label: "📈 CPU Utilization", prompt: "What is the CPU utilization on node-exporter:9100?" },
+              { label: "📊 Memory Usage", prompt: "Show memory utilization on my instances" },
+              { label: "🔍 List Dashboards", prompt: "List all available dashboards" },
+              { label: "📜 Error Logs", prompt: "Show recent error logs" },
+            ].map((chip) => (
+              <button
+                key={chip.label}
+                type="button"
+                className="chip"
+                onClick={() => {
+                  setInput(chip.prompt);
+                }}
+                style={{
+                  fontSize: "11px",
+                  padding: "3px 8px",
+                  borderRadius: "12px",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  background: "rgba(255,255,255,0.04)",
+                  color: "var(--muted, #999)",
+                  cursor: "pointer",
+                }}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+
           <form className="chat-input" onSubmit={onSubmit}>
             <input
               value={input}
