@@ -704,7 +704,12 @@ async def build_proposal(request: str, target: str | None = None, time_range: st
         schema = await discover_prometheus_schema()
         prometheus_requested = _explicit_metric_panels(request, schema["metrics"])
         if not prometheus_requested:
-            raise ValueError("No supported metric or log/document request was identified; clarify the datasource and measurement intent.")
+            # Provide standard system overview panels if request did not name specific metrics
+            prometheus_requested = [
+                {"measurement": "cpu", "title": "CPU Utilization", "position": 0, "datasourceType": "prometheus"},
+                {"measurement": "memory", "title": "Memory Utilization", "position": 1, "datasourceType": "prometheus"},
+                {"measurement": "disk", "title": "Disk Utilization", "position": 2, "datasourceType": "prometheus"},
+            ]
     groups = []
     if prometheus_requested:
         groups.append(("prometheus", _resolve_prometheus_panels(prometheus_requested, request, target, time_range)))
