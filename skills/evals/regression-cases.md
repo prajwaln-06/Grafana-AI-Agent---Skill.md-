@@ -1,0 +1,486 @@
+Representative regression cases for `observability-query-builder`. Maintainer-run
+(e.g. by hand or scripted against a Claude session using this skill), not agent-run
+— Claude is not responsible for judging its own output's correctness. Compare
+actual output against Expected for each case after any change to `SKILL.md` or a
+reference file.
+
+Each case lists: the input, the reference(s) that should be consulted, and the
+expected `status` (and key fields) per SKILL.md §9.
+
+---
+
+## 1. Correct routing
+
+**Input:** "What is the CPU utilization on node-3?"
+**Expected:** Routes to `references/node-exporter/cpu.md` only (not `dcgm-exporter/*`).
+`status: "ok"`, `measurement_used.name: "node_cpu_seconds_total"`, entity scope
+`node-3` preserved in the query.
+
+**Input:** "Is any GPU throttling right now?"
+**Expected:** Routes to `references/dcgm-exporter/thermal.md`.
+`status: "unsupported_metric"` for `DCGM_FI_DEV_POWER_VIOLATION`
+specifically (see case 8) — not `ok`, even though the metric is identified
+unambiguously.
+
+## 2. Correct domain selection within a shared exporter
+
+**Input:** "How much memory is available, and what's the CPU utilization?"
+**Expected:** Two independently resolved measurements from two different domain
+files under the same exporter (`node-exporter/memory.md`, `node-exporter/cpu.md`).
+`mode: "multi"`, two entries in `results`.
+
+## 3. Raw vs. derived classification
+
+**Input:** "What's the average CPU utilization over the last hour?"
+**Expected:** `measurement_used.type: "raw_metric"`, `name: "node_cpu_seconds_total"`.
+Applying `avg()`/`rate()` does **not** make this a `derived_measurement` — Principle
+7 (§5) explicitly prevents transformation-based misclassification here.
+
+**Input:** "What's the memory bandwidth utilization?"
+**Expected:** `status: "ok"`, `measurement_used.type: "raw_metric"`,
+`name: "DCGM_FI_DEV_MEM_COPY_UTIL"`. The authoritative metric document's own
+Typical Query Intent column lists "Memory bandwidth utilization" as the
+documented trigger phrase for this specific metric — this is a
+document-established phrase-to-metric mapping, not an assertion that
+`DCGM_FI_DEV_MEM_COPY_UTIL` and `DCGM_FI_PROF_DRAM_ACTIVE` measure the same
+underlying activity (that relationship remains unresolved — see case 24).
+
+**Input (negative control, currently unsupported):** "What's the
+compute-to-memory-bandwidth ratio for this GPU?" where no reference defines a
+derived measurement combining a compute-activity metric and a
+memory-bandwidth metric into a single ratio.
+**Expected:** `status: "unsupported_metric"` — must not be answered by
+inventing a derived relationship between two plausibly-related raw metrics
+from different domains.
+
+## 4. Explicit scope handling
+
+**Input:** "Show CPU utilization for CPU 2 on node-7."
+**Expected:** The node-7 entity constraint and the per-CPU ("CPU 2") constraint
+are both preserved, each expressed using a label key confirmed by the runtime
+for `node_cpu_seconds_total` at query-generation time (`SKILL.md` §5
+Principle 9) — never a literal `cpu="2"` assumed from this reference. If the
+runtime cannot confirm a label key for the per-CPU constraint specifically,
+this must not be silently dropped — see case 19. No additional scope (e.g. a
+specific time range beyond the default) is invented.
+
+**Input:** "How busy is the CPU?" (no entity given)
+**Expected:** No entity/node scope invented (§5 Principle 3, §8) — defaults to the
+aggregate view, with the assumption stated in `explanation`. Must not silently pick
+one arbitrary node.
+
+## 5. Multiple explicitly requested measurements
+
+**Input:** "Show me both total and free swap space."
+**Expected:** Two independent results from `node-exporter/memory.md`
+(`node_memory_SwapTotal_bytes` and `node_memory_SwapFree_bytes`) — `mode:
+"multi"`. Must not be collapsed into a single derived "swap usage" measurement,
+since `node-exporter/overview.md` explicitly defines no derived/composed
+measurements for this exporter — each requested metric is a distinct raw metric,
+not a derivation.
+
+## 6. Ambiguity
+
+**Input:** "How's the memory looking?"
+**Expected:** `status: "ambiguous_metric"` with `candidates` drawn from
+`node-exporter/memory.md` (at minimum `MemAvailable_bytes` and `MemFree_bytes`,
+which are explicitly documented as confusable). Must not arbitrarily pick one, and
+must not return all memory metrics at once "to be comprehensive."
+
+## 7. Unsupported measurements
+
+**Input:** "What's the disk I/O throughput on node-3?"
+**Expected:** `status: "unmapped"` — no Node Exporter domain in this skill
+defines a disk I/O throughput metric (only filesystem *capacity* is defined,
+in `references/node-exporter/filesystem.md`). Must not attempt to construct a
+plausible-looking query for a metric that isn't in any Metric Directory, and
+must not substitute a filesystem capacity metric for an I/O throughput
+request merely because both concern "disk."
+
+*(Superseded case, kept for history: "What's the load average on node-3?" was
+previously used as an unsupported-measurement example. Load average
+(`node_load1`/`5`/`15`) was implemented in the Node Exporter extension and now
+resolves via `references/node-exporter/cpu.md` — see case 1 for its current
+expected routing behavior.)*
+
+## 8. Prevention of invented metric relationships / unverified query semantics
+
+**Input:** "Is the GPU being power-throttled right now?"
+**Expected:** `status: "unsupported_metric"` for `DCGM_FI_DEV_POWER_VIOLATION`
+specifically — its unit is explicitly unverified in the source reference, and
+Principle 8 (§5) blocks query construction for it regardless of how confidently
+the metric itself was identified. This must not degrade to `ok` even though the
+metric identification is unambiguous.
+
+## 9. Prevention of invented metric names / labels
+
+**Input:** "What's `node_cpu_percent` on node-3?" (a plausible-sounding but
+non-existent metric name, supplied explicitly by the user as an identifier)
+**Expected:** `status: "unsupported_metric"`. An explicitly supplied metric
+identifier that does not exist in the Metric Directory must be rejected as
+unsupported, not silently substituted — the invented name must never appear in
+a constructed query, and the request must not be reinterpreted as if the user
+had asked a natural-language question instead.
+
+**Input (separate case, natural-language mapping):** "What's the CPU usage
+percentage on node-3?"
+**Expected:** `status: "ok"`, resolving to the real metric
+`node_cpu_seconds_total` per its documented Intent Examples — this is ordinary
+natural-language-to-metric mapping, not an invented identifier, and must succeed
+deterministically.
+
+## 10. Out-of-scope actions
+
+**Input:** "Restart node-3's GPU driver."
+**Expected:** `status: "out_of_scope_action"`. Must not be reinterpreted as a
+monitoring question about GPU state.
+
+## 11. Datasource-infrastructure-only boundary (OpenSearch)
+
+**Input:** "Show me error log volume from OpenSearch over the last day."
+**Expected:** `status: "unmapped"` — `opensearch-fundamentals.md` documents query
+mechanics only; no domain/exporter reference currently exists for it. Must not be
+answered using Prometheus-side reasoning, and must not be treated as `ok` just
+because query-language fundamentals exist for OpenSearch.
+
+## 12. Panic-mode handling
+
+**Input:** "everything is on fire the node is dying help"
+**Expected:** At least one domain signal present ("node") →
+`status: "panic_mode_best_effort"` using the broadest reasonable interpretation
+(likely CPU + memory overview), with the required `caveat` field present. Must not
+return `declined` when a domain signal exists.
+
+**Input:** "help everything is broken"
+**Expected:** Zero domain signal → `status: "declined"`,
+`reason: "parameter_requires_clarification"`, with a single narrow
+`clarification` question.
+
+## 13. Node Exporter extension — correct routing to the filesystem domain
+
+**Input:** "How much disk space is available on node-3?"
+**Expected:** Routes to `references/node-exporter/filesystem.md` (not
+`memory.md`, despite superficial "available space" wording overlap with
+`node_memory_MemAvailable_bytes`). `status: "ok"`,
+`measurement_used.name: "node_filesystem_avail_bytes"`.
+
+## 14. Node Exporter extension — CPU utilization vs. system load (within-domain ambiguity boundary)
+
+**Input:** "Is the CPU under heavy load?"
+**Expected:** `status: "ambiguous_metric"`. This phrasing blends both
+domains' vocabulary ("CPU," from CPU utilization's documented questions,
+alongside "load," which is both `cpu.md`'s own Category name for
+`node_load1`/`5`/`15` and a common colloquial synonym for CPU usage) without
+matching either domain's documented typical-question wording closely enough
+to resolve on its own. `candidates` should include at least a CPU-utilization
+option and a system-load option, with `clarification` asking which the user
+means. Must not default to one interpretation and must not answer with both
+under `mode: "multi"` merely to be comprehensive.
+
+**Input (negative control — not ambiguous):** "Is the system overloaded?"
+**Expected:** `status: "ok"` (or `ambiguous_metric` only at the window level —
+see case 15), resolving toward the `node_load1`/`5`/`15` family, **not**
+`status: "ambiguous_metric"` against `node_cpu_seconds_total`. This wording
+matches `cpu.md`'s documented Load intent example ("Is the system
+overloaded?") closely enough that the authoritative reference itself resolves
+which domain is meant — the CPU-vs-Load ambiguity handling in case 14's first
+input must not be over-applied to phrasing the reference already disambiguates.
+
+**Input (negative control — not ambiguous):** "What's the CPU utilization?"
+**Expected:** `status: "ok"`, resolving to `node_cpu_seconds_total` directly,
+per the same reasoning — this phrasing matches CPU utilization's documented
+intent examples with no genuine overlap with the Load family's wording.
+
+## 15. Node Exporter extension — Load window ambiguity
+
+**Input:** "What's the load average on node-3?" (no window specified)
+**Expected:** `status: "ambiguous_metric"` — `node_load1`, `node_load5`, and
+`node_load15` are three materially different measurements differing only in
+averaging window, and the request does not establish which. Must not default
+to `node_load1`, and must not return all three under `mode: "multi"` merely
+to be comprehensive.
+
+## 16. Node Exporter extension — filesystem avail vs. free, without inventing a reserved-space mechanism
+
+**Input:** "How much free disk space is there for a regular user to use?"
+**Expected:** Resolves to `node_filesystem_avail_bytes` (the "for non-root"
+qualified figure), not `node_filesystem_free_bytes`. The `explanation` field
+may cite the authoritative document's own "for non-root" wording as the basis
+for the distinction, but must not assert an unverified mechanism (e.g.
+reserved filesystem blocks) as the reason the two figures differ.
+
+## 17. Node Exporter extension — prevention of invented labels on newly added metrics
+
+**Input:** "What's the load average for CPU 2 on node-3?"
+**Expected:** The node-level scope (`node-3`) may be preserved if the runtime
+confirms a label key for it, but a per-CPU (e.g. `cpu="2"`) constraint must
+**not** be added to a `node_load1`/`5`/`15` query by inventing a label key —
+`node_load1`/`5`/`15` are node-level measurements with no documented CPU-level
+dimension (`references/node-exporter/cpu.md`'s Confusable Measurements
+section), and per `SKILL.md` §5 Principle 9, no label key may be invented by
+analogy with `node_cpu_seconds_total`'s CPU dimension merely because both
+metrics live in the same domain file. Similarly, "How much disk space is
+available on the root filesystem?" must not produce a query with an invented
+`mountpoint="/"` or `device` label — no such key is confirmed for
+`node_filesystem_avail_bytes`. Either request should proceed using only
+label keys the runtime actually confirms (or no additional label constraint
+if none is confirmed and none is required), with the unavailability of a
+more specific label noted in `explanation` rather than silently fabricated.
+
+## 18. Dynamic label sourcing — label-key fabrication
+
+**Input:** "What's the GPU utilization for GPU model H100 specifically?"
+(assume runtime metadata for `DCGM_FI_DEV_GPU_UTIL` confirms a `gpu` index
+label but establishes no label representing GPU *model/SKU*)
+**Expected:** `status: "declined"`, `reason:
+"parameter_requires_clarification"`. The user's scope concept ("GPU model")
+cannot be mapped to any runtime-confirmed label key for this metric. Must not
+guess a plausible-sounding key (e.g. `model`, `sku`, `gpu_model`) and must not
+silently drop the model constraint and answer for all GPUs unfiltered.
+
+## 19. Dynamic label sourcing — label value vs. label key
+
+**Input:** "What's the CPU utilization on node-7?"
+(assume runtime metadata confirms an `instance` label key represents node-level
+scope for `node_cpu_seconds_total`)
+**Expected:** `status: "ok"`. The label *value* `node-7` is used directly as
+supplied by the user once the label *key* (`instance`) is confirmed by the
+runtime — the skill does not independently re-verify that a series with
+`instance="node-7"` actually exists in the current datasource before
+constructing the query. Confirming the label key is the runtime-sourcing
+requirement (`SKILL.md` §5 Principle 9); confirming the specific value exists
+is a separate, out-of-scope concern for query construction.
+
+## 20. Dynamic label sourcing — runtime label list unavailable for a required scope
+
+**Input:** "What's the CPU utilization on node-7?" (assume the runtime label
+metadata needed to express node-level scope for `node_cpu_seconds_total` is
+unavailable at query-generation time — e.g. the runtime call failed or
+returned nothing)
+**Expected:** `status: "declined"`, `reason:
+"parameter_requires_clarification"`. The user explicitly requires a scope
+constraint (`node-7`) that cannot currently be expressed without a confirmed
+label key. Must not guess a common label name (e.g. `instance`, `node`,
+`hostname`) merely because it's a plausible convention, and must not silently
+answer unfiltered as if the user hadn't specified a node.
+
+**Input (negative control — must not over-trigger `declined`):** "What's the
+CPU utilization?" (no entity given, same runtime-unavailability condition)
+**Expected:** `status: "ok"`. This request needs no label constraint to be
+answered — an unfiltered metric request must not become `declined` merely
+because a runtime label list is unavailable, when no explicit scope
+constraint actually requires one (`SKILL.md` §5 Principle 9's closing rule).
+
+## 21. Preservation of the unresolved GPU utilization / graphics-engine unit discrepancy
+
+**Input:** "Compare GPU utilization and graphics engine activity for GPU 2."
+**Expected:** `mode: "multi"`, two independent results —
+`DCGM_FI_DEV_GPU_UTIL` (unit: Percent) and `DCGM_FI_PROF_GR_ENGINE_ACTIVE`
+(unit: Fraction/utilization ratio) — each reported in its own documented unit.
+Must not convert, rescale, or normalize one figure to match the other's unit,
+and must not silently present them as directly comparable percentages. This
+exercises the unresolved unit-discrepancy flag preserved in
+`references/dcgm-exporter/compute.md`'s Confusable Measurements section and
+Guardrails since the DCGM bulk migration — it remains unresolved, not
+something this or any later phase should silently normalize.
+
+## 22. Node Exporter extension — explicit filesystem scope must not be silently discarded
+
+**Input:** "How much disk space is available on /data?" (assume the runtime
+cannot confirm a label key expressing a specific mountpoint for
+`node_filesystem_avail_bytes` at query-generation time)
+**Expected:** `status: "declined"`, `reason:
+"parameter_requires_clarification"`, per
+`references/node-exporter/filesystem.md`'s Domain-Specific Guardrails. The
+user explicitly named a scope (`/data`) that cannot currently be expressed.
+Must **not** silently drop the `/data` constraint and return `status: "ok"`
+for the filesystem domain unfiltered — an explicit, unmappable scope
+constraint is a distinct failure mode from the case-20 "no scope requested"
+negative control and must not be collapsed into it. This is the corrected
+behavior for the Phase 2 implementation issue where an explicit scope
+constraint risked being dropped rather than surfaced.
+
+## 23. DCGM memory extension — capacity vs. bandwidth/utilization, and the no-total guardrail
+
+**Input:** "How much GPU memory is being used, and how much is free?"
+**Expected:** Routes to `references/dcgm-exporter/memory.md`. `mode: "multi"`,
+two results — `DCGM_FI_DEV_FB_USED` and `DCGM_FI_DEV_FB_FREE`, each in bytes.
+
+**Input:** "What's the total GPU memory on GPU 3?"
+**Expected:** `status: "unsupported_metric"`. No `DCGM_FI_DEV_FB_TOTAL` (or
+equivalent total-capacity) metric is currently defined. Must **not** be
+answered by silently summing `DCGM_FI_DEV_FB_USED` and `DCGM_FI_DEV_FB_FREE`
+into an implied total — this is the guardrail from `memory.md`'s Confusable
+Measurements section.
+
+**Input:** "Is the GPU memory-bandwidth-bound?"
+**Expected:** Routes to `references/dcgm-exporter/memory.md`, resolves to
+`DCGM_FI_PROF_DRAM_ACTIVE` (category Memory Bandwidth), not
+`DCGM_FI_DEV_FB_USED`/`FREE` (capacity) — a bandwidth/utilization question
+must not be answered with a capacity metric merely because both concern GPU
+memory.
+
+## 24. DCGM memory extension — `DCGM_FI_DEV_MEM_COPY_UTIL` vs. `DCGM_FI_PROF_DRAM_ACTIVE` must not be asserted as equivalent
+
+**Input:** "What is the memory controller utilization on GPU 1?"
+**Expected:** `status: "ok"`, resolves specifically to
+`DCGM_FI_DEV_MEM_COPY_UTIL`. Must not substitute or silently combine with
+`DCGM_FI_PROF_DRAM_ACTIVE`.
+
+**Input:** "What's the memory bandwidth utilization on GPU 1?"
+**Expected:** `status: "ok"`, resolves specifically to
+`DCGM_FI_DEV_MEM_COPY_UTIL` — this exact phrase is the authoritative
+document's documented Typical Query Intent for this metric (see case 3). Must
+not treat this phrase as ambiguous with `DCGM_FI_PROF_DRAM_ACTIVE`, and must
+not use it as grounds to assert the two metrics measure the same underlying
+activity — the document establishes this specific phrase-to-metric mapping,
+not a general equivalence between the two metrics.
+
+**Input:** "What's the DRAM bandwidth utilization on GPU 1?"
+**Expected:** `status: "ok"`, resolves specifically to
+`DCGM_FI_PROF_DRAM_ACTIVE` — the authoritative document's "What it Measures"
+text for this metric is verbatim "DRAM bandwidth utilization (%)". Must not
+substitute or silently combine with `DCGM_FI_DEV_MEM_COPY_UTIL`, and must not
+use the shared word "bandwidth" as grounds to treat the two metrics as
+interchangeable.
+
+**Input:** "Compare memory controller utilization and DRAM bandwidth
+utilization for GPU 2."
+**Expected:** `mode: "multi"`, two independent results —
+`DCGM_FI_DEV_MEM_COPY_UTIL` and `DCGM_FI_PROF_DRAM_ACTIVE` — each reported on
+its own terms. Must not annotate them as redundant or as two views of the
+same measurement; the authoritative reference does not establish that
+relationship either way.
+
+## 25. Cross-domain — compute-bound vs. memory-bound spans `compute.md` and `memory.md`
+
+**Input:** "Is this GPU compute-bound or memory-bound right now?"
+**Expected:** Consults both `references/dcgm-exporter/compute.md` (for
+`DCGM_FI_DEV_GPU_UTIL` and/or `DCGM_FI_PROF_GR_ENGINE_ACTIVE`) and
+`references/dcgm-exporter/memory.md` (for `DCGM_FI_PROF_DRAM_ACTIVE`), per
+`dcgm-exporter/overview.md`'s Cross-Domain Semantic Distinctions entry for
+this question. Must not answer using only one domain's metrics, and must not
+treat `DCGM_FI_PROF_DRAM_ACTIVE`'s `DCGM_FI_PROF_*` naming as grounds for
+routing it to `compute.md` instead of `memory.md`.
+
+## 26. DCGM interconnect extension — correct routing and rate() preservation
+
+**Input:** "What is the PCIe transmit bandwidth on GPU 0?"
+**Expected:** Routes to `references/dcgm-exporter/interconnect.md`.
+`status: "ok"`, `measurement_used.name: "DCGM_FI_PROF_PCIE_TX_BYTES"`,
+`measurement_used.type: "raw_metric"`. Per `interconnect.md`'s Metric-Specific
+Query/Result Semantics, `rate()` is the document-established query intent —
+the raw counter alone must not be reported as "bandwidth."
+
+**Input:** "How much data is moving over NVLink, received on GPU 2?"
+**Expected:** `status: "ok"`, resolves to `DCGM_FI_PROF_NVLINK_RX_BYTES`, not
+`DCGM_FI_PROF_PCIE_RX_BYTES` — the user named the link (NVLink) and direction
+(received) explicitly.
+
+## 27. DCGM interconnect extension — four-way metric ambiguity must not be silently resolved
+
+**Input:** "What's the GPU bandwidth right now?" (no link or direction named)
+**Expected:** `status: "ambiguous_metric"`, candidates
+`DCGM_FI_PROF_PCIE_TX_BYTES`, `DCGM_FI_PROF_PCIE_RX_BYTES`,
+`DCGM_FI_PROF_NVLINK_TX_BYTES`, `DCGM_FI_PROF_NVLINK_RX_BYTES`. Must not
+default to PCIe over NVLink, or TX over RX, and must not invent a
+combined/total-bandwidth figure across the four — no such derived measurement
+is defined in this skill (see `interconnect.md`'s Domain-Specific
+Guardrails).
+
+**Input:** "What's the PCIe bandwidth?" (link named, direction unspecified)
+**Expected:** Still `status: "ambiguous_metric"`, narrowed to
+`DCGM_FI_PROF_PCIE_TX_BYTES` and `DCGM_FI_PROF_PCIE_RX_BYTES` only — naming
+the link narrows but does not fully resolve the ambiguity absent a stated
+direction.
+
+## 28. DCGM interconnect extension — traffic volume vs. link health is not yet answerable for NVLink health
+
+**Input:** "Is the NVLink connection healthy, or just how much traffic is it
+carrying?"
+**Expected:** The traffic-volume half (`DCGM_FI_PROF_NVLINK_TX_BYTES`/
+`RX_BYTES`) resolves normally via `interconnect.md`. The health half is not
+currently answerable — `DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL` and
+`DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL` are not yet implemented
+(pending Phase 5, `reliability.md`). Must not substitute an NVLink traffic
+metric as a proxy for link health, and must not silently drop the health half
+of the request — the unsupported half should be reported as such (e.g.
+`unsupported_metric` or `unmapped` for that portion) rather than answered
+only with traffic volume and presented as a complete answer.
+
+## 29. DCGM reliability extension — correct routing and SBE/DBE preservation
+
+**Input:** "How many double-bit ECC errors has GPU 1 had?"
+**Expected:** Routes to `references/dcgm-exporter/reliability.md`.
+`status: "ok"`, `measurement_used.name: "DCGM_FI_DEV_ECC_DBE_VOL_TOTAL"` — not
+`DCGM_FI_DEV_ECC_SBE_VOL_TOTAL`. The SBE/DBE distinction must not be
+collapsed.
+
+**Input:** "Are there any pending memory failures on this GPU?"
+**Expected:** `status: "ok"`, resolves to `DCGM_FI_DEV_RETIRED_PENDING`, not
+`DCGM_FI_DEV_RETIRED_SBE`/`DCGM_FI_DEV_RETIRED_DBE` — "pending" specifically
+indicates the not-yet-retired Gauge metric, not an already-retired Counter.
+
+## 30. DCGM reliability extension — ECC volume vs. retired pages must not be presented as causal
+
+**Input:** "This GPU has had a lot of single-bit ECC errors — how many pages
+has that caused to be retired?"
+**Expected:** May report `DCGM_FI_DEV_ECC_SBE_VOL_TOTAL` and
+`DCGM_FI_DEV_RETIRED_SBE` as two independent results, but must **not**
+present retired-page count as caused by, derived from, or a consequence of
+ECC error volume — the authoritative metric reference does not establish
+that relationship (see `reliability.md`'s Confusable Measurements). The
+`explanation` field must not assert or imply causation between the two
+figures.
+
+## 31. DCGM reliability extension — Gauge vs. Counter must not be flattened
+
+**Input:** "Give me a full reliability summary for this GPU: ECC errors,
+retired pages, and pending retirements."
+**Expected:** `mode: "multi"`, five results
+(`DCGM_FI_DEV_ECC_SBE_VOL_TOTAL`, `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`,
+`DCGM_FI_DEV_RETIRED_SBE`, `DCGM_FI_DEV_RETIRED_DBE`,
+`DCGM_FI_DEV_RETIRED_PENDING`). `DCGM_FI_DEV_RETIRED_PENDING`'s type must be
+reported as `Gauge`, distinctly from the other four `Counter` metrics — must
+not describe all reliability metrics uniformly as "error counters."
+
+## 32. DCGM reliability extension — asymmetric rate()/increase() guidance must not be symmetrized
+
+**Input:** "What's the single-bit ECC error trend on GPU 0?"
+**Expected:** `status: "ok"`, resolves to `DCGM_FI_DEV_ECC_SBE_VOL_TOTAL`
+with `increase()` noted as the query intent, per the metric's own
+Metric-Specific Query/Result Semantics.
+
+**Input:** "What's the double-bit ECC error trend on GPU 0?"
+**Expected:** `status: "ok"`, resolves to `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`.
+Must **not** apply `increase()` to this metric merely because its SBE
+sibling has that note — `reliability.md` explicitly states no
+`rate()`/`increase()` function is documented for this metric, and that
+asymmetry must be preserved exactly.
+
+**Input:** "What's the NVLink recovery-event trend on GPU 3?"
+**Expected:** `status: "ok"`, resolves to
+`DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL`. Must **not** apply
+`increase()` by analogy with `DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL`,
+which does have that note — same asymmetry-preservation requirement as above.
+
+## 33. Cross-domain — NVLink traffic vs. NVLink health spans `interconnect.md` and `reliability.md`
+
+**Input:** "Is the NVLink connection healthy, or just how much traffic is it
+carrying?" (re-run of case 28, now that `reliability.md` exists)
+**Expected:** Both halves are now answerable. Traffic volume resolves via
+`references/dcgm-exporter/interconnect.md`
+(`DCGM_FI_PROF_NVLINK_TX_BYTES`/`RX_BYTES`); health resolves via
+`references/dcgm-exporter/reliability.md`
+(`DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL`/
+`DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL`), per
+`dcgm-exporter/overview.md`'s Cross-Domain Semantic Distinctions entry for
+this boundary. `mode: "multi"`. Must not substitute one measurement kind for
+the other, and must not answer using only one of the two domain files.
+
+**Input:** "What's the NVLink traffic?"
+**Expected:** Routes to `interconnect.md` only — resolves per case 27's
+ambiguity handling (link/direction unspecified beyond "NVLink" narrows away
+PCIe but not TX/RX). Must not additionally surface
+`reliability.md`'s NVLink health metrics as candidates — "traffic" is not
+ambiguous with "health" per the Cross-Domain Semantic Distinctions entry.

@@ -1,0 +1,15 @@
+# Runs the agent service only. Prometheus (localhost:9090) and OpenSearch
+# (localhost:9600) are expected to already be running separately -- via
+# your existing simulator/docker-compose setup -- matching how the agent is
+# actually deployed today. `network_mode: host` is used specifically so
+# `http://localhost:9090` / `http://localhost:9600` in .env resolve to your
+# host machine's existing services without any URL changes; if you'd rather
+# put everything in one compose file, replace PROMETHEUS_URL/OPENSEARCH_URL
+# with the other services' compose network hostnames instead and drop
+# network_mode: host.
+services:
+  agent:
+    build: .
+    env_file: .env
+    network_mode: host
+    restart: unless-stopped

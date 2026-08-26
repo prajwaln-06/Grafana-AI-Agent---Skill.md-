@@ -1,0 +1,321 @@
+import asyncio
+from unittest.mock import MagicMock, patch
+
+from app import field_discovery, label_discovery, llm_client, pipeline
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_router_gate_stop_short_circuits_before_generator(skill_index, settings):
+    """A gate_stop from the Router must return immediately -- the Generator
+    (and therefore any LLM-based query construction) must never run."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": {"status": "out_of_scope_action", "requested_action": "delete a metric",
+                      "explanation": "read-only skill"},
+        "matched_references": [], "panic_mode": False, "unresolved_topics": [],
+    })
+    with patch.object(llm_client, "call_llm_json", return_value=router_resp) as mock_call:
+        result = _run(pipeline.run_pipeline("delete node_load1", skill_index, settings))
+    assert result["mode"] == "single"
+    assert result["status"] == "out_of_scope_action"
+    assert mock_call.call_count == 1  # generator never ran -- only the Router hit the LLM
+
+
+def test_only_two_llm_calls_for_a_normal_ok_result(skill_index, settings):
+    """Regression test for the deterministic-validator rewrite: the old
+    pipeline made 3 LLM calls (router, generator, validator). The validator
+    is now plain Python -- exactly 2 LLM calls should happen for any
+    ordinary resolvable question."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    gen_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_load1", "source_metrics": []},
+        "data_source": "prometheus", "query": 'node_load1{instance="node-1:9100"}',
+        "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "test",
+    }
+    gen_resp = MagicMock(parsed=gen_contract)
+
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, gen_resp]) as mock_call, \
+         patch.object(label_discovery, "discover_labels_for_metrics",
+                       return_value={"node_load1": ["instance", "job"]}):
+        result = _run(pipeline.run_pipeline("load average on node-1", skill_index, settings))
+
+    assert mock_call.call_count == 2
+    assert result["status"] == "ok"
+    assert result["query"] == 'node_load1{instance="node-1:9100"}'
+
+
+def test_generator_prompt_includes_live_labels_block_and_section_7(skill_index, settings):
+    """The Generator prompt must include the live-discovered labels block
+    (Principle 9 depends on the model actually seeing it) and Section 7
+    (needed for correct panic_mode_best_effort framing per Section 7.4)."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": True, "unresolved_topics": [],
+    })
+    gen_contract = {
+        "mode": "single", "status": "panic_mode_best_effort", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_load1", "source_metrics": []},
+        "data_source": "prometheus", "query": "node_load1",
+        "time_range": {"from": "now-1h", "to": "now", "step": "60s"},
+        "explanation": "test", "caveat": "interpreted broadly",
+    }
+    captured = {}
+
+    def fake_call(prompt, system_instruction, api_key, model):
+        if "router" not in captured:
+            captured["router"] = (prompt, system_instruction)
+            return router_resp
+        captured["generator"] = (prompt, system_instruction)
+        return MagicMock(parsed=gen_contract)
+
+    with patch.object(llm_client, "call_llm_json", side_effect=fake_call), \
+         patch.object(label_discovery, "discover_labels_for_metrics",
+                       return_value={"node_load1": ["node_id", "instance", "job", "cluster"]}):
+        result = _run(pipeline.run_pipeline("system load", skill_index, settings))
+
+    assert result["status"] == "panic_mode_best_effort"
+    generator_prompt, generator_system = captured["generator"]
+    assert "node_id" in generator_prompt
+    assert "Live label keys confirmed" in generator_prompt
+    assert "## 7." in generator_prompt or "Error Handling" in generator_prompt
+    assert "panic_mode is currently: True" in generator_prompt
+
+
+def test_validation_failure_produces_internal_status_not_a_crash(skill_index, settings):
+    """A structurally-broken Generator output (here: a label key that was
+    never confirmed by live discovery) must be caught deterministically and
+    turned into INTERNAL_VALIDATION_FAILED_STATUS, never raise or silently
+    pass through to the Executor."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    gen_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_load1", "source_metrics": []},
+        "data_source": "prometheus", "query": 'node_load1{fabricated_label="x"}',
+        "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "test",
+    }
+
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics",
+                       return_value={"node_load1": ["instance", "job"]}):
+        result = _run(pipeline.run_pipeline("load average", skill_index, settings))
+
+    assert result["mode"] == "single"
+    assert result["status"] == pipeline.INTERNAL_VALIDATION_FAILED_STATUS
+    assert "fabricated_label" in result["explanation"]
+
+
+def test_unresolved_topic_appended_alongside_a_resolved_prometheus_result(skill_index, settings):
+    """Core requirement: a compound question needing both Prometheus (which
+    exists) and OpenSearch (which doesn't have a domain reference yet) must
+    resolve the Prometheus half normally AND surface the OpenSearch half as
+    an explicit unmapped entry -- neither half should silently swallow the
+    other."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False,
+        "unresolved_topics": [{"description": "recent error logs for node-1",
+                                "reason": "needs an OpenSearch-backed log measurement; no domain reference yet"}],
+    })
+    gen_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_load1", "source_metrics": []},
+        "data_source": "prometheus", "query": "node_load1",
+        "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "test",
+    }
+
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_load1": []}):
+        result = _run(pipeline.run_pipeline(
+            "show CPU load and recent error logs for node-1", skill_index, settings))
+
+    assert result["mode"] == "multi"
+    assert result["synthesis"] is None
+    assert len(result["results"]) == 2
+    statuses = {r["status"] for r in result["results"]}
+    assert statuses == {"ok", "unmapped"}
+    unmapped_entry = next(r for r in result["results"] if r["status"] == "unmapped")
+    assert "error logs" in unmapped_entry["explanation"]
+    ok_entry = next(r for r in result["results"] if r["status"] == "ok")
+    assert ok_entry["query"] == "node_load1"
+
+
+def test_question_entirely_unresolved_with_no_matched_references_becomes_single_unmapped(skill_index, settings):
+    """When EVERY sub-intent is unresolved (matched_references empty),
+    the result collapses to a single unmapped response, not a
+    one-item multi."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [],
+        "panic_mode": False,
+        "unresolved_topics": [{"description": "recent error logs for node-1",
+                                "reason": "no OpenSearch domain reference yet"}],
+    })
+    with patch.object(llm_client, "call_llm_json", return_value=router_resp) as mock_call:
+        result = _run(pipeline.run_pipeline("show me recent error logs for node-1", skill_index, settings))
+
+    assert mock_call.call_count == 1  # generator never ran -- nothing matched
+    assert result["mode"] == "single"
+    assert result["status"] == "unmapped"
+    assert "error logs" in result["explanation"]
+
+
+def test_generator_omitting_the_mode_wrapper_is_repaired_not_rejected(skill_index, settings):
+    """Regression test for a real bug hit in live testing: the Generator
+    produced a structurally-correct, well-formed 'unsupported_metric' entry
+    (all of ITS required fields present) but forgot the top-level 'mode'
+    envelope Section 9 requires around it. The old behavior rejected the
+    whole thing as validation_failed over a missing wrapper key, discarding
+    a substantively-correct answer. `_normalize_contract_shape` repairs
+    exactly this class of near-miss (envelope only, never content) before
+    validation runs."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/dcgm-exporter/thermal.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    # Note: no "mode" key at all -- this is the exact shape observed from a
+    # real Gemini call in practice.
+    gen_contract_missing_mode = {
+        "status": "unsupported_metric",
+        "reference_used": "references/dcgm-exporter/thermal.md",
+        "requested_measurement": "whether the GPU has been power throttling",
+        "explanation": "DCGM_FI_DEV_POWER_VIOLATION's exposed unit is unverified against the live "
+                       "datasource, so no query can be safely constructed until that is confirmed.",
+    }
+
+    with patch.object(llm_client, "call_llm_json",
+                       side_effect=[router_resp, MagicMock(parsed=gen_contract_missing_mode)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics", return_value={}):
+        result = _run(pipeline.run_pipeline("Has the GPU been power throttling?", skill_index, settings))
+
+    assert result["status"] == "unsupported_metric"
+    assert result["mode"] == "single"
+    assert "DCGM_FI_DEV_POWER_VIOLATION" in result["explanation"]
+
+
+def test_generator_multi_mode_missing_wrapper_is_also_repaired(skill_index, settings):
+    """Same repair, for the multi-mode shape: 'results' + 'synthesis'
+    present but no top-level 'mode' key."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [
+            {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"},
+            {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus"},
+        ],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    gen_contract_missing_mode = {
+        "results": [
+            {"status": "ok", "reference_used": "references/node-exporter/cpu.md",
+             "measurement_used": {"type": "raw_metric", "name": "node_load1", "source_metrics": []},
+             "data_source": "prometheus", "query": "node_load1",
+             "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "x"},
+            {"status": "ok", "reference_used": "references/node-exporter/memory.md",
+             "measurement_used": {"type": "raw_metric", "name": "node_memory_MemAvailable_bytes", "source_metrics": []},
+             "data_source": "prometheus", "query": "node_memory_MemAvailable_bytes",
+             "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "y"},
+        ],
+        "synthesis": None,
+    }
+    with patch.object(llm_client, "call_llm_json",
+                       side_effect=[router_resp, MagicMock(parsed=gen_contract_missing_mode)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics",
+                       return_value={"node_load1": [], "node_memory_MemAvailable_bytes": []}):
+        result = _run(pipeline.run_pipeline("CPU and available memory", skill_index, settings))
+
+    assert result["mode"] == "multi"
+    assert len(result["results"]) == 2
+
+
+def test_out_of_scope_action_missing_requested_action_still_fails_loudly(skill_index, settings):
+    """The companion real bug from the same test run: the Router
+    misclassified a plain data request ('Show me memory.') as
+    out_of_scope_action and omitted the required 'requested_action' field.
+    Unlike the missing-'mode' case above, this must NOT be silently
+    repaired -- 'requested_action' is CONTENT (SKILL.md Section 9 requires
+    it to restate the actual mutating action requested), and fabricating
+    one to make the contract pass would hide a genuine misclassification
+    instead of surfacing it. This test locks in that validation_failed
+    remains the correct outcome here, and that the reason is legible."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": {"status": "out_of_scope_action", "explanation": "Not a data request."},
+        "matched_references": [], "panic_mode": False, "unresolved_topics": [],
+    })
+    with patch.object(llm_client, "call_llm_json", return_value=router_resp):
+        result = _run(pipeline.run_pipeline("Show me memory.", skill_index, settings))
+
+    assert result["status"] == pipeline.INTERNAL_VALIDATION_FAILED_STATUS
+    assert "requested_action" in result["explanation"]
+
+
+def test_multi_datasource_question_where_both_sides_match_uses_multi_mode(skill_index, settings):
+    """Two DIFFERENT matched references (both real, both prometheus here)
+    for one compound question -- the Generator alone decides mode, and the
+    pipeline must pass its multi-result output through untouched when there
+    are no unresolved topics to merge in."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [
+            {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"},
+            {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus"},
+        ],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    gen_contract = {
+        "mode": "multi",
+        "results": [
+            {"status": "ok", "reference_used": "references/node-exporter/cpu.md",
+             "measurement_used": {"type": "raw_metric", "name": "node_load1", "source_metrics": []},
+             "data_source": "prometheus", "query": "node_load1",
+             "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "x"},
+            {"status": "ok", "reference_used": "references/node-exporter/memory.md",
+             "measurement_used": {"type": "raw_metric", "name": "node_memory_MemAvailable_bytes", "source_metrics": []},
+             "data_source": "prometheus", "query": "node_memory_MemAvailable_bytes",
+             "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "y"},
+        ],
+        "synthesis": "Load average and available memory for the requested node.",
+    }
+
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics",
+                       return_value={"node_load1": [], "node_memory_MemAvailable_bytes": []}):
+        result = _run(pipeline.run_pipeline("load average and available memory", skill_index, settings))
+
+    assert result["mode"] == "multi"
+    assert len(result["results"]) == 2
+    assert result["synthesis"] == "Load average and available memory for the requested node."
+
+
+def test_opensearch_side_of_generator_context_only_built_when_matched(skill_index, settings):
+    """field_discovery must not be hit at all for a pure-Prometheus request
+    -- confirms datasource-scoped context building, not a blanket call."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    gen_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_load1", "source_metrics": []},
+        "data_source": "prometheus", "query": "node_load1",
+        "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "test",
+    }
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_load1": []}), \
+         patch.object(field_discovery, "discover_attributes_for_all_known_patterns") as mock_field_discovery:
+        _run(pipeline.run_pipeline("load average", skill_index, settings))
+
+    assert not mock_field_discovery.called
