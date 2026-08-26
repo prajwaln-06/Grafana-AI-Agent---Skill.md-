@@ -91,8 +91,6 @@ than remaining space.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `node_filesystem_avail_bytes`
 
 - **Category:** Filesystem Capacity
@@ -126,8 +124,6 @@ than remaining space.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `node_filesystem_free_bytes`
 
 - **Category:** Filesystem Capacity
@@ -158,8 +154,6 @@ than remaining space.
   currently defined.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ## Domain-Specific Guardrails
 

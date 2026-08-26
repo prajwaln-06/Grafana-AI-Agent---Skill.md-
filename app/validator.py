@@ -37,7 +37,10 @@ WHAT THIS FILE CHECKS, and where each rule comes from:
      involved in that query -- never invented "by analogy."
   5. prometheus-fundamentals.md's "Time Expression Grammar (Tightened)" --
      `time_range.from` / `.to` / `.step` must match the documented grammar
-     and `time_utils` must be able to resolve them.
+     and `time_utils` must be able to resolve them. SKILL.md §8/§9's
+     `query_type` closed enum ("instant" or "range") is checked first, since
+     it decides which `time_range` shape (`{time}` vs `{from,to,step}`)
+     applies.
   6. SECTION 12's ALERT-RULE-CREATION NON-FABRICATION RULES -- for
      `alert_rule_proposed` results only: `alert_rule.condition_query` must
      reference the resolved metric (never a different, invented
@@ -488,11 +491,19 @@ def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: li
                 )
 
     # Time Expression Grammar (Tightened), prometheus-fundamentals.md --
-    # applies to range results. query_type "instant" (if the pipeline's
-    # proposed contract addition is in use) carries a single `time` field
-    # instead; accept either shape here without forcing the not-yet-adopted
-    # field to be present.
+    # SKILL.md §8 "Instant vs. range" / §9 makes `query_type` a required,
+    # closed-enum field ("instant" or "range") for every Prometheus-backed
+    # ok/panic_mode_best_effort result. Default to "range" only for
+    # backward compatibility with a Generator response that omits the field
+    # entirely; an explicitly-present but invalid value is rejected outright
+    # rather than silently coerced, since that's the Generator inventing a
+    # value outside the closed enum (§9).
     query_type = entry.get("query_type", "range")
+    if query_type not in ("instant", "range"):
+        return ValidationResult(
+            False,
+            f"query_type {query_type!r} is not one of the closed enum values 'instant'/'range' (SKILL.md §8/§9).",
+        )
     if query_type == "instant":
         time_field = entry.get("time_range", {}).get("time") if isinstance(entry.get("time_range"), dict) else entry.get("time")
         if time_field:

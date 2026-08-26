@@ -48,6 +48,14 @@ A list of `{labels, points}` objects, identical in shape regardless of backend.
 Step 5 produces them. `resolved_time_range` in the execution block is the only
 place absolute timestamps appear, resolved at the moment this stage runs.
 
+For a `query_type: "instant"` result (SKILL.md §8 "Instant vs. range"), the
+construction-time `time_range` is `{"time": "<relative expression>"}` instead
+of `{"from", "to", "step"}`, and `resolved_time_range` is correspondingly
+`{"instant": "<resolved ISO-8601 UTC timestamp>"}` instead of the
+`{"start", "end", "step_seconds"}` shape shown above. `series[].points` for an
+instant result normally holds exactly one point per series (the value at that
+instant), not a series of points across a window.
+
 ## Time expression grammar
 
 See [prometheus-fundamentals.md](prometheus-fundamentals.md) for the Prometheus

@@ -108,8 +108,6 @@ memory as a substitute for available memory without swapping, or vice versa.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `node_memory_MemAvailable_bytes`
 
 - **Category:** Physical Memory
@@ -134,8 +132,6 @@ memory as a substitute for available memory without swapping, or vice versa.
   currently defined.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `node_memory_MemFree_bytes`
 
@@ -162,8 +158,6 @@ memory as a substitute for available memory without swapping, or vice versa.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `node_memory_Cached_bytes`
 
 - **Category:** Memory Cache
@@ -187,8 +181,6 @@ memory as a substitute for available memory without swapping, or vice versa.
   cache. No per-metric override of `SKILL.md` defaults is currently defined.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `node_memory_Buffers_bytes`
 
@@ -214,8 +206,6 @@ memory as a substitute for available memory without swapping, or vice versa.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `node_memory_SwapTotal_bytes`
 
 - **Category:** Swap
@@ -238,8 +228,6 @@ memory as a substitute for available memory without swapping, or vice versa.
   space. No per-metric override of `SKILL.md` defaults is currently defined.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `node_memory_SwapFree_bytes`
 
@@ -265,8 +253,6 @@ memory as a substitute for available memory without swapping, or vice versa.
   defined.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ## Domain-Specific Guardrails
 

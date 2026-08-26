@@ -568,6 +568,23 @@ OpenSearch connection has been. Run these, in order, on your own machine:
    general shape match what the case describes. This is the real
    correctness check — it's testing the AI model's actual behavior against
    real prompts, which nothing automated here can do for you.
+
+   > [!NOTE]
+   > **Windows PowerShell note:** In PowerShell, `curl` is an alias for `Invoke-WebRequest` which has different parameter semantics. Use **`Invoke-RestMethod`** or call **`curl.exe`** directly:
+   >
+   > **PowerShell (Invoke-RestMethod):**
+   > ```powershell
+   > Invoke-RestMethod -Uri http://localhost:8000/api/v1/query -Method Post -ContentType "application/json" -Body '{"question": "What is the CPU utilization on node-3?"}'
+   > ```
+   > **PowerShell (curl.exe):**
+   > ```powershell
+   > curl.exe -s -X POST http://localhost:8000/api/v1/query -H "Content-Type: application/json" -d "{\"question\": \"What is the CPU utilization on node-3?\"}"
+   > ```
+   > **Bash / macOS / Linux (curl):**
+   > ```bash
+   > curl -s -X POST http://localhost:8000/api/v1/query -H 'Content-Type: application/json' -d '{"question": "What is the CPU utilization on node-3?"}'
+   > ```
+
 4. **Specifically test the multi-datasource partial-coverage behavior**
    from §7 with a real compound question ("show me CPU load and error logs
    for node-1") — confirm you get the `mode: "multi"` shape with one `ok`
@@ -575,15 +592,23 @@ OpenSearch connection has been. Run these, in order, on your own machine:
    failure.
 5. **Specifically test a clarification round-trip** (§6) — ask something
    genuinely ambiguous, confirm you get `session_id` back, send the
-   follow-up, confirm it resolves using the combined context.
+   follow-up, confirm it resolves using the combined context:
+   ```powershell
+   # PowerShell follow-up query with session_id
+   Invoke-RestMethod -Uri http://localhost:8000/api/v1/query -Method Post -ContentType "application/json" -Body '{"question": "CPU utilization", "session_id": "<SESSION_ID>"}'
+   ```
 6. **If you turned on `ALERT_RULE_CREATION_ENABLED`:** run
    `python3 scripts/smoke_test_grafana.py` first (§9.1), then test the
    full propose → confirm round-trip (§9.2) — ask "alert me if CPU exceeds
    90% on node-1 for 5 minutes", confirm you get `status:
    "alert_rule_proposed"` with a `session_id` and nothing yet created in
    Grafana, then `POST /api/v1/alerts/confirm` with that `session_id` and
-   confirm the rule actually appears in Grafana's alert list. Also test
-   `"confirm": false` and confirm nothing gets created. Also re-confirm
+   confirm the rule actually appears in Grafana's alert list:
+   ```powershell
+   # PowerShell alert confirmation call
+   Invoke-RestMethod -Uri http://localhost:8000/api/v1/alerts/confirm -Method Post -ContentType "application/json" -Body '{"session_id": "<SESSION_ID>", "confirm": true}'
+   ```
+   Also test `"confirm": false` and confirm nothing gets created. Also re-confirm
    "silence this alert" still comes back `out_of_scope_action` — this flag
    must never change that.
 

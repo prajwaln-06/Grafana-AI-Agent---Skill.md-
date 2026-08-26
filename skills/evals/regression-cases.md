@@ -504,11 +504,11 @@ ambiguous with "health" per the Cross-Domain Semantic Distinctions entry.
 **Expected** (`alert_rule_creation_enabled = true`): `status:
 "alert_rule_proposed"`. Resolves `node_cpu_seconds_total` via `cpu.md`'s
 Step 3 metric-selection procedure — unchanged from a read question — then
-consults that metric's Alert query/threshold field, which states a verified
-condition can be derived from the SAME verified base expression as its
-Query Example. `alert_rule.condition_query` must reuse that exact base
-expression (scoped to `node-1` via a runtime-confirmed `instance` label,
-per Principle 9); `alert_rule.comparison` must be `{"operator": ">",
+builds `alert_rule.condition_query` via the exact same Step 5 procedure
+Section 12.4 now specifies, which for this metric means reusing its verified
+Query Example expression. `alert_rule.condition_query` must reuse that exact
+base expression (scoped to `node-1` via a runtime-confirmed `instance`
+label, per Principle 9); `alert_rule.comparison` must be `{"operator": ">",
 "threshold": 90}` and `alert_rule.for_duration` must be `"5m"`, all taken
 verbatim from the request, never a "reasonable-sounding" substitute. A
 session id is returned; nothing is created in Grafana by this response —
@@ -522,15 +522,40 @@ unambiguous — the numeric value and comparison operator must both come from
 the user, with no exception for a request that sounds clear in plain
 English.
 
-**Input:** "Create an alert for GPU double-bit ECC error volume."
-**Expected:** `status: "unsupported_metric"`. `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`
-resolves cleanly (same metric as case 32), but its Alert query/threshold
-field states no verified alert query is currently defined for it. Must not
-derive one from its (also-unverified) Query Examples field, and must not
-derive one by analogy with `node_cpu_seconds_total`'s verified alert
-condition or with any other metric's alert semantics — each metric's Alert
-query/threshold field is independently authoritative, exactly like Query
-Examples already is (case 1-class reasoning, applied to the new field).
+**Input:** "Create an alert if double-bit ECC error volume on GPU 0 goes
+above 5, for 10 minutes."
+**Expected:** `status: "alert_rule_proposed"`. `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`
+resolves cleanly (same metric as case 32), and per the post-1.3 §12.4 its
+alert condition is built via the same Step 5 procedure already used for the
+read question in case 32 — this metric's query/result semantics are
+established (a Counter with no `rate()`/`increase()` documented for it, per
+its own Metric-Specific Query/Result Semantics), so it is NOT blocked by
+Principle 8 the way a genuinely-unverified metric (e.g. a unit-dependent
+reading of `DCGM_FI_DEV_POWER_VIOLATION`, see case 8) is. `alert_rule.
+condition_query` must be built the same way case 32's read query was (the
+raw counter, scoped to GPU 0 via a runtime-confirmed label), never copied
+from `node_cpu_seconds_total`'s CPU expression or any other metric's
+condition by analogy. `alert_rule.comparison` must be `{"operator": ">",
+"threshold": 5}` and `alert_rule.for_duration` must be `"10m"`, verbatim
+from the request. This case demonstrates alert-rule creation is no longer
+CPU-only: it now covers every metric whose read-query construction already
+succeeds, gated only by the same Principle 8 check that already gates reads
+— see case 8's negative-control-style pairing below for a metric that
+genuinely IS still blocked.
+
+**Input (negative control — genuinely unsupported):** "Create an alert if
+the GPU has been power-throttled for more than 30 seconds."
+**Expected:** `status: "unsupported_metric"`. `DCGM_FI_DEV_POWER_VIOLATION`
+resolves unambiguously, but this specific interpretation asks for a
+duration in seconds, which requires the Counter's exposed unit — explicitly
+unverified in `thermal.md` (same blocking condition as case 8's
+unit-dependent read-query example). Because Step 5 itself would block this
+exact interpretation for a read question, §12.4 blocks it identically for
+alert-rule creation — not because alerting has a stricter bar, but because
+it has the same one. A differently-phrased request that only needs a
+Counter-increase check (e.g. "alert me if the GPU is power-throttled at
+all in the next hour") is NOT blocked by this same metric, mirroring case
+8's unit-independent increase-check example.
 
 **Input:** "Silence the CPU alert on node-1."
 **Expected:** `status: "out_of_scope_action"`. Must **not** be reinterpreted
@@ -565,3 +590,33 @@ creation or the `action_intent` field at all
 special case requiring its own reasoning — it is the original, unmodified
 behavior, which is the entire point of gating the addendum behind the flag
 rather than behind in-prompt reasoning about deployment configuration.
+
+## 35. `query_type` (Section 8/9) — instant value vs. range/trend
+
+**Input:** "What is the CPU utilization right now?"
+**Expected:** `status: "ok"`, `query_type: "instant"`, `time_range: {"time":
+"now"}` (not `{"from", "to", "step"}`). This phrasing asks for a single
+current value with no implied trend — before the `query_type` field existed
+in the output contract, this resolved to a short-window range query
+(effectively a one-point matrix) because the Generator had no way to signal
+an instant read at all; `execution.series[].points` must now come back as a
+single point per series via Prometheus's instant-query endpoint, not a
+short window standing in for one.
+
+**Input:** "How much memory is available?"
+**Expected:** `status: "ok"`, `query_type: "instant"` — same reasoning:
+"how much X is there" asks for a present value, not a trend.
+
+**Input:** "Has CPU utilization been high over the last hour?"
+**Expected:** `status: "ok"`, `query_type: "range"`, `time_range: {"from":
+"now-1h", "to": "now", "step": "<...>"}`. Explicit trend/window language
+("over the last hour," "been high") means a range query is correct here —
+this case is the negative control confirming the instant default introduced
+above does not over-trigger on genuinely trend-shaped questions.
+
+**Input:** "What was CPU utilization on node-3 at 3pm yesterday?"
+**Expected:** `status: "ok"`, `query_type: "instant"`, `time_range: {"time":
+"now-<N>h"}` (or another single resolvable point expressing "3pm
+yesterday" per `prometheus-fundamentals.md`'s Time Expression Grammar) — a
+single named point in the past is still an instant read, not a range,
+even though it isn't literally `"now"`.

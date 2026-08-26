@@ -619,6 +619,18 @@ either field (e.g. `raw_counter`, `raw_cluster_or_counter`,
 metric with transformations, or `derived_measurement` if it truly
 combines multiple distinct metrics.
 
+`query_type` IS A REQUIRED FIELD on every Prometheus-backed `ok`/
+`panic_mode_best_effort` result (Section 8's "Instant vs. range", Section 9)
+-- never omit it and never default it to `"range"` out of habit. It is one
+of exactly two values: `"instant"` (the question asks for a single current
+value -- build a Prometheus instant query, `time_range: {"time": "now"}` or
+another single resolvable point) or `"range"` (the question implies a trend,
+history, or an explicit time window -- build a Prometheus range query,
+`time_range: {"from", "to", "step"}` as before). Decide which one per
+Section 8's rules BEFORE constructing `time_range` -- a bare "what is/how
+much/how busy" question with no window language is `"instant"`, not a
+short-window `"range"` standing in for it.
+
 Respond with ONLY the JSON object matching Section 9's contract -- no other
 text, no markdown fences.
 """
@@ -631,28 +643,42 @@ request is asking to CREATE a brand-new Grafana alert rule
 Resolve the metric using the EXACT same Step 3 procedure as always --
 `ambiguous_metric` and `unsupported_metric` still apply exactly as for a
 read question if metric selection doesn't cleanly resolve. Once (and only
-once) a metric resolves cleanly, do NOT build a read-only query (Step 5
-does not apply to this request) -- instead:
+once) a metric resolves cleanly, build `alert_rule.condition_query` using
+THE EXACT SAME Step 5 procedure you would use to build an ordinary read-only
+query for this metric (Section 12.4) -- there is no separate "alert query"
+concept and no separate per-metric alert-specific field to consult. This is
+deliberate: Step 5's own construction discipline (the metric's Query
+examples when verified, its Metric-Specific Query/Result Semantics
+otherwise, runtime-confirmed label keys per Principle 9, datasource
+fundamentals) is already the mechanism trusted not to fabricate a query --
+an alert condition is that same expression, compared against a threshold.
 
-1. Find that metric's own "Alert query/threshold" field in its domain
-   reference (the same per-metric block that contains its Query examples
-   field).
-2. If that field states no verified alert query is currently defined for
-   this metric, STOP -- classify the result as `unsupported_metric`, with
-   `explanation` stating plainly that no verified alert query is currently
-   defined for this metric (mirror the exact wording pattern already used
-   for a missing Query Example: "No verified ... is currently available. Do
-   not invent ..."). Do NOT derive an alert condition from an unverified
-   Query Example, and do not derive one from general domain knowledge about
-   what a "sensible" alert for this kind of metric might look like. This is
-   the expected outcome for the overwhelming majority of metrics today.
-3. If that field states a verified alert condition query exists, use that
-   SAME verified base expression, unmodified except for scope constraints
-   (entity/device) the user explicitly provided using a live-confirmed
-   label key (Principle 9) -- never a different expression invented for the
-   occasion, and never reused assuming it fits a request that actually
-   differs from what the field describes.
-4. The threshold value and comparison operator (>, <, >=, <=, ==, !=) are
+1. Build the condition query per Step 5, exactly as you would for a read
+   question about this same metric:
+   - A verified Query Example exists -> build the condition query the same
+     way Step 5 would for a read question; the example may inform
+     construction but is never copied verbatim if the request differs from
+     it.
+   - No verified Query Example, but the metric's query/result semantics are
+     otherwise established (its Metric-Specific Query/Result Semantics
+     section, or datasource fundamentals) -> build it fresh, exactly as
+     Step 5 already allows for a read question; a missing worked example
+     does not by itself block construction.
+   - That metric's query/result semantics are THEMSELVES stated as
+     unverified for the interpretation being asked (Principle 8 -- e.g. an
+     unverified exposed unit) -> STOP, exactly as Step 5 already requires
+     for a read question about that same interpretation. Classify the
+     result as `unsupported_metric`, with `explanation` stating plainly
+     what is unverified. This is the ONLY case that blocks alert-condition
+     construction -- identical to, never stricter than, what already blocks
+     an ordinary read query for that same metric and interpretation. Do NOT
+     derive a condition from general domain knowledge about what a
+     "sensible" alert for this kind of metric might look like -- only from
+     Step 5's own construction procedure.
+2. Preserve any scope constraint (entity/device) the user explicitly
+   provided, using a live-confirmed label key (Principle 9) exactly as Step
+   5 already requires for a read question.
+3. The threshold value and comparison operator (>, <, >=, <=, ==, !=) are
    NEVER supplied by a reference file and are never invented by you -- they
    must be explicitly stated by the user. If either is missing, classify as
    `declined`, `reason: "parameter_requires_clarification"`, with a
@@ -670,8 +696,9 @@ does not apply to this request) -- instead:
    must hold before firing): if the user didn't state one, ask for it
    rather than inventing a plausible-sounding duration like "5m". The
    `for_duration` field IS a string (e.g. `"5m"`), unlike `threshold`.
-5. If (and only if) the condition query is verified AND the user supplied
-   both a threshold value and a comparison operator, assemble
+4. If (and only if) the condition query was successfully built per step 1
+   AND the user supplied both a threshold value and a comparison operator,
+   assemble
    `status: "alert_rule_proposed"` (Section 9) with `alert_rule.title`,
    `alert_rule.condition_query`, `alert_rule.comparison` (an object with
    `operator` and `threshold`, verbatim from the user), and

@@ -126,9 +126,13 @@ def _execute_prometheus_entry(entry: dict, settings: Settings) -> dict:
     if not promql or not isinstance(promql, str):
         return _error_block("endpoint_error", "Contract entry has no usable PromQL string in `query`.", base_url)
 
-    query_type = entry.get("query_type", "range")  # backward-compatible default;
-    # see MIGRATION_NOTES.md for the proposed `query_type` contract addition
-    # this branch is ready for once SKILL.md adopts it.
+    # SKILL.md §8 "Instant vs. range" / §9 defines `query_type` as a
+    # required, closed-enum field on every ok/panic_mode_best_effort
+    # Prometheus result. The default here is only a defensive fallback for
+    # a malformed/legacy entry that omits it -- validator.py already rejects
+    # any explicitly-present value outside {"instant", "range"} before a
+    # contract reaches this module.
+    query_type = entry.get("query_type", "range")
 
     if query_type == "instant":
         time_field = entry.get("time_range", {}).get("time") or entry.get("time", "now")

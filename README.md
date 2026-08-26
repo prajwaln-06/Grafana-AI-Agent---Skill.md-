@@ -51,6 +51,16 @@ python run_server.py
 
 Then:
 
+**PowerShell (Windows):**
+```powershell
+# Using Invoke-RestMethod (recommended for PowerShell)
+Invoke-RestMethod -Uri http://localhost:8000/api/v1/query -Method Post -ContentType "application/json" -Body '{"question": "compare CPU utilization on node-1 and node-2 over the last hour"}'
+
+# Or using curl.exe (call curl.exe explicitly in PowerShell to bypass the Invoke-WebRequest alias)
+curl.exe -s -X POST http://localhost:8000/api/v1/query -H "Content-Type: application/json" -d "{\"question\": \"compare CPU utilization on node-1 and node-2 over the last hour\"}"
+```
+
+**Bash / macOS / Linux:**
 ```bash
 curl -X POST http://localhost:8000/api/v1/query \
   -H 'Content-Type: application/json' \

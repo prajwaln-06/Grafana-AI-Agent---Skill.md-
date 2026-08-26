@@ -135,8 +135,6 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   example should only be reused where they've been verified for the actual
   datasource.
 
-- **Alert query/threshold:** A verified alert condition can be derived from this metric's verified Query Example above: the same idle-based CPU utilization expression (`100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)`) may be reused as an alert rule's condition query, compared against a threshold using a comparison operator (e.g. `>`, `<`) supplied by the user. No default threshold value or comparison direction is established by the authoritative project material -- both must be explicitly supplied by the user; do not invent either. If the user does not supply both a threshold value and a comparison direction, this is a parameter requiring clarification (`declined` / `parameter_requires_clarification`), not a value to guess.
-
 ### `node_context_switches_total`
 
 - **Category:** CPU Scheduling Activity
@@ -161,8 +159,6 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   `SKILL.md` defaults is currently defined.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `node_intr_total`
 
@@ -189,8 +185,6 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   `SKILL.md` defaults is currently defined.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `node_load1`
 
@@ -222,8 +216,6 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `node_load5`
 
 - **Category:** System Load
@@ -253,8 +245,6 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `node_load15`
 
 - **Category:** System Load
@@ -283,8 +273,6 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   currently defined.
 - **Query examples:** no verified PromQL query example is currently available.
   Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ## Domain-Specific Guardrails
 

@@ -1,8 +1,8 @@
 ---
 name: observability-query-builder
-description: Constructs read-only PromQL and OpenSearch queries from natural-language questions about host and GPU observability metrics (Node Exporter: CPU, context switches, interrupts, memory, cache, buffers, swap, system load, filesystem capacity; DCGM Exporter: GPU utilization, compute-pipeline and Tensor Core activity, temperature, power, clocks). Use when the user asks to check, monitor, compare, or investigate a system or GPU metric, or explicitly asks for a Prometheus, PromQL, or OpenSearch query. Never silences, acknowledges, deletes, or modifies an existing alert, restarts a service, or performs any other mutating action under any framing; only builds and validates read-only queries -- with one narrow, explicit exception (§12): it may PROPOSE creation of a brand-new Grafana alert rule for an already-covered, already-verified metric, which this skill never creates automatically and which always requires a separate, explicit user confirmation step outside this skill's own construction procedure before anything is written to Grafana.
+description: Constructs read-only PromQL and OpenSearch queries from natural-language questions about host and GPU observability metrics (Node Exporter: CPU, context switches, interrupts, memory, cache, buffers, swap, system load, filesystem capacity; DCGM Exporter: GPU utilization, compute-pipeline and Tensor Core activity, temperature, power, clocks). Use when the user asks to check, monitor, compare, or investigate a system or GPU metric, or explicitly asks for a Prometheus, PromQL, or OpenSearch query. Never silences, acknowledges, deletes, or modifies an existing alert, restarts a service, or performs any other mutating action under any framing; only builds and validates read-only queries -- with one narrow, explicit exception (§12): it may PROPOSE creation of a brand-new Grafana alert rule for any metric it can already build an ordinary read query for, which this skill never creates automatically and which always requires a separate, explicit user confirmation step outside this skill's own construction procedure before anything is written to Grafana.
 metadata:
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Observability Query Builder
@@ -30,15 +30,17 @@ It does **not**:
   loaded reference file or, for label keys specifically, supplied by the
   runtime (Principle 9, §5).
 
-`metadata.version` above reflects this skill's current version, `1.2`.
+`metadata.version` above reflects this skill's current version, `1.3`.
 Versioning was restarted with the migration to the Agent Skills standard: the
 pre-migration ad-hoc skill's version history (`2.x`–`3.x`) belonged to a
 different, non-conformant architecture and is preserved for provenance in
-`EXTENDING.md`'s Version History rather than continued here. `1.2` adds the
-narrow, explicit alert-rule-creation exception (§12) on top of `1.1`'s
-structural migration, Node Exporter Load/Filesystem extension, and
-dynamic-label-sourcing finalization pass — see §11 for the current changelog
-entry.
+`EXTENDING.md`'s Version History rather than continued here. `1.3` adds the
+`query_type` output field so a question asking for a single current value
+resolves to a true instant read instead of always being forced through a
+range/matrix query, and makes alert-rule condition-query construction (§12.4)
+reuse the exact same Step 5 procedure as an ordinary read query instead of
+requiring a separate, per-metric hand-verified "alert query" — see §11 for
+the current changelog entry.
 
 ## 2. Skill structure / mental model
 
@@ -292,14 +294,15 @@ query and do not apply — once Step 3 resolves the metric, branch to §12.4–�
 instead, then continue at Step 6.**
 
 **Step 5 — Construct the query.** For every resolved measurement *that is not
-part of an alert-rule-creation request* (see the Step 4 note above): check the
-reference's Metric-Specific Query/Result Semantics for that metric, then build
-using, in combination: (1) the exporter/domain reference's semantic knowledge
-(what the metric means, its documented dimensions, confusable neighbors), (2)
-label keys supplied by the runtime for the selected metric (Principle 9 — never
-a reference file's static content), (3) the metric's documented query/result
-semantics, and (4) the appropriate datasource-fundamentals reference (§4) —
-except as follows:
+part of an alert-rule-creation request* (see the Step 4 note above): first
+determine `query_type` (§8 "Instant vs. range") from the question's phrasing
+and any explicit time constraint, then check the reference's Metric-Specific
+Query/Result Semantics for that metric, then build using, in combination: (1)
+the exporter/domain reference's semantic knowledge (what the metric means,
+its documented dimensions, confusable neighbors), (2) label keys supplied by
+the runtime for the selected metric (Principle 9 — never a reference file's
+static content), (3) the metric's documented query/result semantics, and (4)
+the appropriate datasource-fundamentals reference (§4) — except as follows:
 
 - **Query/result semantics themselves stated as unverified** (e.g. an
   unverified exposed unit): STOP query construction for that measurement and
@@ -378,7 +381,8 @@ Governs only **parameter** vagueness, never metric ambiguity (that's §6 Step 3f
 
 | Unstated parameter | Default applied | Recorded as |
 |---|---|---|
-| Time range | Short recent window (5–15 min) for "how is it now"; longer (1 hour) when phrasing implies trend ("has it been high") | `time_range` plus a note in `explanation` |
+| Query type (instant vs. range) | See "Instant vs. range" below | `query_type` plus a note in `explanation` |
+| Time range | For `query_type: "range"`: short recent window (5–15 min) for "how is it now"; longer (1 hour) when phrasing implies trend ("has it been high"). For `query_type: "instant"`: `time: "now"` unless the user stated a specific past point in time | `time_range` plus a note in `explanation` |
 | Entity/device scope | Aggregate/all-entities view, never one arbitrarily chosen entity | Noted in `explanation` |
 | Comparison baseline | Same time yesterday, unless the reference's own metric definition states an established convention | Noted in `explanation` |
 | Aggregation granularity | The reference's stated default if given; otherwise the aggregate view over a per-entity breakdown, unless the question implies detail | Noted in `explanation` |
@@ -386,6 +390,41 @@ Governs only **parameter** vagueness, never metric ambiguity (that's §6 Step 3f
 If a parameter has no safe default at all, do not guess: return
 `status: "declined"`, `reason: "parameter_requires_clarification"`, with a
 `clarification` field.
+
+### Instant vs. range (`query_type`)
+
+Every `ok`/`panic_mode_best_effort` result carries a `query_type` field —
+`"instant"` or `"range"` — decided from the question's own phrasing, not
+defaulted to one value regardless of intent:
+
+- **`"instant"`** — the question asks for a single current/present-moment
+  value with no implied trend, history, or series ("what is X **right now**,"
+  "how much X **is there**," "is X happening," "how busy is the CPU").
+  Prometheus's instant-query endpoint (`prometheus-fundamentals.md`,
+  `execution-contract.md`) returns exactly that: one value (or one value per
+  series/label combination) at one point in time — a single number, not a
+  matrix of points over a window. This is the correct shape for this kind of
+  question; running a short-window range query as a substitute returns
+  points-over-a-window dressed up as an instant answer, which is not the same
+  thing and must not be used as a workaround.
+- **`"range"`** — the question implies a trend, history, or comparison over a
+  span of time ("has it been high," "over the last hour," "show me X over
+  time," "compare X between yesterday and today"), or the user explicitly
+  states a time window.
+- An explicit user-stated single point in time ("what was CPU at 3pm
+  yesterday") is still `"instant"`, just with `time_range.time` set to that
+  point instead of `"now"`. An explicit user-stated window always means
+  `"range"`.
+- If genuinely unclear which the user wants, prefer `"instant"` for a
+  bare "what is/how much/how busy" phrasing with no time-window language
+  at all — that phrasing asks for a value, not a series — and record the
+  assumption in `explanation`. This is a parameter default (this section),
+  never a reason to classify the metric itself as ambiguous (§6 Step 3f).
+
+For `query_type: "instant"`, `time_range` takes the shape `{"time": "now"}`
+(or another resolvable single-point expression per
+`prometheus-fundamentals.md`'s Time Expression Grammar) instead of
+`{"from", "to", "step"}` — see §9.
 
 **Alert threshold and comparison direction are a special case: no default
 exists, ever.** Unlike every parameter above, an alert rule's threshold value
@@ -416,6 +455,7 @@ For `single`, the status and its fields appear directly at the top level. For
   },
   "data_source": "<prometheus or opensearch>",
   "query": "<query string or DSL object>",
+  "query_type": "range",
   "time_range": {"from": "now-1h", "to": "now", "step": "60s"},
   "explanation": "<rationale, including any parameter defaults assumed>"
 }
@@ -427,8 +467,18 @@ single metric is query construction; the metric itself remains a `"raw_metric"`.
 Only set `"type": "derived_measurement"` when combining multiple distinct source
 metrics explicitly defined by the reference.
 
+`query_type` is `"instant"` or `"range"`, decided per §8 "Instant vs. range" —
+a required field for every Prometheus-backed `ok`/`panic_mode_best_effort`
+result, never omitted and never a value outside this closed pair. When
+`query_type` is `"instant"`, `time_range` takes the shape `{"time": "now"}`
+(a single resolvable point, per `prometheus-fundamentals.md`'s Time
+Expression Grammar) instead of `{"from", "to", "step"}` — this is the only
+condition under which `time_range`'s shape differs from the example above.
+
 For an OpenSearch-bound result, `query` holds a DSL object and `index` replaces
-`time_range`.
+`time_range`; `query_type` does not apply to OpenSearch results (OpenSearch has
+no instant/range distinction in this skill's scope) and may be omitted for
+those.
 
 **`status: "panic_mode_best_effort"`** — identical to `ok`, plus:
 
@@ -511,7 +561,7 @@ exception; never produced for anything else.
   "data_source": "prometheus",
   "alert_rule": {
     "title": "<short, human-readable alert rule name>",
-    "condition_query": "<the verified base expression this was derived from, per §12.4>",
+    "condition_query": "<built via Step 5's exact read-query construction procedure for the resolved metric, per §12.4 -- never a separately fabricated expression>",
     "comparison": {"operator": "<one of >, <, >=, <=, ==, != -- verbatim from the user>", "threshold": "<user-supplied numeric value, verbatim>"},
     "for_duration": "<how long the condition must hold before firing, e.g. '5m' -- user-supplied, never invented>",
     "folder": "<the deployment's configured default alert folder, supplied by the surrounding application>",
@@ -546,11 +596,13 @@ confirmation step outside this skill's own construction procedure — see §12.
   verified example exists ("A verified example from the project is...") or
   explicitly does not ("No verified ... query example is currently available. Do
   not invent a literal query example."). Never treat silence as either.
-- A metric definition's Alert query/threshold field (§12) follows this exact same
-  explicit-verification discipline: it always states whether a verified alert
-  condition query exists for that metric, or explicitly states that none is
-  currently defined. Never treat silence as either, and never derive an alert
-  condition from a Query Examples entry that is itself unverified.
+- An alert rule's condition query is never a separate, per-metric artifact —
+  §12.4 builds it using the exact same Step 5 procedure as an ordinary read
+  query for that metric. A metric definition therefore carries no dedicated
+  "Alert query/threshold" field; whatever Step 5 would build for a read
+  question about a metric is exactly what an alert-rule-creation request
+  builds too, blocked only by the same Principle 8 unverified-semantics check
+  that already applies to reads.
 - A per-metric override of this file's defaults (time range, aggregation,
   comparison baseline, or — as with `DCGM_FI_DEV_POWER_VIOLATION` — whether a
   query can be built at all) lives in that metric's own "Metric-Specific Query /
@@ -565,7 +617,34 @@ the new content requires a new default in §8 or a new status in §9.
 
 **Changelog**
 
-* **1.2 (current)** — Added the narrow, explicit alert-rule-creation exception
+* **1.3 (current)** — Two fixes:
+  1. Added the `query_type` output field (§8's "Instant vs. range", §9's `ok`
+     schema, Step 5). Previously every `ok`/`panic_mode_best_effort` result
+     was built as a range/matrix query regardless of whether the question
+     asked for a single current value or an actual trend, because the output
+     contract never carried an instant-vs-range signal even though
+     `app/executor.py`/`app/time_utils.py` already implemented instant-query
+     execution and `app/validator.py` already validated it — the contract
+     just never told the Generator to produce it. A "what is CPU utilization
+     right now" question now resolves to `query_type: "instant"` and a true
+     single-point read instead of a short-window matrix standing in for one.
+  2. Rewrote §12.4 so an alert rule's `condition_query` is built via the
+     exact same Step 5 procedure used for an ordinary read query, instead of
+     requiring a separate, per-metric hand-verified "Alert query/threshold"
+     field. Previously only `node_cpu_seconds_total` had that separate field
+     populated with a verified condition, so alert-rule creation worked for
+     CPU utilization only and returned `unsupported_metric` for every other
+     metric regardless of how well-established that metric's own read-query
+     construction already was. Alert-rule creation now covers every metric
+     this skill can already build an ordinary `ok` query for, gated only by
+     the same Principle 8 check that already gates reads — nothing
+     per-metric to author or keep in sync, and no fabrication introduced
+     (Step 5's own non-fabrication discipline already governs it). Removed
+     the "Alert query/threshold" field from
+     `assets/templates/domain-reference-template.md` and from every existing
+     Node Exporter and DCGM Exporter metric definition as part of this
+     change; updated §10's corresponding gotcha bullet.
+* **1.2** — Added the narrow, explicit alert-rule-creation exception
   (§12): this skill may now PROPOSE creation of a brand-new Grafana alert rule
   for an already-covered, already-verified metric, subject to a separate,
   explicit user confirmation step this skill never triggers itself. Added the
@@ -636,31 +715,62 @@ the requested measurement → `unsupported_metric`, exactly as for a read
 question. This section only changes what happens once a metric resolves
 cleanly.
 
-### 12.4 Never fabricating an alert condition or threshold
+### 12.4 Building the condition query: identical to a read query, never separately fabricated
 
-Once a metric resolves, consult that metric's own Alert query/threshold field
-(in its domain reference's per-metric definition — see
-`assets/templates/domain-reference-template.md`):
+An alert rule's `condition_query` is built using the EXACT SAME procedure
+Step 5 already uses to build a read-only query for this metric. There is no
+separate, per-metric "alert query" artifact to author or consult, and a
+metric definition does not need its own alert-specific field — this is
+deliberate: Step 5's construction discipline (the metric's own
+Metric-Specific Query/Result Semantics, its verified Query Example when one
+exists, runtime-confirmed label keys per Principle 9, and datasource
+fundamentals) is already the mechanism this skill trusts not to fabricate a
+query. An alert condition is nothing more than that same expression, later
+compared against a user-supplied threshold. Requiring a second,
+separately-hand-verified expression per metric before it can be alerted on
+would be redundant with Step 5 and would leave every metric without its own
+bespoke alert writeup permanently unalertable regardless of how solidly its
+read-query construction is established — that is not a safety property this
+skill needs, and is not how this section works.
 
-- **If that field states no verified alert query is currently defined** for
-  this metric, STOP — do not invent one. Classify the result as
-  `unsupported_metric`, with `explanation` stating plainly that no verified
-  alert query is currently defined for this metric, following the exact
-  wording pattern already used for a missing Query Example ("No verified ...
-  is currently available. Do not invent ..."). This is the expected outcome
-  for the overwhelming majority of metrics today — only a metric whose Alert
-  query/threshold field explicitly states a verified condition exists may
-  proceed past this point.
-- **If that field states a verified alert condition query exists,** use that
-  SAME verified base expression as `alert_rule.condition_query` — never a
-  different expression invented for the occasion, and never reused assuming
-  it fits a request that actually differs from what the field describes.
-- **The threshold value and comparison direction (`>`, `<`, etc.) are a
-  separate concern from the condition query and are NEVER supplied by a
-  reference file** (§8) — they must be explicitly stated by the user. If
-  either is missing, classify as `declined`, `reason:
-  "parameter_requires_clarification"`, with a `clarification` asking for the
-  missing piece specifically — never guess a "reasonable-sounding" number.
+Apply Step 5 exactly as written, with the resulting query becoming
+`alert_rule.condition_query` instead of an executed read query:
+
+- **A verified Query Example exists for this metric:** build the condition
+  query the same way Step 5 would for a read question — the example may
+  inform construction but is never copied verbatim if the resolved request
+  differs from it, exactly as Step 5 already requires.
+- **No verified Query Example, but the metric's query/result semantics are
+  otherwise established** (by its Metric-Specific Query/Result Semantics
+  section, or by datasource fundamentals): build the condition query fresh,
+  exactly as Step 5 already allows for a read question — the absence of a
+  worked example does not by itself block construction, for an alert
+  condition any more than it does for a read query.
+- **That metric's query/result semantics are themselves stated as
+  unverified** (Principle 8 — e.g. an unverified exposed unit, or a metric
+  whose Metric-Specific Query/Result Semantics section explicitly states a
+  query cannot currently be built for the interpretation being asked, such
+  as a unit-dependent reading of `DCGM_FI_DEV_POWER_VIOLATION`): STOP,
+  exactly as Step 5 already requires for a read question about the same
+  interpretation. Classify the result as `unsupported_metric`, explaining
+  what is unverified. This is the ONLY case that blocks alert-condition
+  construction — identical to, never stricter than, the case that already
+  blocks ordinary read-query construction for that same metric and the same
+  interpretation of it.
+
+In every case this means: any metric (and interpretation of it) this skill
+can already construct an ordinary `ok` read query for, it can also propose an
+alert rule for — no metric needs a second, separately-authored "alert query"
+to become alertable, and a metric's alerting coverage can never silently
+drift out of sync with its read-query coverage the way a hand-maintained
+duplicate field would risk.
+
+**The threshold value and comparison direction (`>`, `<`, etc.) remain a
+separate concern from the condition query and are NEVER supplied by a
+reference file** (§8) — they must be explicitly stated by the user. If
+either is missing, classify as `declined`, `reason:
+"parameter_requires_clarification"`, with a `clarification` asking for the
+missing piece specifically — never guess a "reasonable-sounding" number.
 
 ### 12.5 Constructing the proposal
 

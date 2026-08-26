@@ -97,8 +97,6 @@ power-violation counter as the current power consumption value.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `DCGM_FI_DEV_MEMORY_TEMP`
 
 - **Category:** Temperature
@@ -121,8 +119,6 @@ power-violation counter as the current power consumption value.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `DCGM_FI_DEV_POWER_USAGE`
 
 - **Category:** Power
@@ -144,8 +140,6 @@ power-violation counter as the current power consumption value.
   defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `DCGM_FI_DEV_POWER_VIOLATION`
 
@@ -199,8 +193,6 @@ power-violation counter as the current power consumption value.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `DCGM_FI_DEV_SM_CLOCK`
 
 - **Category:** Clocks
@@ -223,8 +215,6 @@ power-violation counter as the current power consumption value.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `DCGM_FI_DEV_MEM_CLOCK`
 
 - **Category:** Clocks
@@ -246,8 +236,6 @@ power-violation counter as the current power consumption value.
   currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ## Domain-Specific Guardrails
 

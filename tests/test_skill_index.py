@@ -5,7 +5,7 @@ from app.skill_index import SkillIndex, SkillIndexError, parse_routing_table
 
 def test_load_real_skill_package(skill_index):
     assert skill_index.metadata.name == "observability-query-builder"
-    assert skill_index.metadata.version == "1.2"
+    assert skill_index.metadata.version == "1.3"
     assert len(skill_index.routing_rows) >= 10
 
 

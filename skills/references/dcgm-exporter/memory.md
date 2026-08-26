@@ -125,8 +125,6 @@ for a utilization/bandwidth question or vice versa.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
 
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
-
 ### `DCGM_FI_DEV_FB_FREE`
 
 - **Category:** GPU Memory
@@ -151,8 +149,6 @@ for a utilization/bandwidth question or vice versa.
   currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `DCGM_FI_DEV_MEM_COPY_UTIL`
 
@@ -184,8 +180,6 @@ for a utilization/bandwidth question or vice versa.
   is currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ### `DCGM_FI_PROF_DRAM_ACTIVE`
 
@@ -222,8 +216,6 @@ for a utilization/bandwidth question or vice versa.
   per-metric override of `SKILL.md` defaults is currently defined.
 - **Query examples:** no verified DCGM PromQL query example is currently
   available. Do not invent a literal query example.
-
-- **Alert query/threshold:** No verified alert query or threshold is currently defined for this metric. Do not invent one.
 
 ## Domain-Specific Guardrails
 
