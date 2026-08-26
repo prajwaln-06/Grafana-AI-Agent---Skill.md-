@@ -30,7 +30,7 @@ call. See §9. Off by default; skip §9 entirely if you're not using it yet.
 
 ```bash
 cp .env.example .env        # fill in a real GEMINI_API_KEY
-uvicorn app.api.main:app --reload --port 8000
+python run_server.py
 ```
 
 | What | Where | Notes |
@@ -560,7 +560,7 @@ OpenSearch connection has been. Run these, in order, on your own machine:
    naming a specific model, that model's been retired — check
    `https://ai.google.dev/gemini-api/docs/models` and update `GEMINI_MODEL`
    in `.env`.
-3. **Start the server** (`uvicorn app.api.main:app --reload --port 8000`)
+3. **Start the server** (`python run_server.py`)
    and work through `skills/evals/regression-cases.md` — hand-authored
    questions specifically designed to cover routing correctness, ambiguity
    handling, comparisons, panic mode, and label-fabrication prevention. For

@@ -46,7 +46,7 @@ cp .env.example .env                  # fill in a real GEMINI_API_KEY
 # Confirm PROMETHEUS_URL / OPENSEARCH_URL match your local setup
 # (defaults: http://localhost:9090, http://localhost:9600)
 
-uvicorn app.api.main:app --reload --port 8000
+python run_server.py
 ```
 
 Then:
@@ -71,7 +71,10 @@ here, since it drifts every time a test is added.
 ## Project layout
 
 ```
+run_server.py          FastAPI wrapper instantiating the ADK ApiServer and
+                         overlaying compatibility routes.
 app/
+  agent.py              Defines the custom ADK Agent ObservabilityQueryBuilderAgent.
   skill_index.py        Parses SKILL.md's routing table + sections. The
                          single source of truth for "what does this skill
                          cover and where does each piece live" -- nothing
@@ -99,25 +102,13 @@ app/
   grafana_client.py       Thin wrapper around Grafana's Alerting
                           Provisioning HTTP API. The ONLY module that ever
                           writes to Grafana, and only ever called from
-                          api/routes_alerts.py's confirmation endpoint --
+                          run_server.py's confirmation endpoint --
                           never from pipeline.py/executor.py. See SKILL.md
                           §12 and HANDOFF.md's "Alert Rule Creation" section.
   pipeline.py             Router -> Generator -> Validator orchestration,
                           plus partial-datasource-coverage handling (see
                           pipeline.py's module docstring).
-  session_store.py        In-memory clarification/follow-up session store,
-                          also reused for the alert-rule-creation
-                          propose/confirm flow (SKILL.md §12).
   config.py                Typed settings (env vars, see .env.example).
-  api/
-    main.py                FastAPI app, startup, CORS, error handling.
-    routes_query.py        POST /api/v1/query
-    routes_alerts.py        POST /api/v1/alerts/confirm -- SKILL.md §12's
-                            confirmation step; the only path that ever
-                            creates a real Grafana alert rule.
-    routes_health.py       /healthz, /readyz, /api/v1/capabilities
-    routes_admin.py         POST /api/v1/admin/reload-skill
-    schemas.py              Request/response models.
 skills/                    The observability-query-builder skill package
                             (SKILL.md + references/). Replace this directory
                             wholesale to update the skill; nothing in app/
