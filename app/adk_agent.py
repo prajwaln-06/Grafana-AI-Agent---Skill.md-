@@ -94,28 +94,44 @@ def get_adk_agent() -> LlmAgent:
     global _agent_instance
     if _agent_instance is None:
         settings = get_settings()
-        model_name = settings.gemini_model or "gemini-3.7-flash"
-        api_key = settings.gemini_api_key
-        location = getattr(settings, "vertex_location", "global")
-        project = getattr(settings, "vertex_project", "project-8d47da29-7cf0-45f0-b55")
+        selected_model = None
 
-        if api_key.startswith("AQ.") or os.environ.get("VERTEXAI", "").lower() in ("true", "1"):
-            client_kwargs = {
-                "vertexai": True,
-                "api_key": api_key,
-                "location": location,
-                "project": project,
-            }
-        else:
-            client_kwargs = {"api_key": api_key}
+        # Check for local Ollama / LiteLLM preference
+        use_litellm = os.environ.get("ADK_USE_LITELLM", "").lower() in ("true", "1") or os.environ.get("OLLAMA_MODEL")
+        if use_litellm:
+            try:
+                from google.adk.models.lite_llm import LiteLlm
+                ollama_model = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
+                model_name = f"ollama_chat/{ollama_model}" if not ollama_model.startswith("ollama_chat/") else ollama_model
+                selected_model = LiteLlm(model=model_name)
+                logger.info("Initialized ADK LlmAgent with LiteLLM model=%s", model_name)
+            except Exception as e:
+                logger.warning("Failed to initialize LiteLLM (%s); falling back to Gemini", e)
 
-        gemini_model = Gemini(
-            model=model_name,
-            client_kwargs=client_kwargs,
-        )
+        if selected_model is None:
+            model_name = settings.gemini_model or "gemini-3.7-flash"
+            api_key = settings.gemini_api_key
+            location = getattr(settings, "vertex_location", "global")
+            project = getattr(settings, "vertex_project", "project-8d47da29-7cf0-45f0-b55")
+
+            if api_key.startswith("AQ.") or os.environ.get("VERTEXAI", "").lower() in ("true", "1"):
+                client_kwargs = {
+                    "vertexai": True,
+                    "api_key": api_key,
+                    "location": location,
+                    "project": project,
+                }
+            else:
+                client_kwargs = {"api_key": api_key}
+
+            selected_model = Gemini(
+                model=model_name,
+                client_kwargs=client_kwargs,
+            )
+            logger.info("Initialized ADK LlmAgent with Vertex AI model=%s", model_name)
 
         _agent_instance = LlmAgent(
-            model=gemini_model,
+            model=selected_model,
             name="grafana_observability_agent",
             description="AI-powered Grafana observability assistant with MCP tools and proposal review.",
             instruction=AGENT_INSTRUCTION,
@@ -129,7 +145,6 @@ def get_adk_agent() -> LlmAgent:
                 resolve_dashboard_intent,
             ],
         )
-        logger.info("Initialized ADK LlmAgent with Vertex AI model=%s", model_name)
     return _agent_instance
 
 

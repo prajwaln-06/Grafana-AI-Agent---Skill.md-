@@ -33,8 +33,7 @@ const OPENSEARCH_URL = process.env.OPENSEARCH_URL || "";
 const OPENSEARCH_INDEX = process.env.OPENSEARCH_INDEX || "logs-*";
 const OPENSEARCH_TIMESTAMP_FIELD =
   process.env.OPENSEARCH_TIMESTAMP_FIELD || "@timestamp";
-const GRAFANA_URL = process.env.GRAFANA_URL || "http://localhost:3000";
-const ADK_SERVICE_URL = process.env.ADK_SERVICE_URL || "http://127.0.0.1:5060";
+const ADK_SERVICE_URL = process.env.ADK_SERVICE_URL || process.env.BACKEND_URL || "http://127.0.0.1:8000";
 const ADK_PROXY_TIMEOUT_MS = readPositiveIntEnv("ADK_PROXY_TIMEOUT_MS", 5000, 60000);
 const BACKEND_TIMEOUT_MS = readPositiveIntEnv("BACKEND_TIMEOUT_MS", 12000, 60000);
 const MAX_ADK_PROXY_BYTES = 5 * 1024 * 1024;
@@ -601,6 +600,32 @@ app.post("/api/adk/chat", async (req, res) => {
     res.status(502).json({
       error: err.message || "ADK flow failed",
     });
+  }
+});
+
+app.all("/api/proposals*", async (req, res) => {
+  try {
+    const remote = await proxyAdk(req.originalUrl, {
+      method: req.method,
+      body: ["POST", "PUT", "PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
+    });
+    if (remote) return res.json(remote);
+    res.status(502).json({ error: "Backend proposal service unreachable" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.all("/api/conversations*", async (req, res) => {
+  try {
+    const remote = await proxyAdk(req.originalUrl, {
+      method: req.method,
+      body: ["POST", "PUT", "PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
+    });
+    if (remote) return res.json(remote);
+    res.status(502).json({ error: "Backend conversation service unreachable" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
