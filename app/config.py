@@ -113,6 +113,90 @@ class Settings(BaseSettings):
                                                           "request, independent of each call's own retry/"
                                                           "backoff.")
 
+    # --- Metric catalog integration (Batch 3, Phases 7-9) ---
+    # Both flags follow the exact same "flag off = zero behavior change"
+    # convention alert_rule_creation_enabled already established above:
+    # default False, and while False the corresponding pipeline.py code
+    # path is never exercised at all (no catalog load, no extra search
+    # call, no prompt-content change) -- not merely "exercised but
+    # defaulting to a no-op."
+    catalog_path: Path = Field(
+        default=Path("app/catalog/catalog.json"),
+        description="Path to the generated metric catalog (see app/catalog/generator.py). "
+                    "Only read at all if catalog_shadow_mode_enabled or "
+                    "catalog_assisted_routing_enabled is True. A missing or invalid file at "
+                    "this path never crashes the pipeline -- both features silently disable "
+                    "themselves (logged once) if the catalog can't be loaded.",
+    )
+    catalog_shadow_mode_enabled: bool = Field(
+        default=False,
+        description="Phase 8. When True, every non-gate_stop request also runs catalog "
+                    "search (app/catalog/search.py) alongside the real Router call and logs "
+                    "a comparison between the Router's actual matched_references and what "
+                    "the catalog would have suggested. Purely observational: this NEVER "
+                    "changes the Router's prompt, the Generator's prompt, or the response "
+                    "returned to the caller, and a failure inside the shadow comparison "
+                    "itself is caught and logged, never allowed to affect the real request.",
+    )
+    catalog_assisted_routing_enabled: bool = Field(
+        default=False,
+        description="Phase 9. When True, the Router's SKILL.md Section 4 (routing table) "
+                    "prompt content is narrowed, per-question, to catalog-suggested domain "
+                    "rows -- see pipeline.py's _maybe_narrow_section4. Narrowing only ever "
+                    "applies to routing rows whose reference_path is one the catalog "
+                    "actually has an opinion about (today: the 8 node-exporter/dcgm-exporter "
+                    "domain files); every other row (overview.md rows, *-fundamentals.md "
+                    "rows, execution-contract.md) is always kept regardless of catalog "
+                    "results, and a catalog miss OR a low-confidence hit (see "
+                    "catalog_narrow_min_score below) always falls back to the full, "
+                    "unnarrowed Section 4 -- never treated as 'nothing routes here'. "
+                    "Independent of catalog_shadow_mode_enabled.",
+    )
+    catalog_narrow_min_score: float = Field(
+        default=2.0,
+        description="Phase 10 (Batch 4). Minimum score the TOP catalog-search candidate must "
+                    "clear before catalog_assisted_routing_enabled will narrow Section 4 at "
+                    "all; a non-empty search result below this floor is treated exactly like "
+                    "a catalog miss (full, unnarrowed Section 4). Batch 4's review finding was "
+                    "that 'a non-empty catalog search result is not necessarily a safe routing "
+                    "result' -- this is the conservative half of that fix (the other half is "
+                    "that narrowing itself no longer truncates by rank; see "
+                    "pipeline.py's _NARROW_SEARCH_TOP_N). The default (2.0) is set relative to "
+                    "search.py's own field weights: it rules out a candidate whose ENTIRE score "
+                    "comes from a single incidental 'help' or 'exporter' token match (weight "
+                    "1.0 each, search.py's own docstring calls free-prose help text 'most "
+                    "likely to contain incidental word overlap'), while still passing any "
+                    "single category match (weight 2.0) or stronger. It intentionally does NOT "
+                    "attempt to fix moderate-scoring false positives from genuine name/keyword "
+                    "overlap on the wrong metric (e.g. a query containing the word 'total' "
+                    "matching an unrelated *_TOTAL metric name) -- that is a scoring-precision "
+                    "problem for a future weight-tuning phase, not something a single global "
+                    "threshold can safely resolve without also cutting correct matches that "
+                    "score just as low. See scripts/evaluate_catalog_retrieval.py's "
+                    "reference-level report for the measured breakdown.",
+    )
+    catalog_metric_status_validation_enabled: bool = Field(
+        default=False,
+        description="Phase 12 (Batch 4). When True, app/validator.py's deterministic checks "
+                    "additionally look up each Prometheus-backed query/alert metric's catalog "
+                    "status and reject the metric outright if that status is "
+                    "'discovered_pending_review' or 'rejected' -- even if the same metric name "
+                    "also happens to appear in a Metric Directory this request opened (the "
+                    "existing `known_metrics` check). This is strictly additive/supplementary: "
+                    "it can only make an already-known metric MORE restricted, never less -- it "
+                    "never overrides a `known_metrics` rejection, and it never makes a fabricated "
+                    "metric name valid. While False (the default), the catalog is not even loaded "
+                    "for this purpose (unless catalog_shadow_mode_enabled or "
+                    "catalog_assisted_routing_enabled is also True for its own reasons) and "
+                    "validator.py's known_metrics behavior is byte-for-byte what it was before "
+                    "this flag existed. If the catalog fails to load, or this deployment has no "
+                    "catalog at all, this degrades to 'no catalog-status information available' "
+                    "(validation proceeds on known_metrics alone) rather than rejecting every "
+                    "metric or crashing the request -- consistent with every other catalog "
+                    "setting's 'catalog integration is additive, never a new single point of "
+                    "failure' convention.",
+    )
+
     @property
     def opensearch_auth(self) -> tuple[str, str] | None:
         if self.opensearch_auth_username and self.opensearch_auth_password:

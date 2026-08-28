@@ -9,9 +9,8 @@ Verifies two invariants stated in SKILL.md, exporter-overview-template.md, and
 domain-reference-template.md but never previously checked by anything other than
 careful authoring (Phase 0 finding):
 
-  1. Every metric listed in an exporter overview's Metric Directory table has a
-     corresponding `### \`metric_name\`` definition in the domain file it points to,
-     and vice versa (no metric exists only in one place).
+    1. Every catalog metric has a corresponding `### `metric_name`` definition
+       in its referenced domain file (the catalog is now authoritative).
   2. Every reference file linked from SKILL.md's routing table (§4) exists on
      disk, unless explicitly marked "pending addition" in that table.
 
@@ -107,6 +106,44 @@ def check_metric_directory_consistency(skill_root: Path) -> list[str]:
     return problems
 
 
+def check_catalog_consistency(skill_root: Path) -> list[str]:
+    """Verify the catalog is wired to real metric-specific Markdown.
+
+    Legacy overview tables, when present in an older package, are still
+    checked by check_metric_directory_consistency above. Current overview
+    files intentionally have no metric table.
+    """
+    catalog_path = skill_root.parent / "app" / "catalog" / "catalog.json"
+    if not catalog_path.exists():
+        return [f"{catalog_path} not found."]
+    try:
+        import json
+
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"{catalog_path}: cannot read catalog: {exc}"]
+
+    problems: list[str] = []
+    names: set[str] = set()
+    for entry in data.get("metrics", []):
+        name = entry.get("name")
+        reference = entry.get("reference_path")
+        if not name or name in names:
+            problems.append(f"{catalog_path}: duplicate or empty metric name {name!r}.")
+            continue
+        names.add(name)
+        if not reference:
+            problems.append(f"{catalog_path}: metric {name!r} has no reference_path.")
+            continue
+        domain_path = skill_root / reference
+        if not domain_path.exists():
+            problems.append(f"{catalog_path}: {name!r} points to missing {reference}.")
+            continue
+        if not re.search(rf"^###\s+`{re.escape(name)}`\s*$", domain_path.read_text(encoding="utf-8"), re.MULTILINE):
+            problems.append(f"{domain_path}: missing catalog metric definition {name!r}.")
+    return problems
+
+
 def check_routing_links_resolve(skill_root: Path) -> list[str]:
     problems: list[str] = []
     skill_md = skill_root / "SKILL.md"
@@ -130,6 +167,7 @@ def main() -> int:
     skill_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent
     problems = []
     problems += check_metric_directory_consistency(skill_root)
+    problems += check_catalog_consistency(skill_root)
     problems += check_routing_links_resolve(skill_root)
 
     if not problems:

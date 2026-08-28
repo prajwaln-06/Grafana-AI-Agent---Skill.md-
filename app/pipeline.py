@@ -20,9 +20,9 @@ model call succeeding.
                 datasource coverage" below.
   GENERATOR  -- SKILL.md Section 6 Steps 3-6 (select metric(s), apply
                 Section 8's parameter defaults, construct the query/queries,
-                assemble the mode/results shape). Given the full content of
-                every matched reference, its sibling overview.md (for the
-                Metric Directory), the relevant *-fundamentals.md file(s),
+                assemble the mode/results shape).                 Given the full content of every matched reference, its sibling
+                overview.md (for exporter/domain context), the catalog, the
+                relevant *-fundamentals.md file(s),
                 Section 7 (error handling -- needed for panic-mode framing),
                 and live-discovered label keys / Attributes keys.
   VALIDATOR  -- no LLM. See validator.py.
@@ -65,6 +65,21 @@ The resulting `status: "alert_rule_proposed"` result is never auto-executed
 only happens via the separate confirmation endpoint in
 app/api/routes_alerts.py, which is this pipeline's sibling, not something
 it calls.
+
+Catalog status validation (Phase 12, Batch 4 -- feature-flagged off by
+default, see app/config.py's `catalog_metric_status_validation_enabled`):
+when enabled, `_catalog_status_by_metric` hands validator.py a small
+{metric_name: catalog_status} lookup alongside `known_metrics`, so a
+`discovered_pending_review`/`rejected` catalog metric can never become a
+valid query or alert-rule metric even if the same name also happens to
+appear in a Metric Directory this request opened. This is purely additive
+to `known_metrics` -- see validator.py's module docstring for the combined
+policy, and app/pipeline.py's `_catalog_status_by_metric` for how the
+mapping is built. Phase 13 (same batch) closes a related gap: the
+alert-rule-proposal validation path (`validator._validate_alert_rule_proposed`)
+now enforces the SAME `known_metrics`/catalog-status policy the ordinary
+query path always has, rather than skipping metric-name validation for
+alert proposals specifically.
 """
 from __future__ import annotations
 
@@ -73,8 +88,12 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from app import field_discovery, label_discovery, llm_client, validator
+from app.catalog import rules as catalog_rules
+from app.catalog import search as catalog_search
+from app.catalog.loader import CatalogLoadError, load_catalog
+from app.catalog.schema import Catalog, CatalogSchemaError
 from app.config import Settings
-from app.skill_index import SkillIndex
+from app.skill_index import ROUTING_ROW_RE, SkillIndex
 
 logger = logging.getLogger(__name__)
 
@@ -112,10 +131,19 @@ class PipelineContext:
 
 
 async def run_pipeline(question: str, skill_index: SkillIndex, settings: Settings,
-                        context: PipelineContext | None = None) -> dict:
+                        context: PipelineContext | None = None,
+                        catalog: Catalog | None = None) -> dict:
     context = context or PipelineContext()
 
-    router_output = await _run_router(question, skill_index, settings, context)
+    # `catalog` is an optional, explicit override (mainly for tests); ordinary
+    # callers (app/agent.py) never pass it. If neither Batch 3 catalog
+    # feature is enabled, _get_catalog() is never called at all -- zero
+    # catalog load, zero extra I/O, for any deployment that hasn't opted in.
+    if catalog is None and (settings.catalog_shadow_mode_enabled or settings.catalog_assisted_routing_enabled
+                             or settings.catalog_metric_status_validation_enabled):
+        catalog = _get_catalog(settings)
+
+    router_output = await _run_router(question, skill_index, settings, context, catalog=catalog)
     unresolved_topics = _clean_unresolved_topics(router_output.get("unresolved_topics"))
 
     if router_output.get("gate_stop"):
@@ -125,6 +153,13 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
     matched = router_output.get("matched_references", [])
     panic_mode = bool(router_output.get("panic_mode", False))
     action_intent = router_output.get("action_intent") or "read_query"
+
+    if settings.catalog_shadow_mode_enabled and catalog is not None:
+        # Phase 8: purely observational. See _log_catalog_shadow_comparison's
+        # own docstring for why this can never affect `matched`, `contract`,
+        # or the response -- it is called for its logging side effect only
+        # and its return value is discarded.
+        _log_catalog_shadow_comparison(question, matched, catalog)
 
     if action_intent == _ALERT_ACTION_INTENT and not settings.alert_rule_creation_enabled:
         # Defense in depth, not the primary control: with the feature flag
@@ -190,12 +225,24 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
     known_references = set(generator_context.reference_texts.keys()) | set(generator_context.overview_texts.keys())
     known_datasources = {(m.get("data_source") or "").strip().lower() for m in matched}
 
+    # Phase 12 (Batch 4): catalog status is a small, additive lookup table
+    # handed to the Validator alongside known_metrics -- never the whole
+    # Catalog object, and never a replacement for known_metrics itself. Only
+    # built (and the catalog only loaded at all, see the gate above) when
+    # settings.catalog_metric_status_validation_enabled is True; otherwise
+    # this stays None and validator.py's catalog-status check is a no-op,
+    # identical to before Phase 12 existed.
+    catalog_status_by_metric = None
+    if settings.catalog_metric_status_validation_enabled and catalog is not None:
+        catalog_status_by_metric = _catalog_status_by_metric(catalog)
+
     return _finalize(
         contract, unresolved_topics,
         known_metrics=generator_context.known_prometheus_metrics,
         labels_by_metric=generator_context.labels_by_metric,
         known_references=known_references,
         known_datasources=known_datasources,
+        catalog_status_by_metric=catalog_status_by_metric,
     )
 
 
@@ -469,14 +516,29 @@ def _build_router_instructions(settings: Settings) -> str:
 
 
 async def _run_router(question: str, skill_index: SkillIndex, settings: Settings,
-                       context: PipelineContext) -> dict:
+                       context: PipelineContext, catalog: Catalog | None = None) -> dict:
     section_headers = ["## 3.", "## 4.", "## 7."]
     if settings.alert_rule_creation_enabled:
         # Only loaded into the prompt when the deployment has opted in --
         # see _build_router_instructions' docstring for why this mirrors
         # the same "flag off => zero prompt change" guarantee.
         section_headers.append("## 12.")
-    sections = "\n\n".join(skill_index.section(h) for h in section_headers)
+
+    section_texts = [skill_index.section(h) for h in section_headers]
+    if settings.catalog_assisted_routing_enabled and catalog is not None:
+        # Phase 9: replace ONLY the "## 4." entry, in place, with a
+        # per-question-narrowed version. section_headers/section_texts stay
+        # index-aligned, so this is a targeted substitution, not a
+        # rebuild -- if catalog_assisted_routing_enabled is False (the
+        # default), this branch never runs and `sections` below is
+        # byte-for-byte what it always was.
+        idx = section_headers.index("## 4.")
+        section_texts[idx] = _maybe_narrow_section4(
+            section_texts[idx], skill_index, catalog, question,
+            min_confident_score=settings.catalog_narrow_min_score,
+        )
+
+    sections = "\n\n".join(section_texts)
     prompt_parts = [f"SKILL.md reference sections:\n\n{sections}", f"\nUser question: {question}"]
     if context.previous_question:
         prompt_parts.append(
@@ -531,6 +593,9 @@ def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
         if overview_path and overview_path not in ctx.overview_texts:
             ctx.overview_texts[overview_path] = skill_index.read_reference(overview_path)
             if ds == "prometheus":
+                # The catalog is the sole metric-universe source. The
+                # compatibility lookup only supplies paths for legacy skill
+                # packages that still carry an overview table.
                 ctx.known_prometheus_metrics.update(skill_index.metric_directory(overview_path).keys())
 
     # Load the correct *-fundamentals.md for every real datasource in play,
@@ -772,6 +837,275 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
         model=settings.gemini_model,
     )
     return response.parsed
+
+
+# ---- Batch 3 catalog integration (Phases 7-9) ------------------------------
+#
+# Explicit architectural note (carried over from Batch 2 review): the
+# catalog these functions consume is agnostic to how it was produced.
+# app/catalog/generator.py's Markdown-parsing generator remains the
+# BOOTSTRAP mechanism for the 43 metrics this project already had
+# hand-authored Markdown for; it is not meant to become the permanent
+# gate for onboarding new metrics (see app/catalog/reconciler.py's module
+# docstring for the intended ongoing path). Nothing below cares which
+# mechanism produced app/catalog/catalog.json -- it just loads whatever
+# Catalog document is there.
+
+_catalog_cache: Catalog | None = None
+_catalog_load_failed_path: str | None = None
+
+
+def _get_catalog(settings: Settings) -> Catalog | None:
+    """Lazily loads and caches the catalog from `settings.catalog_path`,
+    then applies Phase 5's rules (app/catalog/rules.py) to it in memory
+    before caching. The on-disk catalog.json committed by generator.py
+    (Phase 2) is deliberately left as pure, source-derived bootstrap
+    output -- keywords/priority classification is applied here, at load
+    time, rather than baked into the committed artifact, so the two
+    concerns (what generator.py derived from Markdown vs. what rules.py
+    classified) stay visibly separate and re-running apply_rules() here
+    can never drift from what's actually committed to the repo.
+
+    Returns None (never raises) if the file is missing or invalid -- a
+    broken or absent catalog.json must degrade both Batch 3 features to a
+    no-op, never crash a request or block startup, matching the
+    "catalog integration is additive" principle. Logs the failure once per
+    distinct path, not on every request, to avoid log-flooding a
+    deployment that has simply not generated a catalog yet."""
+    global _catalog_cache, _catalog_load_failed_path
+    if _catalog_cache is not None:
+        return _catalog_cache
+    path_str = str(settings.catalog_path)
+    if _catalog_load_failed_path == path_str:
+        return None
+    try:
+        loaded = load_catalog(settings.catalog_path)
+    except (CatalogLoadError, CatalogSchemaError, OSError) as e:
+        logger.warning(
+            "Catalog integration (shadow mode / assisted routing) disabled: "
+            "failed to load catalog at %s: %s", settings.catalog_path, e,
+        )
+        _catalog_load_failed_path = path_str
+        return None
+    _catalog_cache = catalog_rules.apply_rules(loaded)
+    return _catalog_cache
+
+
+def reset_catalog_cache() -> None:
+    """Clears the module-level catalog cache. Exists for tests (and for a
+    future admin/reload endpoint mirroring SkillIndex's own reload_skill())
+    that need a fresh load after catalog.json changes on disk -- ordinary
+    request handling never needs to call this."""
+    global _catalog_cache, _catalog_load_failed_path
+    _catalog_cache = None
+    _catalog_load_failed_path = None
+
+
+def _log_catalog_shadow_comparison(question: str, matched: list[dict], catalog: Catalog) -> None:
+    """Phase 8. Runs catalog search independently of, and never influencing,
+    the real Router decision, purely to log whether the two agree. Wrapped
+    in its own try/except -- a bug in catalog search or in this comparison
+    itself must never surface as a pipeline failure for an ordinary
+    request; shadow mode failing loudly enough to break production traffic
+    would defeat the entire point of it being a shadow.
+    """
+    try:
+        results = catalog_search.search(catalog, question)
+        catalog_paths = {r.entry.reference_path for r in results if r.entry.reference_path}
+        router_paths = {m.get("reference_path") for m in matched if m.get("reference_path")}
+        agreement = bool(router_paths & catalog_paths) if (router_paths or catalog_paths) else True
+        logger.info(
+            "catalog_shadow_mode: question=%r router_matched=%s catalog_suggested=%s "
+            "agreement=%s", question, sorted(router_paths), sorted(catalog_paths), agreement,
+        )
+    except Exception:
+        logger.exception(
+            "catalog_shadow_mode: comparison failed for question %r; this never "
+            "affects the actual response.", question,
+        )
+
+
+def _catalog_status_by_metric(catalog: Catalog) -> dict[str, str]:
+    """Phase 12 (Batch 4): the minimal additive interface validator.py needs
+    -- {metric_name: catalog_status_string} -- rather than threading the
+    entire Catalog object through _finalize/validate_contract. Built fresh
+    from the (already-cached-by-_get_catalog) Catalog on every request that
+    opts in; cheap (43 entries today, bounded by catalog size generally)
+    and avoids validator.py importing anything beyond
+    app.catalog.schema.CatalogStatus for its own comparison."""
+    return {m.name: m.status for m in catalog.metrics}
+
+
+def _catalog_covered_reference_paths(catalog: Catalog) -> set[str]:
+    """Every reference_path the catalog has at least one entry for. Section
+    4 rows outside this set (overview.md rows, *-fundamentals.md rows,
+    execution-contract.md's n/a row, and any future domain the catalog
+    doesn't cover yet) are rows the catalog has no opinion about at all --
+    see _maybe_narrow_section4's docstring for why those are always kept."""
+    return {m.reference_path for m in catalog.metrics if m.reference_path}
+
+
+def _narrow_section4_text(section4_text: str, allowed_reference_paths: set[str]) -> str:
+    """Filters SKILL.md's Section 4 table down to only the data rows whose
+    linked reference_path is in `allowed_reference_paths`, preserving every
+    non-data-row line (headers, the intro paragraph, the separator row, the
+    trailing "Keyword rule..." guidance) byte-for-byte and unconditionally.
+    Rows are matched and dropped by filtering the ORIGINAL markdown lines
+    (via skill_index.ROUTING_ROW_RE, the same regex SkillIndex itself
+    parses Section 4 with -- not a second, duplicated pattern) rather than
+    regenerating row text from RoutingRow fields, so every kept row is
+    guaranteed byte-identical to what the Router has always seen for that
+    row.
+    """
+    kept_lines: list[str] = []
+    for line in section4_text.splitlines():
+        stripped = line.strip()
+        is_table_row = stripped.startswith("|")
+        if not is_table_row:
+            kept_lines.append(line)
+            continue
+        if stripped.startswith("|---") or stripped.startswith("| ---"):
+            kept_lines.append(line)
+            continue
+        if stripped.lower().startswith("| route when"):
+            kept_lines.append(line)
+            continue
+        m = ROUTING_ROW_RE.match(stripped)
+        if not m:
+            # Doesn't parse as a routing row at all -- keep it rather than
+            # risk silently dropping content this function doesn't
+            # recognize; narrowing should only ever remove rows it is
+            # confident are catalog-covered-but-not-suggested.
+            kept_lines.append(line)
+            continue
+        link_path = m.group("link_path").strip()
+        if link_path in allowed_reference_paths:
+            kept_lines.append(line)
+        # else: dropped -- a catalog-covered domain row the catalog did not
+        # suggest as relevant to this specific question.
+    return "\n".join(kept_lines)
+
+
+# Batch 4 (Phase 10) finding: a non-empty catalog search result is not
+# necessarily a safe routing result. search.py's own top_n truncates to
+# DEFAULT_TOP_N=5 by design (a sane "show the user 5 candidates" cutoff),
+# but Phase 9's narrowing decision isn't picking candidates to show a
+# person -- it's deciding which Section 4 rows the Router is even allowed
+# to see. Truncating that decision to 5 means a genuinely correct
+# reference that would have scored, say, 6th, is silently dropped from the
+# Router's options entirely. Measured on the Batch 3 question set: capping
+# at top_n=5 loses the correct reference in 13/46 cases, but running the
+# exact same search with this uncapped top_n over the same 46 questions
+# loses it in only 6/46 -- almost all of the "miss" rate at top_n=5 was
+# rank-truncation, not genuine zero-overlap. Narrowing therefore always
+# searches uncapped (bounded only by catalog size, never by rank) and
+# leans on `min_confident_score` instead of a rank cutoff to control what
+# counts as "suggested" -- consistent with search.py's own stated
+# principle that "False positives/over-inclusion are preferable to false
+# negatives," applied here to the narrowing decision specifically.
+_NARROW_SEARCH_TOP_N = 1_000_000  # i.e. "no rank cap" -- see above.
+
+
+@dataclass(frozen=True)
+class NarrowingDecision:
+    """Pure result of a catalog-narrowing lookup, independent of SkillIndex/
+    Section 4 text -- kept separate from `_maybe_narrow_section4` so
+    scripts/evaluate_catalog_retrieval.py (and tests) can measure/exercise
+    the actual narrowing decision directly, rather than re-deriving it from
+    parsed markdown output, which would risk drifting from what production
+    actually decides."""
+    confident: bool
+    suggested_paths: frozenset[str]
+    top_score: float | None
+
+
+def catalog_narrowing_candidates(catalog: Catalog, question: str,
+                                  min_confident_score: float) -> NarrowingDecision:
+    """The actual narrowing decision Phase 9 acts on: uncapped-by-rank
+    catalog search (see `_NARROW_SEARCH_TOP_N` above), gated by a
+    conservative confidence floor on the TOP candidate's score.
+
+    Two distinct "don't narrow" cases, both folded into `confident=False`
+    for the caller (either one falls back to the full, unnarrowed Section
+    4 the same way):
+
+      - True catalog miss: zero candidates score above search.py's own
+        zero-overlap floor at all. Per §2.6, always falls back.
+      - Low-confidence hit: candidates exist, but even the best one scores
+        below `min_confident_score` -- e.g. a single incidental "help" or
+        "exporter" token match (search.py's own docstring flags free-prose
+        help text as "most likely to contain incidental word overlap").
+        Batch 4 measurement: this floor cannot, by itself, fix cases where
+        an unrelated metric scores moderately-to-highly on genuine
+        name/keyword token overlap (that is a weight-precision problem for
+        a future tuning phase, not a confidence-threshold problem) -- it
+        specifically guards the weak end of the score range against acting
+        on what is essentially noise.
+
+    Uses search.py's default status filter (approved + approved_unavailable
+    only -- discovered_pending_review excluded), so an unreviewed
+    runtime-only metric can never influence what the Router even sees,
+    consistent with the Batch 2 clarification that pending-review metrics
+    must not become eligible for query generation.
+    """
+    results = catalog_search.search(catalog, question, top_n=_NARROW_SEARCH_TOP_N)
+    if not results:
+        return NarrowingDecision(confident=False, suggested_paths=frozenset(), top_score=None)
+
+    top_score = results[0].score
+    if top_score < min_confident_score:
+        return NarrowingDecision(confident=False, suggested_paths=frozenset(), top_score=top_score)
+
+    suggested_paths = frozenset(r.entry.reference_path for r in results if r.entry.reference_path)
+    return NarrowingDecision(confident=True, suggested_paths=suggested_paths, top_score=top_score)
+
+
+def _maybe_narrow_section4(section4_text: str, skill_index: SkillIndex,
+                            catalog: Catalog, question: str,
+                            min_confident_score: float) -> str:
+    """Phase 9 (revised in Phase 10/Batch 4). Narrows Section 4's text to
+    catalog-suggested rows for this specific question, with three
+    independent safety nets, any one of which alone is enough to guarantee
+    "never narrow away something that might matter":
+
+      1. Only rows whose reference_path the catalog actually covers (today:
+         the 8 node-exporter/dcgm-exporter domain files) are eligible to be
+         dropped at all. Every other row -- both overview.md rows, both
+         *-fundamentals.md rows, and execution-contract.md's row -- is
+         always kept, because the catalog has no opinion about them
+         (§2.7: "Catalog narrows what SkillIndex provides to Router. It
+         does not replace Router.").
+      2. A catalog MISS for this question (zero candidates at all) returns
+         `section4_text` completely unchanged -- per §2.6, "A catalog miss
+         must fall back to the existing full routing path. Never convert a
+         catalog miss into 'unsupported.'"
+      3. (New, Batch 4) A low-confidence hit -- candidates exist, but none
+         clear `min_confident_score` -- is treated identically to a miss.
+         See `catalog_narrowing_candidates`'s docstring for why a
+         non-empty result isn't, by itself, a safe basis for narrowing.
+    """
+    decision = catalog_narrowing_candidates(catalog, question, min_confident_score)
+    if not decision.confident:
+        logger.info(
+            "catalog_assisted_routing: no confident candidates for question %r "
+            "(top_score=%s, min_confident_score=%s); using the full, unnarrowed "
+            "Section 4 (fail-safe fallback).",
+            question, decision.top_score, min_confident_score,
+        )
+        return section4_text
+
+    covered_paths = _catalog_covered_reference_paths(catalog)
+    all_paths = set(skill_index.reference_paths())
+    uncovered_paths = all_paths - covered_paths
+    allowed_paths = decision.suggested_paths | uncovered_paths
+
+    narrowed = _narrow_section4_text(section4_text, allowed_paths)
+    logger.info(
+        "catalog_assisted_routing: narrowed Section 4 for question %r -- "
+        "catalog-suggested=%s, always-kept (uncovered)=%s, top_score=%s",
+        question, sorted(decision.suggested_paths), sorted(uncovered_paths), decision.top_score,
+    )
+    return narrowed
 
 
 # ---- helpers --------------------------------------------------------------------

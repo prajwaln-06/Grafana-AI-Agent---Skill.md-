@@ -2,8 +2,8 @@
 TEMPLATE — exporter overview file.
 
 Use this for a new exporter's overview.md. Fill in every [bracketed] placeholder.
-Do NOT re-add a Metric Selection Procedure here — that procedure lives once, in
-SKILL.md §6 Step 3, and applies identically to every exporter. Do NOT add YAML
+Do NOT re-add a Metric Selection Procedure or Metric Directory here — those
+responsibilities live in the catalog and SKILL.md §6 Step 3. Do NOT add YAML
 frontmatter — this is a reference file, not a SKILL.md; only SKILL.md's
 frontmatter is validated against the Agent Skills spec. Use the plain-markdown
 "Quick Facts" block below instead.
@@ -41,20 +41,10 @@ Do not use this reference for:
 
 - [different observability domain] → `[appropriate reference]`
 - [another unsupported domain] → `[appropriate handling, e.g. "not currently defined in this skill"]`
-- Any metric not listed in the Metric Directory below.
+- Any metric not present in the generated catalog.
 
-## Metric Directory
-
-Exhaustive for the metrics currently supported by this skill. Every supported
-metric must appear here in addition to its detailed definition in the relevant
-domain file; the domain file's detailed definition is authoritative for final
-metric selection. A metric must never exist only inside a domain file without a
-corresponding row here, or vice versa.
-
-| Domain | Intent / Measurement | Metric | Detail File |
-|---|---|---|---|
-| [domain] | [what the user wants to measure] | `[metric_name]` | `[domain].md` |
-| [domain] | [related but distinct measurement] | `[metric_name]` | `[domain].md` |
+Metric names and structured metadata are maintained in the generated catalog.
+Keep metric-specific semantics in the linked domain files.
 
 ## Derived / Composed Measurements
 
@@ -124,7 +114,7 @@ currently exist, state exactly:
 
 ## Guardrails
 
-- Route requests only to metrics defined in this Metric Directory.
+- Route requests only to metrics defined in the catalog.
 - Use derived/composed measurements only when explicitly defined here.
 - Use only metric names, units, dimensions, relationships, and semantics
   established in this skill's references, and only label keys confirmed by
@@ -135,5 +125,5 @@ currently exist, state exactly:
 - Apply only scope constraints the user provided and that the runtime can
   confirm a label key for.
 - Preserve every measurement explicitly requested by the user.
-- Treat the Metric Directory as a routing aid only — verify final metric
-  selection using the detailed definition in the relevant domain file.
+- Verify final metric selection using the detailed definition in the relevant
+  domain file.

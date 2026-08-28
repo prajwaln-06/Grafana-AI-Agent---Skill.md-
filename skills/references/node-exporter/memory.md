@@ -97,16 +97,13 @@ memory as a substitute for available memory without swapping, or vice versa.
   filesystem buffers → `node_memory_Buffers_bytes`; total swap space →
   `node_memory_SwapTotal_bytes`.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much RAM does this node have?", "What is the total
   physical memory?", "Compare total RAM across the nodes."
 - **Edge/confusable example:** user asks how much memory is currently
   available for use → use `node_memory_MemAvailable_bytes`, not this metric.
-- **Metric-specific query/result semantics:** directly represents total
-  physical memory. No per-metric override of `SKILL.md` defaults is currently
-  defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_memory_MemAvailable_bytes`
 
@@ -122,16 +119,13 @@ memory as a substitute for available memory without swapping, or vice versa.
   `node_memory_MemFree_bytes`; available swap → `node_memory_SwapFree_bytes`.
   Do not interpret available memory as equivalent to completely free memory.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much memory is available?", "How much RAM is
   available without swapping?", "Does this node have enough available memory?"
 - **Edge/confusable example:** user asks for completely unused memory rather
   than memory available without swapping → use `node_memory_MemFree_bytes`.
-- **Metric-specific query/result semantics:** directly represents memory
-  available without swapping. No per-metric override of `SKILL.md` defaults is
-  currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_memory_MemFree_bytes`
 
@@ -147,16 +141,13 @@ memory as a substitute for available memory without swapping, or vice versa.
   `node_memory_SwapFree_bytes`. Do not treat free physical memory as
   equivalent to memory available for use.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much free RAM is there?", "How much physical
   memory is completely free?", "Show the free memory on this node."
 - **Edge/confusable example:** user asks how much memory can be used without
   swapping → use `node_memory_MemAvailable_bytes`, not this metric.
-- **Metric-specific query/result semantics:** directly represents completely
-  free physical memory. No per-metric override of `SKILL.md` defaults is
-  currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_memory_Cached_bytes`
 
@@ -172,15 +163,13 @@ memory as a substitute for available memory without swapping, or vice versa.
   `node_memory_MemAvailable_bytes`. Do not treat page cache as filesystem
   buffer usage.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much memory is cached?", "How much RAM is being
   used for the page cache?", "Show the node's cached memory."
 - **Edge/confusable example:** user asks about filesystem buffer usage → use
   `node_memory_Buffers_bytes`, not this metric.
-- **Metric-specific query/result semantics:** directly represents Linux page
-  cache. No per-metric override of `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_memory_Buffers_bytes`
 
@@ -196,15 +185,13 @@ memory as a substitute for available memory without swapping, or vice versa.
   `node_memory_MemFree_bytes`. Do not treat filesystem buffers as equivalent
   to page cache.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much memory is being used for buffers?", "What is
   the buffer cache usage?", "Show filesystem buffer memory."
 - **Edge/confusable example:** user asks about Linux page cache → use
   `node_memory_Cached_bytes`, not this metric.
-- **Metric-specific query/result semantics:** directly represents filesystem
-  buffers. No per-metric override of `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_memory_SwapTotal_bytes`
 
@@ -219,15 +206,13 @@ memory as a substitute for available memory without swapping, or vice versa.
   `node_memory_MemTotal_bytes`. Do not treat total swap capacity as total
   physical memory.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much swap does this node have?", "What is the
   total swap space?", "Compare swap capacity across nodes."
 - **Edge/confusable example:** user asks how much swap is currently available
   → use `node_memory_SwapFree_bytes`, not this metric.
-- **Metric-specific query/result semantics:** directly represents total swap
-  space. No per-metric override of `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_memory_SwapFree_bytes`
 
@@ -243,16 +228,13 @@ memory as a substitute for available memory without swapping, or vice versa.
   `node_memory_MemAvailable_bytes`; free physical memory →
   `node_memory_MemFree_bytes`. Do not treat free swap as free physical memory.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much swap is free?", "How much swap space is
   available?", "How much remaining swap capacity does the node have?"
 - **Edge/confusable example:** user asks how much physical RAM is available
   without swapping → use `node_memory_MemAvailable_bytes`, not this metric.
-- **Metric-specific query/result semantics:** directly represents available
-  swap space. No per-metric override of `SKILL.md` defaults is currently
-  defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ## Domain-Specific Guardrails
 

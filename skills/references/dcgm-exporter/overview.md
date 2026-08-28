@@ -7,7 +7,6 @@ definitions — see the linked domain files for those.
 - Quick Facts
 - Trigger Examples
 - Do Not Use
-- Metric Directory
 - Derived / Composed Measurements
 - Exporter Fundamentals
 - Guardrails
@@ -54,48 +53,10 @@ Do not use this reference for:
   measurements → `node-exporter/overview.md`
 - DCGM metrics not currently defined in this skill.
 - Measurements for which no supported DCGM metric or derived/composed
-  measurement is defined.
-- Any DCGM metric not listed in the Metric Directory below.
+measurement is defined.
 
-## Metric Directory
-
-Exhaustive for the metrics currently supported by this skill. Every supported
-metric appears here in addition to its detailed definition in the relevant
-domain file; the domain file's detailed definition is authoritative for final
-metric selection.
-
-| Domain | Intent / Measurement | Metric | Detail File |
-|---|---|---|---|
-| compute | Overall GPU utilization | `DCGM_FI_DEV_GPU_UTIL` | `compute.md` |
-| compute | Graphics/SM engine active time | `DCGM_FI_PROF_GR_ENGINE_ACTIVE` | `compute.md` |
-| compute | Tensor Core activity | `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` | `compute.md` |
-| compute | FP64 pipeline utilization | `DCGM_FI_PROF_PIPE_FP64_ACTIVE` | `compute.md` |
-| compute | FP32 pipeline utilization | `DCGM_FI_PROF_PIPE_FP32_ACTIVE` | `compute.md` |
-| compute | FP16 pipeline utilization | `DCGM_FI_PROF_PIPE_FP16_ACTIVE` | `compute.md` |
-| thermal | GPU core temperature | `DCGM_FI_DEV_GPU_TEMP` | `thermal.md` |
-| thermal | GPU memory/HBM temperature | `DCGM_FI_DEV_MEMORY_TEMP` | `thermal.md` |
-| thermal | Instantaneous GPU power consumption | `DCGM_FI_DEV_POWER_USAGE` | `thermal.md` |
-| thermal | Time spent power throttled | `DCGM_FI_DEV_POWER_VIOLATION` | `thermal.md` |
-| thermal | Current GPU SM/core clock | `DCGM_FI_DEV_SM_CLOCK` | `thermal.md` |
-| thermal | Current GPU memory clock | `DCGM_FI_DEV_MEM_CLOCK` | `thermal.md` |
-| memory | Used GPU memory (VRAM) | `DCGM_FI_DEV_FB_USED` | `memory.md` |
-| memory | Free GPU memory (VRAM) | `DCGM_FI_DEV_FB_FREE` | `memory.md` |
-| memory | Memory controller utilization | `DCGM_FI_DEV_MEM_COPY_UTIL` | `memory.md` |
-| memory | DRAM bandwidth utilization | `DCGM_FI_PROF_DRAM_ACTIVE` | `memory.md` |
-| interconnect | PCIe transmit traffic | `DCGM_FI_PROF_PCIE_TX_BYTES` | `interconnect.md` |
-| interconnect | PCIe receive traffic | `DCGM_FI_PROF_PCIE_RX_BYTES` | `interconnect.md` |
-| interconnect | NVLink transmit traffic | `DCGM_FI_PROF_NVLINK_TX_BYTES` | `interconnect.md` |
-| interconnect | NVLink receive traffic | `DCGM_FI_PROF_NVLINK_RX_BYTES` | `interconnect.md` |
-| reliability | Single-bit ECC error volume | `DCGM_FI_DEV_ECC_SBE_VOL_TOTAL` | `reliability.md` |
-| reliability | Double-bit ECC error volume | `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL` | `reliability.md` |
-| reliability | Pages retired due to single-bit errors | `DCGM_FI_DEV_RETIRED_SBE` | `reliability.md` |
-| reliability | Pages retired due to double-bit errors | `DCGM_FI_DEV_RETIRED_DBE` | `reliability.md` |
-| reliability | Pages currently pending retirement | `DCGM_FI_DEV_RETIRED_PENDING` | `reliability.md` |
-| reliability | NVLink CRC (flit) errors | `DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL` | `reliability.md` |
-| reliability | NVLink recovery events | `DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL` | `reliability.md` |
-
-Metric names, Prometheus types, measurements, and documented query intents come
-from the project's DCGM metric reference.
+Metric names and structured metadata are maintained in the generated catalog.
+Metric-specific semantics remain in the linked domain files.
 
 ## Derived / Composed Measurements
 
@@ -169,7 +130,7 @@ NVLink health/stability should not be answered with traffic volume.
 
 ## Guardrails
 
-- Route requests only to metrics defined in this Metric Directory.
+- Route requests only to metrics defined in the catalog.
 - Use derived/composed measurements only when explicitly defined here.
 - Use only metric names, units, dimensions, relationships, and semantics
   established in this skill's references, and only label keys confirmed by
@@ -180,5 +141,5 @@ NVLink health/stability should not be answered with traffic volume.
 - Apply only node, GPU, device, or other scope constraints the user provided
   and that the runtime can confirm a label key for.
 - Preserve every measurement explicitly requested by the user.
-- Treat the Metric Directory as a routing aid only — verify final metric
-  selection using the detailed definition in the relevant domain file.
+- Verify final metric selection using the detailed definition in the relevant
+  domain file.

@@ -470,3 +470,239 @@ def test_alert_rule_proposed_is_always_single_mode_in_the_documented_set():
 
 def test_alert_rule_proposed_is_a_valid_top_level_status():
     assert "alert_rule_proposed" in validator._VALID_STATUSES
+
+
+# ---- Phase 12/13 (Batch 4): catalog status integration -----------------------------
+#
+# CATALOG_STATUS_BY_METRIC below deliberately covers all four CatalogStatus
+# values, so tests can flip a single metric's status without constructing a
+# real Catalog object -- validator.py only ever consumes the small
+# {name: status_string} mapping app/pipeline.py's _catalog_status_by_metric
+# builds, never a Catalog itself.
+
+CATALOG_STATUS_BY_METRIC = {
+    "node_load1": "approved",
+    "node_cpu_seconds_total": "approved",
+    "node_memory_MemFree_bytes": "approved_unavailable",
+    "node_filesystem_free_bytes": "discovered_pending_review",
+    "node_disk_io_now": "rejected",
+}
+
+
+def _validate_with_catalog_status(entry, catalog_status_by_metric=None, known_metrics=None):
+    contract = {"mode": "single", **entry}
+    return validator.validate_contract(
+        contract,
+        known_metrics=KNOWN_METRICS if known_metrics is None else known_metrics,
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        catalog_status_by_metric=catalog_status_by_metric,
+    )
+
+
+# -- Phase 12: ordinary query path ---------------------------------------------------
+
+
+def test_known_valid_metric_remains_valid_with_catalog_status_supplied():
+    """Requirement #4/#5: a known metric with catalog status 'approved'
+    passes exactly as it did before Phase 12."""
+    r = _validate_with_catalog_status(_ok_entry(), catalog_status_by_metric=CATALOG_STATUS_BY_METRIC)
+    assert r.passed, r.reason
+
+
+def test_unknown_fabricated_metric_remains_rejected_by_known_metrics_first():
+    """Requirement #4: known_metrics is still the FIRST gate -- a fabricated
+    metric name is rejected on that basis before catalog status is ever
+    consulted, regardless of what catalog_status_by_metric contains."""
+    entry = _ok_entry(
+        measurement_used={"type": "raw_metric", "name": "totally_made_up_metric", "source_metrics": []},
+        query="totally_made_up_metric",
+    )
+    r = _validate_with_catalog_status(entry, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC)
+    assert not r.passed and "fabricated" in r.reason
+
+
+def test_approved_unavailable_catalog_metric_is_consistent_with_intended_semantics():
+    """Requirement #6: 'approved_unavailable' is NOT one of the disallowed
+    statuses (only discovered_pending_review/rejected are) -- a metric with
+    this status, if it's also in known_metrics, must remain valid. This
+    mirrors search.py's own DEFAULT_STATUSES allow-list (approved +
+    approved_unavailable), which validator.py deliberately does not
+    second-guess."""
+    known = KNOWN_METRICS | {"node_memory_MemFree_bytes"}
+    entry = _ok_entry(
+        measurement_used={"type": "raw_metric", "name": "node_memory_MemFree_bytes", "source_metrics": []},
+        query="node_memory_MemFree_bytes",
+    )
+    r = _validate_with_catalog_status(entry, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC, known_metrics=known)
+    assert r.passed, r.reason
+
+
+def test_discovered_pending_review_metric_does_not_become_normally_valid():
+    """Requirement #7: even if a discovered_pending_review metric somehow
+    also ended up in known_metrics, catalog status must still reject it --
+    this is the core Phase 12 guarantee."""
+    known = KNOWN_METRICS | {"node_filesystem_free_bytes"}
+    entry = _ok_entry(
+        measurement_used={"type": "raw_metric", "name": "node_filesystem_free_bytes", "source_metrics": []},
+        query="node_filesystem_free_bytes",
+    )
+    r = _validate_with_catalog_status(entry, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC, known_metrics=known)
+    assert not r.passed and "discovered_pending_review" in r.reason
+
+
+def test_rejected_metric_does_not_become_normally_valid():
+    """Requirement #8: same guarantee for 'rejected'."""
+    known = KNOWN_METRICS | {"node_disk_io_now"}
+    entry = _ok_entry(
+        measurement_used={"type": "raw_metric", "name": "node_disk_io_now", "source_metrics": []},
+        query="node_disk_io_now",
+    )
+    r = _validate_with_catalog_status(entry, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC, known_metrics=known)
+    assert not r.passed and "rejected" in r.reason
+
+
+def test_catalog_unavailable_does_not_weaken_known_metrics_validation():
+    """Requirement #9: catalog_status_by_metric=None (flag off, or catalog
+    failed to load) must not change known_metrics' own behavior at all --
+    a fabricated metric is still rejected, a known-good metric still
+    passes."""
+    good = _validate_with_catalog_status(_ok_entry(), catalog_status_by_metric=None)
+    assert good.passed, good.reason
+
+    bad_entry = _ok_entry(
+        measurement_used={"type": "raw_metric", "name": "totally_made_up_metric", "source_metrics": []},
+        query="totally_made_up_metric",
+    )
+    bad = _validate_with_catalog_status(bad_entry, catalog_status_by_metric=None)
+    assert not bad.passed and "fabricated" in bad.reason
+
+
+def test_catalog_unavailable_does_not_cause_a_false_rejection():
+    """Requirement #9 (converse direction): an empty catalog_status_by_metric
+    must never be treated as 'reject everything' -- a legitimately known
+    metric with no catalog-status entry at all still passes."""
+    r = _validate_with_catalog_status(_ok_entry(), catalog_status_by_metric={})
+    assert r.passed, r.reason
+
+
+def test_existing_validator_behavior_remains_intact_without_catalog_status_kwarg():
+    """Requirement #10: calling validate_contract exactly as every
+    pre-Phase-12 caller did (no catalog_status_by_metric kwarg at all)
+    behaves identically to before this phase existed."""
+    r = _validate(_ok_entry(), labels_by_metric={"node_load1": ["instance", "job"]})
+    assert r.passed, r.reason
+
+
+def test_check_catalog_status_helper_is_a_noop_for_metric_with_no_catalog_entry():
+    """A metric present in known_metrics but simply absent from
+    catalog_status_by_metric (e.g. it predates the catalog, or belongs to a
+    domain the catalog has no opinion about) must pass -- absence is not
+    itself a disallowed status."""
+    r = validator._check_catalog_status(["node_load1"], {"some_other_metric": "rejected"})
+    assert r.passed, r.reason
+
+
+# -- Phase 13: alert-rule proposal path -----------------------------------------------
+
+
+def test_valid_alert_metric_passes_with_known_metrics_and_catalog_status():
+    """Requirement #11."""
+    entry = _alert_entry()  # measurement_used.name == "node_cpu_seconds_total"
+    r = validator.validate_contract(
+        {"mode": "single", **entry},
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        known_metrics=KNOWN_METRICS, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC,
+    )
+    assert r.passed, r.reason
+
+
+def test_unknown_alert_metric_is_rejected():
+    """Requirement #12: this is the Phase 13 gap fix itself -- previously
+    _validate_alert_rule_proposed never checked known_metrics at all."""
+    entry = _alert_entry(measurement_used={"type": "raw_metric", "name": "made_up_alert_metric",
+                                            "source_metrics": []})
+    entry["alert_rule"] = {**entry["alert_rule"], "condition_query": "made_up_alert_metric > 90"}
+    r = validator.validate_contract(
+        {"mode": "single", **entry},
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS, known_metrics=KNOWN_METRICS,
+    )
+    assert not r.passed and "fabricated" in r.reason
+
+
+def test_discovered_pending_review_alert_metric_is_rejected():
+    """Requirement #13."""
+    known = KNOWN_METRICS | {"node_filesystem_free_bytes"}
+    entry = _alert_entry(measurement_used={"type": "raw_metric", "name": "node_filesystem_free_bytes",
+                                            "source_metrics": []})
+    entry["alert_rule"] = {**entry["alert_rule"], "condition_query": "node_filesystem_free_bytes < 10"}
+    r = validator.validate_contract(
+        {"mode": "single", **entry},
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        known_metrics=known, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC,
+    )
+    assert not r.passed and "discovered_pending_review" in r.reason
+
+
+def test_rejected_alert_metric_is_rejected():
+    """Requirement #14."""
+    known = KNOWN_METRICS | {"node_disk_io_now"}
+    entry = _alert_entry(measurement_used={"type": "raw_metric", "name": "node_disk_io_now",
+                                            "source_metrics": []})
+    entry["alert_rule"] = {**entry["alert_rule"], "condition_query": "node_disk_io_now > 1000"}
+    r = validator.validate_contract(
+        {"mode": "single", **entry},
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        known_metrics=known, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC,
+    )
+    assert not r.passed and "rejected" in r.reason
+
+
+def test_existing_alert_validation_rules_still_work_without_known_metrics_or_catalog_status():
+    """Requirement #15: every existing alert test in this file (above)
+    calls validate_contract without known_metrics/catalog_status_by_metric
+    at all -- confirm that convention still yields a pass for a
+    structurally-valid proposal, i.e. the new checks are additive-only."""
+    r = validator.validate_contract({"mode": "single", **_alert_entry()},
+                                     known_references=KNOWN_REFS, known_datasources=KNOWN_DS)
+    assert r.passed, r.reason
+
+
+def test_alert_and_query_paths_agree_on_rejected_status_for_the_same_metric():
+    """Requirement: the two paths must not disagree about whether a
+    pending/rejected metric is allowed (both call the same
+    _check_catalog_status helper)."""
+    known = KNOWN_METRICS | {"node_disk_io_now"}
+
+    query_entry = _ok_entry(
+        measurement_used={"type": "raw_metric", "name": "node_disk_io_now", "source_metrics": []},
+        query="node_disk_io_now",
+    )
+    query_result = _validate_with_catalog_status(query_entry, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC,
+                                                  known_metrics=known)
+
+    alert_entry = _alert_entry(measurement_used={"type": "raw_metric", "name": "node_disk_io_now",
+                                                  "source_metrics": []})
+    alert_entry["alert_rule"] = {**alert_entry["alert_rule"], "condition_query": "node_disk_io_now > 1000"}
+    alert_result = validator.validate_contract(
+        {"mode": "single", **alert_entry},
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        known_metrics=known, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC,
+    )
+
+    assert not query_result.passed and not alert_result.passed
+    assert "rejected" in query_result.reason and "rejected" in alert_result.reason
+
+
+def test_multi_metric_derived_measurement_checks_every_source_metric_against_catalog_status():
+    """Multi-metric coverage: a derived_measurement's source_metrics are
+    checked individually, same as known_metrics already does -- a single
+    rejected source metric is enough to fail the whole entry, even if the
+    measurement's own top-level name is fine."""
+    known = KNOWN_METRICS | {"node_disk_io_now", "node_load5"}
+    entry = _ok_entry(
+        measurement_used={"type": "derived_measurement", "name": "node_load5",
+                           "source_metrics": ["node_disk_io_now"]},
+        query="node_load5 / node_disk_io_now",
+    )
+    r = _validate_with_catalog_status(entry, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC, known_metrics=known)
+    assert not r.passed and "node_disk_io_now" in r.reason and "rejected" in r.reason

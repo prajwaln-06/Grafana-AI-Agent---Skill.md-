@@ -35,7 +35,7 @@ ROUTING_ROW_RE = re.compile(
     r"\[(?P<link_text>[^\]]+)\]\((?P<link_path>[^)]+)\)\s*(?P<trailing>.*)\|\s*$"
 )
 
-# Metric Directory row inside an exporter overview.md, e.g.:
+# Legacy Metric Directory row inside an exporter overview.md, e.g.:
 # | cpu | CPU time spent in different modes | `node_cpu_seconds_total` | `cpu.md` |
 METRIC_DIR_ROW_RE = re.compile(
     r"^\|.*\|\s*`([^`]+)`\s*\|\s*`?([A-Za-z0-9_./-]+\.md)`?\s*\|\s*$"
@@ -98,11 +98,12 @@ class SkillIndex:
     raw_text: str
     metadata: SkillMetadata
     routing_rows: list[RoutingRow] = field(default_factory=list)
+    catalog_path: Path | None = None
 
     # ---- construction ----------------------------------------------------
 
     @classmethod
-    def load(cls, skills_root: Path) -> "SkillIndex":
+    def load(cls, skills_root: Path, catalog_path: Path | None = None) -> "SkillIndex":
         skill_md_path = skills_root / "SKILL.md"
         if not skill_md_path.exists():
             raise SkillIndexError(
@@ -126,6 +127,7 @@ class SkillIndex:
             raw_text=raw_text,
             metadata=metadata,
             routing_rows=routing_rows,
+            catalog_path=catalog_path or skills_root.parent / "app" / "catalog" / "catalog.json",
         )
         index.validate()
         return index
@@ -273,11 +275,12 @@ class SkillIndex:
         return None
 
     def metric_directory(self, overview_reference_path: str) -> dict[str, str]:
-        """Parses an exporter overview.md's Metric Directory table into
-        {metric_name: domain_file_reference_path}. Used by label_discovery.py
-        to know which metric names to verify labels for -- never used to
-        make routing/selection decisions itself; that stays the LLM's job
-        per SKILL.md §6 Step 3, this is purely a lookup aid."""
+        """Returns catalog-backed metric paths for an exporter overview.
+
+        A legacy table is still parsed when present so older skill packages can
+        be loaded during migration. Current overviews intentionally omit that
+        duplicate table; their metric lookup comes from catalog.json.
+        """
         text = self.read_reference(overview_reference_path)
         overview_dir = "/".join(overview_reference_path.split("/")[:-1])
         metrics: dict[str, str] = {}
@@ -297,6 +300,19 @@ class SkillIndex:
                 if m:
                     metric_name, domain_file = m.group(1), m.group(2)
                     metrics[metric_name] = f"{overview_dir}/{domain_file}" if overview_dir else domain_file
+        if metrics:
+            return metrics
+        if self.catalog_path is None:
+            return {}
+        from app.catalog.loader import load_catalog
+
+        exporter = overview_reference_path.split("/")[-2]
+        catalog = load_catalog(self.catalog_path)
+        return {
+            entry.name: entry.reference_path
+            for entry in catalog.metrics
+            if entry.exporter == exporter and entry.reference_path
+        }
         return metrics
 
 

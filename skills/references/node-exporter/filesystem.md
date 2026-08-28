@@ -76,20 +76,15 @@ than remaining space.
 - **Relevant scope:** Filesystem (not a label list). The specific
   device/mountpoint/filesystem this applies to is not established by the
   authoritative document — see Common Labels & Dimensions above.
-- **Additional known labels:** not established by the authoritative document.
-  Label keys are sourced dynamically from the runtime at query-generation time
-  (`SKILL.md` §5 Principle 9) — do not invent a device/mountpoint/filesystem-
-  type label name by convention.
+- **Additional known labels:** none established (see Common Labels & Dimensions above); do not invent a device/mountpoint/filesystem-type label by convention.
 - **Intent examples:** "What is the total disk capacity?", "How large is this
   filesystem?"
 - **Edge/confusable example:** user asks how much space remains rather than
   total capacity → use `node_filesystem_avail_bytes` or
   `node_filesystem_free_bytes`, not this metric.
-- **Metric-specific query/result semantics:** directly represents filesystem
-  size as a Gauge. No per-metric override of `SKILL.md` defaults is currently
-  defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_filesystem_avail_bytes`
 
@@ -109,20 +104,16 @@ than remaining space.
 - **Relevant scope:** Filesystem (not a label list). The specific
   device/mountpoint/filesystem this applies to is not established by the
   authoritative document — see Common Labels & Dimensions above.
-- **Additional known labels:** not established by the authoritative document.
-  Label keys are sourced dynamically from the runtime at query-generation time
-  (`SKILL.md` §5 Principle 9) — do not invent a device/mountpoint/filesystem-
-  type label name by convention.
+- **Additional known labels:** none established (see Common Labels & Dimensions above); do not invent a device/mountpoint/filesystem-type label by convention.
 - **Intent examples:** "How much disk space is available?", "Is this
   filesystem running low on space?"
 - **Edge/confusable example:** user asks for total free space without the
   non-root qualification → use `node_filesystem_free_bytes`, not this metric,
   unless the distinction is not meaningful to the request.
-- **Metric-specific query/result semantics:** directly represents available
-  disk space for non-root use as a Gauge. No per-metric override of
-  `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override. (See
+  Purpose and Confusable Measurements above for the "for non-root" qualifier.)
+- **Query examples:** none verified; do not invent one.
 
 ### `node_filesystem_free_bytes`
 
@@ -141,19 +132,14 @@ than remaining space.
 - **Relevant scope:** Filesystem (not a label list). The specific
   device/mountpoint/filesystem this applies to is not established by the
   authoritative document — see Common Labels & Dimensions above.
-- **Additional known labels:** not established by the authoritative document.
-  Label keys are sourced dynamically from the runtime at query-generation time
-  (`SKILL.md` §5 Principle 9) — do not invent a device/mountpoint/filesystem-
-  type label name by convention.
+- **Additional known labels:** none established (see Common Labels & Dimensions above); do not invent a device/mountpoint/filesystem-type label by convention.
 - **Intent examples:** "What is the remaining disk capacity?", "How much free
   disk space is there?"
 - **Edge/confusable example:** user's wording implies non-root usable space
   specifically → use `node_filesystem_avail_bytes`, not this metric.
-- **Metric-specific query/result semantics:** directly represents total free
-  disk space as a Gauge. No per-metric override of `SKILL.md` defaults is
-  currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ## Domain-Specific Guardrails
 

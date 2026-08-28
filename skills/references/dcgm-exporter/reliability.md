@@ -130,7 +130,7 @@ Semantics below for which function, if any, applies.
   `DCGM_FI_DEV_RETIRED_SBE` — related but not established as causally linked,
   see Confusable Measurements above.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the single-bit ECC error trend?", "How many
   single-bit memory errors has this GPU had?"
 - **Edge/confusable example:** user asks about retired pages rather than raw
@@ -141,8 +141,7 @@ Semantics below for which function, if any, applies.
   for this metric — the raw counter value alone is not the meaningful
   quantity for an "error trend" question. No further per-metric override of
   `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`
 
@@ -157,7 +156,7 @@ Semantics below for which function, if any, applies.
   `DCGM_FI_DEV_RETIRED_DBE` — related but not established as causally linked,
   see Confusable Measurements above.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How many double-bit ECC errors has this GPU had?",
   "Are there any critical memory errors?"
 - **Edge/confusable example:** user asks about single-bit
@@ -168,8 +167,7 @@ Semantics below for which function, if any, applies.
   merely by analogy with `DCGM_FI_DEV_ECC_SBE_VOL_TOTAL` (see the asymmetric
   query-intent note in Confusable Measurements above). No per-metric override
   of `SKILL.md` defaults beyond this is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_RETIRED_SBE`
 
@@ -187,7 +185,7 @@ Semantics below for which function, if any, applies.
   retired) → `DCGM_FI_DEV_RETIRED_PENDING` — note the Type difference
   (Counter vs. Gauge), see Confusable Measurements above.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How many pages have been retired due to single-bit
   errors?", "Is there memory degradation on this GPU?"
 - **Edge/confusable example:** user asks about pages awaiting retirement
@@ -198,8 +196,7 @@ Semantics below for which function, if any, applies.
   `DCGM_FI_DEV_ECC_SBE_VOL_TOTAL`'s `increase()` note (see the asymmetric
   query-intent note in Confusable Measurements above). No per-metric override
   of `SKILL.md` defaults beyond this is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_RETIRED_DBE`
 
@@ -217,7 +214,7 @@ Semantics below for which function, if any, applies.
   retired) → `DCGM_FI_DEV_RETIRED_PENDING` — note the Type difference
   (Counter vs. Gauge), see Confusable Measurements above.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How many pages have been retired due to double-bit
   errors?", "Is there serious hardware degradation on this GPU?"
 - **Edge/confusable example:** user asks about single-bit-caused retirements
@@ -228,8 +225,7 @@ Semantics below for which function, if any, applies.
   asymmetric query-intent note in Confusable Measurements above). No
   per-metric override of `SKILL.md` defaults beyond this is currently
   defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_RETIRED_PENDING`
 
@@ -245,7 +241,7 @@ Semantics below for which function, if any, applies.
   Counter like its two Reliability-category siblings; do not treat all three
   as interchangeable Counters, see Confusable Measurements above.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How many pages are pending retirement?", "Are there
   any pending memory failures on this GPU?"
 - **Edge/confusable example:** user asks about pages already retired rather
@@ -256,8 +252,7 @@ Semantics below for which function, if any, applies.
   are not applicable in the way they are for the Counter metrics in this
   domain. This is a Type-driven distinction, not an override of `SKILL.md`
   defaults.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL`
 
@@ -274,7 +269,7 @@ Semantics below for which function, if any, applies.
   Confusable Measurements above and `overview.md`'s Cross-Domain Semantic
   Distinctions.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the NVLink CRC error trend?", "Is this GPU's
   NVLink healthy?"
 - **Edge/confusable example:** user asks how much data NVLink is carrying
@@ -285,8 +280,7 @@ Semantics below for which function, if any, applies.
   for this metric — the raw counter value alone is not the meaningful
   quantity for a "health trend" question. No further per-metric override of
   `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL`
 
@@ -303,7 +297,7 @@ Semantics below for which function, if any, applies.
   Confusable Measurements above and `overview.md`'s Cross-Domain Semantic
   Distinctions.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How many NVLink recovery events has this GPU had?",
   "Is this GPU's NVLink connection stable?"
 - **Edge/confusable example:** user asks about CRC errors rather than
@@ -315,8 +309,7 @@ Semantics below for which function, if any, applies.
   `DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL`'s note (see the asymmetric
   query-intent note in Confusable Measurements above). No per-metric override
   of `SKILL.md` defaults beyond this is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Query examples:** none verified; do not invent one.
 
 ## Domain-Specific Guardrails
 

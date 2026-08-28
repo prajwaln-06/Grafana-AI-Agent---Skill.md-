@@ -20,7 +20,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
     def _get_skill_index(self) -> SkillIndex:
         if self._skill_index is None:
             settings = get_settings()
-            self._skill_index = SkillIndex.load(settings.skills_root)
+            self._skill_index = SkillIndex.load(settings.skills_root, settings.catalog_path)
         return self._skill_index
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
@@ -176,7 +176,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
 
     def reload_skill(self) -> None:
         settings = get_settings()
-        new_index = SkillIndex.load(settings.skills_root)
+        new_index = SkillIndex.load(settings.skills_root, settings.catalog_path)
         self._skill_index = new_index
 
     def _needs_clarification(self, contract: dict) -> bool:

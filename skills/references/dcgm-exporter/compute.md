@@ -83,16 +83,15 @@ the general GPU utilization metric.
   active time → `DCGM_FI_PROF_GR_ENGINE_ACTIVE`; a specific Tensor Core or
   precision-pipeline utilization request → the corresponding pipeline metric.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the GPU utilization?", "How busy is GPU 2?"
 - **Edge/confusable example:** user asks specifically how much time the
   SM/compute engine is active → use `DCGM_FI_PROF_GR_ENGINE_ACTIVE`, not
   `DCGM_FI_DEV_GPU_UTIL`.
-- **Metric-specific query/result semantics:** directly represents overall GPU
-  utilization. No per-metric override of `SKILL.md` defaults is currently
-  defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override. (See the
+  unresolved unit-discrepancy note in Confusable Measurements above.)
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_PROF_GR_ENGINE_ACTIVE`
 
@@ -109,16 +108,15 @@ the general GPU utilization metric.
   `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`; FP64, FP32, or FP16 pipeline utilization →
   the corresponding precision-pipeline metric.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much of the time is the GPU compute engine
   active?", "What is the graphics/SM engine utilization?"
 - **Edge/confusable example:** user asks for overall GPU utilization → use
   `DCGM_FI_DEV_GPU_UTIL`, not this metric.
-- **Metric-specific query/result semantics:** represents the fraction of time
-  the graphics/SM engine is active. No per-metric override of `SKILL.md`
-  defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override. (See the
+  unresolved unit-discrepancy note in Confusable Measurements above.)
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`
 
@@ -133,16 +131,14 @@ the general GPU utilization metric.
   `DCGM_FI_PROF_GR_ENGINE_ACTIVE`; FP64, FP32, or FP16 pipeline utilization →
   the corresponding precision-pipeline metric.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How active are the Tensor Cores?", "What is the Tensor
   Core utilization?"
 - **Edge/confusable example:** user asks for general GPU utilization rather
   than Tensor Core activity → use `DCGM_FI_DEV_GPU_UTIL`.
-- **Metric-specific query/result semantics:** represents Tensor Core
-  utilization. No per-metric override of `SKILL.md` defaults is currently
-  defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_PROF_PIPE_FP64_ACTIVE`
 
@@ -157,17 +153,16 @@ the general GPU utilization metric.
   `DCGM_FI_PROF_PIPE_FP16_ACTIVE`; overall GPU utilization →
   `DCGM_FI_DEV_GPU_UTIL`.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much FP64 workload is running?", "What is the FP64
   pipeline utilization?"
 - **Edge/confusable example:** user asks about FP32 workload rather than FP64
   → use `DCGM_FI_PROF_PIPE_FP32_ACTIVE`.
-- **Metric-specific query/result semantics:** represents FP64 pipeline
-  utilization and therefore specifically describes double-precision compute
-  activity rather than overall GPU utilization. No per-metric override of
-  `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** specifically describes
+  double-precision compute activity rather than overall GPU utilization (see
+  Confusable Measurements above). Standard Gauge handling otherwise; no
+  override.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_PROF_PIPE_FP32_ACTIVE`
 
@@ -182,17 +177,16 @@ the general GPU utilization metric.
   `DCGM_FI_PROF_PIPE_FP16_ACTIVE`; overall GPU utilization →
   `DCGM_FI_DEV_GPU_UTIL`.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the FP32 pipeline utilization?", "How much
   single-precision workload is running?"
 - **Edge/confusable example:** user asks about double-precision workload → use
   `DCGM_FI_PROF_PIPE_FP64_ACTIVE`.
-- **Metric-specific query/result semantics:** represents FP32 pipeline
-  utilization and specifically describes single-precision compute activity
-  rather than overall GPU utilization. No per-metric override of `SKILL.md`
-  defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** specifically describes
+  single-precision compute activity rather than overall GPU utilization (see
+  Confusable Measurements above). Standard Gauge handling otherwise; no
+  override.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_PROF_PIPE_FP16_ACTIVE`
 
@@ -207,17 +201,16 @@ the general GPU utilization metric.
   `DCGM_FI_PROF_PIPE_FP32_ACTIVE`; overall GPU utilization →
   `DCGM_FI_DEV_GPU_UTIL`.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the FP16 pipeline utilization?", "How much
   mixed-precision workload is running?"
 - **Edge/confusable example:** user asks about FP32 workload rather than FP16
   → use `DCGM_FI_PROF_PIPE_FP32_ACTIVE`.
-- **Metric-specific query/result semantics:** represents FP16 pipeline
-  utilization and specifically describes mixed-precision compute activity
-  rather than overall GPU utilization. No per-metric override of `SKILL.md`
-  defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** specifically describes
+  mixed-precision compute activity rather than overall GPU utilization (see
+  Confusable Measurements above). Standard Gauge handling otherwise; no
+  override.
+- **Query examples:** none verified; do not invent one.
 
 ## Domain-Specific Guardrails
 

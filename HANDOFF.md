@@ -22,7 +22,7 @@ type, summarizing, rendering. This backend never does that.
 One narrow exception to "read-only": if `ALERT_RULE_CREATION_ENABLED` is
 set, the same question can also PROPOSE creating a brand-new Grafana alert
 rule — never automatically, always behind a separate explicit confirmation
-call. See §9. Off by default; skip §9 entirely if you're not using it yet.
+call. See §11. Off by default; skip §11 entirely if you're not using it yet.
 
 ---
 
@@ -66,7 +66,7 @@ anywhere reachable outside your own machine.
 
 That's the entire input contract for `POST /api/v1/query` — one field, one
 endpoint, for every kind of question — single-metric, multi-metric,
-comparison, follow-up clarification. `POST /api/v1/alerts/confirm` (§9.2)
+comparison, follow-up clarification. `POST /api/v1/alerts/confirm` (§11.2)
 is a separate endpoint with its own, deliberately narrower, input contract
 (`session_id` + optional `confirm`) — it's not reachable through this one.
 
@@ -107,8 +107,8 @@ for (const entry of entries) {
 | `unsupported_metric` | The question wants something this skill package explicitly does not cover (see the matched reference's Do-Not-Use list). | No | Show `entry.explanation`. Nothing to retry — this isn't a "not implemented yet," it's "not applicable." |
 | `unmapped` | Nothing in the currently-loaded skill covers this measurement. **This is the status OpenSearch questions get today** — see §7. | No | Show `entry.explanation`. This is expected and will resolve itself once OpenSearch domain coverage ships — no frontend change needed then. |
 | `declined` | Nonsensical input, a prompt-injection attempt, or a parameter that needs clarifying (`entry.reason` tells you which). | No | If `reason === "parameter_requires_clarification"`, treat exactly like `ambiguous_metric` (`entry.clarification`, reply with `session_id`). Otherwise just show `entry.explanation`. |
-| `out_of_scope_action` | Asked to silence, acknowledge, delete, restart, or otherwise modify something that already exists — this backend never mutates an existing resource, no exception. (Creating a brand-new alert rule is a separate, narrow exception — see the `alert_rule_proposed` row below and §9.) | No | Show `entry.explanation`. Never retryable. |
-| `alert_rule_proposed` | **Only when `ALERT_RULE_CREATION_ENABLED=true` (§9).** A brand-new Grafana alert rule was resolved from a verified metric and is ready to create — but hasn't been yet. | No — never executed by `POST /api/v1/query` | Show `entry.alert_rule` (title, condition, threshold, duration) for the user to review, then send `session_id` to `POST /api/v1/alerts/confirm` (§9.2) to actually create it, or to discard it (`"confirm": false`). |
+| `out_of_scope_action` | Asked to silence, acknowledge, delete, restart, or otherwise modify something that already exists — this backend never mutates an existing resource, no exception. (Creating a brand-new alert rule is a separate, narrow exception — see the `alert_rule_proposed` row below and §11.) | No | Show `entry.explanation`. Never retryable. |
+| `alert_rule_proposed` | **Only when `ALERT_RULE_CREATION_ENABLED=true` (§11).** A brand-new Grafana alert rule was resolved from a verified metric and is ready to create — but hasn't been yet. | No — never executed by `POST /api/v1/query` | Show `entry.alert_rule` (title, condition, threshold, duration) for the user to review, then send `session_id` to `POST /api/v1/alerts/confirm` (§11.2) to actually create it, or to discard it (`"confirm": false`). |
 | `validation_failed` | **Not part of the skill's own status vocabulary** — see the callout below. | No | Treat exactly like `declined`: show `entry.explanation`, nothing to retry. |
 
 > **What is `validation_failed`?** Before any query reaches Prometheus/
@@ -234,8 +234,9 @@ Every query this backend builds is checked by plain Python (`app/validator.py`)
 before it's ever run against Prometheus or OpenSearch — no AI model is asked
 to grade another AI model's work, and the same input always produces the
 same pass/fail result. It mechanically confirms:
-- the metric name used actually exists in the documented Metric Directory
-  (never a name the AI invented),
+- the metric name used actually exists in the known metric universe (from the
+  selected domain references, with catalog status validation available as an
+  additive check; never a name the AI invented),
 - every label key used in the query was actually confirmed to exist against
   the live Prometheus instance moments earlier (never guessed "by analogy"
   — e.g. it'll block a query that assumes a `node_id` label exists if only
@@ -243,7 +244,7 @@ same pass/fail result. It mechanically confirms:
 - the time range and step match the documented grammar and resolve to a
   sane start-before-end range,
 - the response shape matches SKILL.md's Output Contract exactly,
-- (only for `alert_rule_proposed`, §9) the alert condition actually
+- (only for `alert_rule_proposed`, §11) the alert condition actually
   references the resolved metric, and a threshold/comparison/duration/
   folder are all present — never fabricated, and never silently left out.
 
@@ -291,7 +292,7 @@ In `mode: "multi"` responses, if even ONE entry needs clarification, the
 gets resolved, not just patch one piece of it.
 
 **This same session mechanism is also reused for `alert_rule_proposed`**
-(§9.2) — but answered by a *different* endpoint
+(§11.2) — but answered by a *different* endpoint
 (`POST /api/v1/alerts/confirm`, not `POST /api/v1/query`), since confirming
 an alert-rule creation is a fundamentally different action than answering a
 clarifying question, even though both hold a session the same way.
@@ -348,7 +349,7 @@ nothing in this backend's code needs to change. Add the reference files per
 Datasource" sections, add the routing rows to `SKILL.md` §4, hit
 `POST /api/v1/admin/reload-skill` (or restart) — OpenSearch questions start
 resolving and executing the same way Prometheus questions do today, no code
-change, no frontend contract change. This is the mechanism described in §8.
+change, no frontend contract change. This is the mechanism described in §10.
 
 Use `GET /api/v1/capabilities` any time to see, programmatically, exactly
 which topics are currently routed vs. which rows exist but are marked
@@ -357,15 +358,130 @@ out a UI affordance ahead of time instead of learning it from a failed query.
 
 ---
 
-## 8. How "dynamic" this actually is — adding new coverage later
+## 8. Catalog and Markdown responsibilities
+
+The generated catalog at `app/catalog/catalog.json` is the authoritative
+structured metric universe and normal routing base for the current 43 supported
+metrics: 16 Node Exporter metrics and 27 DCGM metrics. It owns metric names,
+structured metadata, exporter association, retrieval metadata, and
+status/reconciliation information. Normal integrated deployments use
+`CATALOG_ASSISTED_ROUTING_ENABLED=true`; catalog-assisted routing deterministically
+narrows the relevant Markdown references, with a miss falling back to the full
+routing path.
+
+The catalog-related switches are deliberately separate:
+
+- `CATALOG_ASSISTED_ROUTING_ENABLED=true` is the normal/default catalog-assisted
+  query-routing configuration.
+- `CATALOG_SHADOW_MODE_ENABLED=true` is a development/validation mechanism only;
+  it is not required for normal operation.
+- `CATALOG_METRIC_STATUS_VALIDATION_ENABLED=true` adds catalog metric-status
+  validation independently of routing.
+- `ALERT_RULE_CREATION_ENABLED=true` enables optional alert-rule functionality
+  only when that workflow is being demonstrated or used. It is separate from
+  catalog routing; a deployment demonstrating both uses both flags set to
+  `true`.
+
+Disabling catalog-assisted routing is useful only for regression or baseline
+testing, not as the normal integrated configuration.
+The catalog does not replace the Router, Generator, Validator, `SKILL.md`, or
+ADK session state.
+
+The responsibility split is:
+
+| Area | Owns |
+|---|---|
+| Catalog | Metric universe, structured metadata, exporter association, status/reconciliation, retrieval metadata |
+| `skills/SKILL.md` | Shared behavior, routing architecture, common PromQL/query rules, execution/response contract |
+| Metric-specific Markdown | Genuinely metric-specific semantic guidance, including distinctions, special transformations, and guardrails |
+| Exporter `overview.md` files | Exporter/domain guidance, entity scope, navigation, shared/domain guardrails, and applicable cross-domain semantics |
+| Metric Directory | No longer an independently maintained source of truth |
+
+The two current exporter overview files intentionally retain domain-level
+guidance and navigation but no longer contain exhaustive metric tables.
+SKILL.md remains responsible for shared behavioral, query, and execution rules,
+while metric-specific Markdown remains responsible for detailed metric
+semantics, transformations, distinctions, and guardrails. Catalog-assisted
+routing narrows the relevant Markdown references; it does not eliminate the
+Markdown layer. Standard metadata still remains in metric-specific Markdown
+because the current Generator consumes the selected Markdown reference. A
+stricter future design in which the Generator obtains all reusable metadata
+directly from the catalog is deferred and is not required for the current
+integration.
+
+`SkillIndex` retains a compatibility lookup for legacy overview tables where
+they still exist. In the current repository, when an overview has no table,
+that lookup reads metric-to-reference mappings from the catalog. This keeps
+legacy skill packages loadable without creating another metric list.
+
+## 9. Completed catalogization phases and deferred work
+
+Phases 2–16 are complete:
+
+- Phases 2–3: generated and validated the 43-entry catalog.
+- Phase 4: vendor/runtime reconciliation and pending-review status handling.
+- Phase 5: deterministic keyword, category, and priority generation.
+- Phase 6: deterministic retrieval/ranking.
+- Phase 7: retrieval evaluation harness using the 46-question set.
+- Phase 8: opt-in catalog shadow mode with no behavior change when disabled.
+- Phase 9: safe catalog-assisted routing with full-routing fallback on misses.
+- Phase 10: Router/catalog integration.
+- Phase 11: Generator integration evaluation; no unnecessary redesign.
+- Phase 12: additive catalog metric-status validation.
+- Phase 13: alert-rule metric knownness/status validation fix.
+- Phase 14: full regression verification.
+- Phase 15: conservative Markdown reduction preserving semantic guidance.
+- Phase 16: Metric Directory deprecation as an independent source of truth.
+
+Phase 17 scale testing with synthetic 100/500/1000-metric universes is
+deferred. It is not required for the currently completed catalog-assisted
+routing implementation. The future stricter Catalog-to-Generator metadata path
+is also deferred and is not required for the current implementation.
+
+### Verified Phase 16 baseline
+
+The current repository was verified with:
+
+```bash
+ALERT_RULE_CREATION_ENABLED=false python -m pytest -q
+```
+
+Result: **373 passed, 7 warnings**. The warnings are dependency/library
+warnings, not regressions.
+
+```bash
+python skills/scripts/check_metric_directory.py
+```
+
+Result:
+
+```text
+OK: Metric Directory / domain-file consistency and routing links verified.
+```
+
+Despite its historical name, this checker does not establish a Metric Directory
+as authoritative. It validates catalog metric references against their
+metric-specific Markdown definitions, validates legacy overview tables if one
+is present, and verifies `SKILL.md` routing links.
+
+```bash
+python -m scripts.evaluate_catalog_retrieval
+```
+
+Current retrieval baseline: 46 questions; recall@1 **20/46 (43%)**; recall@5
+**33/46 (72%)**; MRR **0.533**; reference visible rate **43/46 (93%)**;
+multi-metric **8/8**; unsafe narrows **3/46**.
+
+## 10. How "dynamic" this actually is — adding new coverage later
 
 This was a specific design requirement, so it's worth being precise about
 what "automatic" actually covers.
 
 **Fully automatic, zero code change, ever:**
-- A new **metric** added to an existing domain file (e.g. a new CPU metric
-  in `cpu.md`) — picked up the moment the file is re-read (every request;
-  reference file content is never cached).
+- A new **metric-specific definition** added to an existing domain file (e.g. a
+  new CPU metric in `cpu.md`) — the Markdown is picked up when re-read, but the
+  authoritative catalog must also be regenerated/reconciled before the metric
+  is part of the current catalog universe.
 - A new **label key** appearing on an existing metric in Prometheus (e.g.
   someone adds a `datacenter` label to `node_cpu_seconds_total` tomorrow) —
   `label_discovery.py` queries Prometheus's own metadata live, every
@@ -373,11 +489,10 @@ what "automatic" actually covers.
 
 **Automatic after a restart, or `POST /api/v1/admin/reload-skill`
 (no restart needed):**
-- A new **domain file** (e.g. `disk-io.md`) with its own metrics, once it
-  has (a) a Metric Directory row in its exporter's `overview.md` and (b) a
-  routing-table row in `SKILL.md` §4. `skill_index.py` parses both
-  dynamically — nothing in `app/` names a specific exporter, domain, or
-  metric anywhere.
+- A new **domain file** (e.g. `disk-io.md`) with its own metric definitions,
+  once the catalog is regenerated/reconciled and the file has a routing-table
+  row in `SKILL.md` §4. A Metric Directory row in `overview.md` is no longer
+  required.
 - A brand-new **exporter** or **datasource**, same mechanism.
 
 Follow `skills/EXTENDING.md` exactly for the authoring steps (it's
@@ -388,17 +503,18 @@ of truth for how to author new skill content correctly.
 
 ---
 
-## 9. Alert Rule Creation (SKILL.md §12) — read this before turning it on
+## 11. Alert Rule Creation (SKILL.md §12) — read this before turning it on
 
 **Disabled by default** (`ALERT_RULE_CREATION_ENABLED=false` in
-`.env.example`). This is the one narrow, explicit exception to this
+`.env.example`). This optional feature is independent of the normal
+catalog-assisted routing configuration. It is the one narrow, explicit exception to this
 backend's read-only nature: with the flag on, a question like "alert me if
 CPU exceeds 90%" can PROPOSE creating a brand-new Grafana alert rule. It is
 never created automatically — a separate, explicit confirmation call is
 always required — and it never extends to silencing, deleting, or modifying
 an alert that already exists, flag on or off.
 
-### 9.1 Required Grafana-side setup
+### 11.1 Required Grafana-side setup
 
 You need a running Grafana instance with a Prometheus datasource pointing
 at the **same** Prometheus this backend already queries via
@@ -425,7 +541,7 @@ setting `ALERT_RULE_CREATION_ENABLED=true`:
    try a real question.
 6. Set `ALERT_RULE_CREATION_ENABLED=true`.
 
-### 9.2 The propose → confirm flow
+### 11.2 The propose → confirm flow
 
 This is a **two-step** flow, deliberately — the same shape as the
 clarification flow in §6, reusing the exact same session mechanism, but
@@ -462,7 +578,7 @@ direction) is missing from the question, you get `status: "declined"`,
 like any other clarification (§6), it just happens to be gathering
 information for an eventual alert proposal rather than a chart.
 
-### 9.3 What you will and won't see
+### 11.3 What you will and won't see
 
 Most metrics today don't have a verified alert condition yet — only
 `node_cpu_seconds_total` does, as of this version (see
@@ -484,7 +600,7 @@ every prior version of this backend.
 
 ---
 
-## 10. New-version replacement policy
+## 12. New-version replacement policy
 
 You said the plan is: hand this off, keep improving OpenSearch coverage
 separately, and later just replace the `backend/` folder wholesale in the
@@ -511,20 +627,20 @@ frontend team's copy of the repo. That's exactly how this was built to work:
   `unresolved_topics` → `unmapped`-entries mechanism in §7/§8, the
   `validation_failed` status in §4.1, and (this version) the
   `alert_rule_proposed` status plus the new `POST /api/v1/alerts/confirm`
-  endpoint (§9) — disabled by default via `ALERT_RULE_CREATION_ENABLED`,
+  endpoint (§11) — disabled by default via `ALERT_RULE_CREATION_ENABLED`,
   so it changes nothing for a deployment that doesn't opt in. All are
   additive — nothing already built against `ok`/`ambiguous_metric`/etc.
   needs to change.
 
 ---
 
-## 11. Testing this before you hand it off
+## 13. Testing this before you hand it off
 
-### 11.1 Automated tests (run these first, always)
+### 13.1 Automated tests (run these first, always)
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q
+ALERT_RULE_CREATION_ENABLED=false python -m pytest -q
 ```
 
 Every single test mocks the LLM and the backends — this checks the
@@ -543,12 +659,12 @@ correct; it can't verify the AI model's behavior, because the AI model
 itself is mocked out on purpose (that's what makes it possible to run this
 suite in a few seconds with no API key at all).
 
-### 11.2 Live testing (do this before trusting real answers)
+### 13.2 Live testing (do this before trusting real answers)
 
 **Neither I nor the previous version of this backend could reach Google's
 Gemini API or your local Prometheus/OpenSearch from the sandbox environment
 this was built in — no network path to either.** This is stated plainly so
-you know exactly what has and hasn't been verified: everything in §11.1 has
+you know exactly what has and hasn't been verified: everything in §13.1 has
 been run and passes; nothing that requires a live Gemini/Prometheus/
 OpenSearch connection has been. Run these, in order, on your own machine:
 
@@ -598,8 +714,8 @@ OpenSearch connection has been. Run these, in order, on your own machine:
    Invoke-RestMethod -Uri http://localhost:8000/api/v1/query -Method Post -ContentType "application/json" -Body '{"question": "CPU utilization", "session_id": "<SESSION_ID>"}'
    ```
 6. **If you turned on `ALERT_RULE_CREATION_ENABLED`:** run
-   `python3 scripts/smoke_test_grafana.py` first (§9.1), then test the
-   full propose → confirm round-trip (§9.2) — ask "alert me if CPU exceeds
+   `python3 scripts/smoke_test_grafana.py` first (§11.1), then test the
+   full propose → confirm round-trip (§11.2) — ask "alert me if CPU exceeds
    90% on node-1 for 5 minutes", confirm you get `status:
    "alert_rule_proposed"` with a `session_id` and nothing yet created in
    Grafana, then `POST /api/v1/alerts/confirm` with that `session_id` and
@@ -612,7 +728,7 @@ OpenSearch connection has been. Run these, in order, on your own machine:
    "silence this alert" still comes back `out_of_scope_action` — this flag
    must never change that.
 
-### 11.3 What "ready to hand to the frontend team" looks like
+### 13.3 What "ready to hand to the frontend team" looks like
 
 - [ ] `pytest -q` passes completely, on a clean checkout.
 - [ ] Both smoke-test scripts pass against your real Gemini key and local Prometheus.
@@ -624,7 +740,7 @@ OpenSearch connection has been. Run these, in order, on your own machine:
 - [ ] `GET /api/v1/capabilities` returns your current routing table (sanity
       check that the skill loaded correctly).
 - [ ] If `ALERT_RULE_CREATION_ENABLED=true`: the propose → confirm
-      round-trip in §9.2 works end-to-end against your real Grafana, and
+      round-trip in §11.2 works end-to-end against your real Grafana, and
       "silence this alert" still comes back `out_of_scope_action`.
 
 If all six pass, this is in a good state to hand off. If something in
@@ -636,7 +752,7 @@ rough edges to surface on first real use.
 
 ---
 
-## 12. File manifest (what's in this folder and why)
+## 14. File manifest (what's in this folder and why)
 
 ```
 app/            All backend logic. See README.md's "Project layout" for the
@@ -649,7 +765,7 @@ skills/         The skill package (SKILL.md + references/). This is DATA,
   SKILL.md                    The routing table + all behavioral rules,
                                 including alert-rule-creation (§12 in
                                 SKILL.md itself -- yes, same number as this
-                                document's own §9 on the same topic; they're
+                                document's own §11 on the same topic; they're
                                 independently numbered documents).
   EXTENDING.md                 How to author new skill content correctly --
                                 read this, not this handoff doc, when adding
@@ -659,18 +775,18 @@ skills/         The skill package (SKILL.md + references/). This is DATA,
   assets/templates/            Copy these when authoring new reference files.
   evals/regression-cases.md    Hand-authored test questions -- your primary
                                 live-testing tool (§11.2).
-  scripts/check_metric_directory.py  Run after editing a Metric Directory --
-                                catches drift between it and the domain file
-                                (dangling/missing entries) before it reaches
-                                a real conversation.
-tests/          Automated tests (§11.1). Mirrors app/'s module structure.
+  scripts/check_metric_directory.py  Validates catalog-to-domain metric
+                                references and SKILL.md routing links. Legacy
+                                overview-table drift is checked only when a
+                                legacy table is present.
+tests/          Automated tests (§13.1). Mirrors app/'s module structure.
                 Includes test_grafana_client.py and test_alerts_api.py for
-                the alert-rule-creation feature (§9).
+                the alert-rule-creation feature (§11).
 scripts/        smoke_test_gemini.py, smoke_test_prometheus.py,
-                smoke_test_grafana.py (§9.1, §11.2) -- the last one only
+                smoke_test_grafana.py (§11.1, §13.2) -- the last one only
                 relevant if ALERT_RULE_CREATION_ENABLED is set.
 .env.example    Every setting, documented inline, including the GRAFANA_*
-                block (§9.1). Copy to .env and fill in. Did not exist before
+                block (§11.1). Copy to .env and fill in. Did not exist before
                 this version -- created fresh alongside the alert-rule-
                 creation feature since no prior version had introduced
                 enough settings to need it as its own file.

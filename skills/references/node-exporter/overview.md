@@ -7,7 +7,6 @@ metric definitions — see `cpu.md`, `memory.md`, and `filesystem.md` for those.
 - Quick Facts
 - Trigger Examples
 - Do Not Use
-- Metric Directory
 - Derived / Composed Measurements
 - Exporter Fundamentals
 - Guardrails
@@ -50,34 +49,8 @@ Do not use this reference for:
   measurements → `dcgm-exporter/overview.md`
 - Any Node Exporter metric not listed in the Metric Directory below.
 
-## Metric Directory
-
-Exhaustive for the metrics currently supported by this skill. Every supported
-metric appears here in addition to its detailed definition in the relevant domain
-file; the domain file's detailed definition is authoritative for final metric
-selection.
-
-| Domain | Intent / Measurement | Metric | Detail File |
-|---|---|---|---|
-| cpu | CPU time spent in different modes | `node_cpu_seconds_total` | `cpu.md` |
-| cpu | Total context switches | `node_context_switches_total` | `cpu.md` |
-| cpu | Total interrupts handled | `node_intr_total` | `cpu.md` |
-| cpu | 1-minute load average | `node_load1` | `cpu.md` |
-| cpu | 5-minute load average | `node_load5` | `cpu.md` |
-| cpu | 15-minute load average | `node_load15` | `cpu.md` |
-| memory | Total physical memory | `node_memory_MemTotal_bytes` | `memory.md` |
-| memory | Memory available without swapping | `node_memory_MemAvailable_bytes` | `memory.md` |
-| memory | Completely free memory | `node_memory_MemFree_bytes` | `memory.md` |
-| memory | Linux page cache | `node_memory_Cached_bytes` | `memory.md` |
-| memory | Filesystem buffers | `node_memory_Buffers_bytes` | `memory.md` |
-| memory | Total swap space | `node_memory_SwapTotal_bytes` | `memory.md` |
-| memory | Available swap space | `node_memory_SwapFree_bytes` | `memory.md` |
-| filesystem | Filesystem size | `node_filesystem_size_bytes` | `filesystem.md` |
-| filesystem | Available disk space for non-root | `node_filesystem_avail_bytes` | `filesystem.md` |
-| filesystem | Total free disk space | `node_filesystem_free_bytes` | `filesystem.md` |
-
-Metric names, Prometheus types, measurements, and documented query intents come
-from the project's Node Exporter metric reference.
+Metric names and structured metadata are maintained in the generated catalog.
+Metric-specific semantics remain in the linked domain files.
 
 ## Derived / Composed Measurements
 
@@ -122,7 +95,7 @@ Fundamentals.
 
 ## Guardrails
 
-- Route requests only to metrics defined in this Metric Directory.
+- Route requests only to metrics defined in the catalog.
 - Use derived/composed measurements only when explicitly defined here.
 - Use only metric names, units, dimensions, relationships, and semantics
   established in this skill's references, and only label keys confirmed by
@@ -133,5 +106,5 @@ Fundamentals.
 - Apply only node, CPU, filesystem, or other scope constraints the user
   provided and that the runtime can confirm a label key for.
 - Preserve every measurement explicitly requested by the user.
-- Treat the Metric Directory as a routing aid only — verify final metric
-  selection using the detailed definition in the relevant domain file.
+- Verify final metric selection using the detailed definition in the relevant
+  domain file.

@@ -53,6 +53,36 @@ WHAT THIS FILE CHECKS, and where each rule comes from:
      has no say over what happens after validation passes -- see
      app/api/routes_alerts.py for the separate confirmation step.
 
+     PHASE 13 (Batch 4): `alert_rule_proposed` entries are now ALSO checked
+     against `known_metrics` -- the same Principle 1 / Step 3g
+     non-fabrication check `_validate_prometheus_entry` has always applied
+     to ordinary `ok`/`panic_mode_best_effort` results. Previously this
+     check was skipped entirely for alert proposals, which meant a
+     fabricated or unsupported metric name could reach the alert-creation
+     confirmation flow (app/api/routes_alerts.py) even though the same name
+     would have been rejected outright for a normal read query -- a real
+     gap given alert rules create persistent, potentially paging monitoring
+     behavior. Both paths now share `_check_catalog_status` (below) for the
+     catalog-status half of the policy, so the two paths cannot silently
+     disagree about whether a pending/rejected metric is usable.
+
+  7. PHASE 12 (Batch 4) -- CATALOG STATUS, SUPPLEMENTING `known_metrics`:
+     when the caller supplies `catalog_status_by_metric` (built by
+     app/pipeline.py's `_catalog_status_by_metric`, only when
+     `settings.catalog_metric_status_validation_enabled` is True), a metric
+     whose catalog status is `discovered_pending_review` or `rejected` is
+     rejected outright for BOTH the ordinary query path and the alert-rule
+     path -- even if that same metric name is also present in
+     `known_metrics` (a Metric Directory this request opened). This is
+     ADDITIVE ONLY: `catalog_status_by_metric` can never make a metric
+     `known_metrics` already rejected become valid, and a metric with no
+     entry in `catalog_status_by_metric` (or a missing/empty
+     `catalog_status_by_metric` altogether -- flag off, catalog failed to
+     load, no catalog configured) is treated exactly as it always was,
+     purely on `known_metrics`. See `_check_catalog_status`'s own
+     docstring for the fail-closed-but-never-fail-crashing behavior this
+     guarantees when the catalog is unavailable.
+
 DESIGN PRINCIPLE -- prefer a warning over a false rejection: any check this
 module cannot confidently evaluate (e.g. an OpenSearch field name -- there
 is no OpenSearch domain reference to confirm field names against yet, see
@@ -68,6 +98,7 @@ import re
 from dataclasses import dataclass, field
 
 from app import time_utils
+from app.catalog.schema import CatalogStatus
 
 # ---- public result type -------------------------------------------------------
 
@@ -96,6 +127,23 @@ _VALID_DECLINED_REASONS = {
 _VALID_MEASUREMENT_TYPES = {"raw_metric", "derived_measurement"}
 _VALID_COMPARISON_OPERATORS = {">", "<", ">=", "<=", "==", "!="}
 
+# Phase 12/13 (Batch 4): catalog statuses that must never be treated as a
+# valid query/alert metric, regardless of what known_metrics says. Sourced
+# from CatalogStatus (app/catalog/schema.py) rather than duplicated as bare
+# strings, so this module and the catalog's own status model can never
+# silently drift apart -- "one source of truth for catalog-status
+# interpretation," per the frozen architecture. `approved` and
+# `approved_unavailable` are deliberately absent here: both remain valid
+# per search.py's own DEFAULT_STATUSES allow-list (§2.5/§2.6), and this
+# module has no opinion beyond that -- it does not re-implement or
+# second-guess search.py's status policy, it only adds the one guardrail
+# the frozen spec calls out explicitly (pending/rejected must never become
+# accepted query metrics merely by being present in catalog.json).
+_CATALOG_DISALLOWED_STATUSES = {
+    CatalogStatus.DISCOVERED_PENDING_REVIEW.value,
+    CatalogStatus.REJECTED.value,
+}
+
 # Matches label="value" / label!="value" / label=~"value" / label!~"value"
 # selector clauses, wherever they occur in the query string -- this syntax
 # is unique to selectors, so scanning the whole string (not just inside
@@ -118,6 +166,7 @@ def validate_contract(
     labels_by_metric: dict[str, list[str] | None] | None = None,
     known_references: set[str] | None = None,
     known_datasources: set[str] | None = None,
+    catalog_status_by_metric: dict[str, str] | None = None,
 ) -> ValidationResult:
     """Validates a full Output Contract response (either `mode: "single"`
     with fields inline, or `mode: "multi"` with a `results` array).
@@ -137,11 +186,19 @@ def validate_contract(
     known_datasources: every data_source string actually in play for this
       request (from the Router's matched_references), so `data_source`
       can't silently smuggle in a value nothing was routed to.
+    catalog_status_by_metric: Phase 12/13 (Batch 4). Optional
+      {metric_name: catalog_status_string} lookup (see app/pipeline.py's
+      `_catalog_status_by_metric`), only ever populated when
+      `settings.catalog_metric_status_validation_enabled` is True. Purely
+      additive to `known_metrics`: a metric absent from this mapping, or a
+      None/empty mapping altogether, is validated exactly as it always has
+      been, on `known_metrics` alone. See `_check_catalog_status`.
     """
     known_metrics = known_metrics or set()
     labels_by_metric = labels_by_metric or {}
     known_references = known_references or set()
     known_datasources = known_datasources or set()
+    catalog_status_by_metric = catalog_status_by_metric or {}
 
     if not isinstance(contract, dict):
         return ValidationResult(False, f"Contract is not a JSON object (got {type(contract).__name__}).")
@@ -156,6 +213,7 @@ def validate_contract(
         result = _validate_entry(
             entry, known_metrics=known_metrics, labels_by_metric=labels_by_metric,
             known_references=known_references, known_datasources=known_datasources,
+            catalog_status_by_metric=catalog_status_by_metric,
         )
         if not result.passed:
             prefix = f"results[{i}]: " if contract.get("mode") == "multi" else ""
@@ -207,14 +265,16 @@ def _extract_entries(contract: dict) -> list[dict] | ValidationResult:
 
 
 def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: dict,
-                     known_references: set[str], known_datasources: set[str]) -> ValidationResult:
+                     known_references: set[str], known_datasources: set[str],
+                     catalog_status_by_metric: dict[str, str]) -> ValidationResult:
     status = entry.get("status")
     if status not in _VALID_STATUSES:
         return ValidationResult(False, f"Unknown status {status!r}; must be one of {sorted(_VALID_STATUSES)}.")
 
     if status in _EXECUTABLE_STATUSES:
         return _validate_ok_entry(entry, known_metrics=known_metrics, labels_by_metric=labels_by_metric,
-                                   known_references=known_references, known_datasources=known_datasources)
+                                   known_references=known_references, known_datasources=known_datasources,
+                                   catalog_status_by_metric=catalog_status_by_metric)
     if status == "ambiguous_metric":
         return _validate_ambiguous(entry)
     if status == "unsupported_metric":
@@ -227,9 +287,57 @@ def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: d
         return _require_fields(entry, ["requested_action", "explanation"], status)
     if status == "alert_rule_proposed":
         return _validate_alert_rule_proposed(entry, known_references=known_references,
-                                              known_datasources=known_datasources)
+                                              known_datasources=known_datasources,
+                                              known_metrics=known_metrics,
+                                              catalog_status_by_metric=catalog_status_by_metric)
     return ValidationResult(False, f"No validation rule implemented for status {status!r} -- this is a gap in "
                                     f"validator.py, not necessarily a bad contract; treat as fail-safe.")
+
+
+# ---- Phase 12/13 (Batch 4): shared catalog-status check --------------------------
+
+
+def _check_catalog_status(metrics_to_check: list[str],
+                           catalog_status_by_metric: dict[str, str]) -> ValidationResult:
+    """Shared by `_validate_prometheus_entry` (ordinary query path) and
+    `_validate_alert_rule_proposed` (alert path) so the two paths cannot
+    disagree about whether a pending/rejected catalog metric is allowed --
+    per the frozen architecture's "Avoid duplicated status logic. Prefer
+    one source of truth for catalog-status interpretation."
+
+    SUPPLEMENTS `known_metrics`, never replaces it: a metric must already
+    have passed (or skipped, when known_metrics is empty -- see each
+    caller) the existing Metric-Directory membership check before this is
+    even reached. This function's only job is the one additional rule the
+    frozen spec calls out explicitly: `discovered_pending_review` and
+    `rejected` catalog metrics must never become accepted query/alert
+    metrics merely because they are present in catalog.json.
+
+    Fail-open on unavailability, fail-closed on a real disallowed status:
+    an empty/falsy `catalog_status_by_metric` (flag off, catalog failed to
+    load, or the metric has no catalog entry at all -- e.g. this
+    deployment predates the catalog, or the metric is one of the *-fundamentals.md
+    rows the catalog has no opinion about) means this check has nothing to
+    say and passes, exactly as validator.py behaved before Phase 12/13
+    existed. It never treats "no catalog information" as "reject the
+    metric" -- that would turn catalog unavailability into a new outage
+    mode for ordinary query validation, which the frozen architecture
+    explicitly forbids ("If the catalog is unavailable/corrupt, do not
+    weaken the existing known_metrics validation" -- symmetric here as
+    "do not strengthen it into a false rejection" either).
+    """
+    if not catalog_status_by_metric:
+        return ValidationResult(True)
+    for metric_name in metrics_to_check:
+        status = catalog_status_by_metric.get(metric_name)
+        if status in _CATALOG_DISALLOWED_STATUSES:
+            return ValidationResult(
+                False,
+                f"metric {metric_name!r} has catalog status {status!r}, which is never a valid "
+                f"query/alert metric -- only 'approved'/'approved_unavailable' catalog-status "
+                f"metrics may be used (see app/catalog/schema.py's CatalogStatus model).",
+            )
+    return ValidationResult(True)
 
 
 def _require_fields(entry: dict, fields_: list[str], status: str) -> ValidationResult:
@@ -266,7 +374,9 @@ def _validate_declined(entry: dict) -> ValidationResult:
 
 
 def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
-                                   known_datasources: set[str]) -> ValidationResult:
+                                   known_datasources: set[str],
+                                   known_metrics: set[str] | None = None,
+                                   catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
     """SKILL.md Section 12 / Section 9's `alert_rule_proposed` status.
 
     This result is NEVER auto-executed -- it's deliberately absent from
@@ -275,7 +385,22 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
     12.1 (app/api/routes_alerts.py + app/grafana_client.py). This function's
     only job is confirming the PROPOSAL itself is well-formed and not
     fabricated -- it has no opinion on what happens after confirmation.
+
+    PHASE 13 (Batch 4): also enforces the same known_metrics /
+    catalog-status non-fabrication policy `_validate_prometheus_entry`
+    applies to ordinary read queries (see this function's known_metrics
+    check below, and `_check_catalog_status`). Previously this was a real
+    gap -- an alert proposal skipped metric-name validation entirely even
+    though it can create persistent, potentially paging monitoring
+    behavior, arguably higher-stakes than a one-off read query. Both
+    `known_metrics` and `catalog_status_by_metric` default to
+    None/empty for backward compatibility with existing call sites/tests
+    that validate an alert entry without either -- in that case this check
+    is a no-op, identical to pre-Phase-13 behavior, exactly like
+    `_validate_prometheus_entry`'s own `if known_metrics:` guard.
     """
+    known_metrics = known_metrics or set()
+    catalog_status_by_metric = catalog_status_by_metric or {}
     required = ["reference_used", "measurement_used", "data_source", "alert_rule", "explanation"]
     base = _require_fields(entry, required, "alert_rule_proposed")
     if not base.passed:
@@ -320,6 +445,34 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
             False,
             f"'alert_rule_proposed' currently only supports data_source 'prometheus'; got {data_source!r}.",
         )
+
+    # Phase 13 (Batch 4): the same Principle 1 / Step 3g non-fabrication
+    # check _validate_prometheus_entry has always applied to ordinary
+    # ok/panic_mode_best_effort results -- previously skipped entirely for
+    # alert proposals. Guarded by `if known_metrics:` for the same reason
+    # as the ordinary-query path: an empty known_metrics means this
+    # request never opened a Metric Directory to check against (or a
+    # caller is validating an alert entry in isolation, e.g. some existing
+    # tests), and validator.py has always preferred "cannot confirm" over
+    # a false rejection in that specific situation.
+    metrics_to_check = [name, *source_metrics]
+    if known_metrics:
+        for metric_name in metrics_to_check:
+            if metric_name not in known_metrics:
+                return ValidationResult(
+                    False,
+                    f"measurement_used references {metric_name!r}, which is not in any Metric "
+                    f"Directory this request opened ({sorted(known_metrics)}) -- looks fabricated. "
+                    f"Alert-rule proposals are held to the same non-fabrication check as ordinary "
+                    f"query results (Section 5 Principle 1 / Section 12.4) -- this check was "
+                    f"previously (incorrectly) skipped for alert proposals specifically.",
+                )
+
+    # Phase 12 (Batch 4): catalog status, same shared check the ordinary
+    # query path uses -- see _check_catalog_status's docstring.
+    status_result = _check_catalog_status(metrics_to_check, catalog_status_by_metric)
+    if not status_result.passed:
+        return status_result
 
     alert_rule = entry.get("alert_rule")
     if not isinstance(alert_rule, dict):
@@ -398,7 +551,8 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
 
 
 def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: dict,
-                        known_references: set[str], known_datasources: set[str]) -> ValidationResult:
+                        known_references: set[str], known_datasources: set[str],
+                        catalog_status_by_metric: dict[str, str]) -> ValidationResult:
     status = entry["status"]
     warnings: list[str] = []
 
@@ -445,7 +599,8 @@ def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric
     query = entry.get("query")
 
     if data_source == "prometheus":
-        result = _validate_prometheus_entry(entry, query, name, source_metrics, known_metrics, labels_by_metric)
+        result = _validate_prometheus_entry(entry, query, name, source_metrics, known_metrics, labels_by_metric,
+                                             catalog_status_by_metric)
         if not result.passed:
             return result
         warnings.extend(result.warnings)
@@ -467,7 +622,8 @@ def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric
 
 
 def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: list[str],
-                                known_metrics: set[str], labels_by_metric: dict) -> ValidationResult:
+                                known_metrics: set[str], labels_by_metric: dict,
+                                catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
     # Section 6 Step 7 sanity pass: shape matches data source.
     if not isinstance(query, str) or not query.strip():
         return ValidationResult(False, "data_source is 'prometheus' but 'query' is not a non-empty PromQL string.")
@@ -489,6 +645,15 @@ def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: li
                     f"measurement_used.name is {metric_name!r} but that metric name does not "
                     f"appear anywhere in the query string {query!r}.",
                 )
+
+    # Phase 12 (Batch 4): catalog status SUPPLEMENTS the known_metrics check
+    # directly above -- see _check_catalog_status's docstring. Runs
+    # unconditionally (not nested inside `if known_metrics:`) since it's an
+    # independent source of information from known_metrics and a no-op
+    # whenever catalog_status_by_metric itself is empty/unavailable.
+    status_result = _check_catalog_status(metrics_to_check, catalog_status_by_metric or {})
+    if not status_result.passed:
+        return status_result
 
     # Time Expression Grammar (Tightened), prometheus-fundamentals.md --
     # SKILL.md §8 "Instant vs. range" / §9 makes `query_type` a required,

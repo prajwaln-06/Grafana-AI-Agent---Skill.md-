@@ -87,15 +87,13 @@ power-violation counter as the current power consumption value.
 - **Do not use / confusable with:** GPU memory/HBM/VRAM temperature →
   `DCGM_FI_DEV_MEMORY_TEMP`.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the GPU temperature?", "Is GPU 2 running hot?"
 - **Edge/confusable example:** user specifically asks about HBM or VRAM
   temperature → use `DCGM_FI_DEV_MEMORY_TEMP`, not this metric.
-- **Metric-specific query/result semantics:** directly represents GPU core
-  temperature. No per-metric override of `SKILL.md` defaults is currently
-  defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_MEMORY_TEMP`
 
@@ -108,16 +106,16 @@ power-violation counter as the current power consumption value.
 - **Do not use / confusable with:** GPU core or general GPU temperature →
   `DCGM_FI_DEV_GPU_TEMP`.
 - **Relevant scope:** GPU memory / HBM / VRAM (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the GPU memory temperature?", "Is the HBM
   getting too hot?"
 - **Edge/confusable example:** user asks for general GPU/core temperature →
   use `DCGM_FI_DEV_GPU_TEMP`, not this metric.
-- **Metric-specific query/result semantics:** represents GPU memory/HBM
-  temperature rather than GPU core temperature. No per-metric override of
-  `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override. (See
+  Confusable Measurements above for the core-vs-memory temperature
+  distinction.)
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_POWER_USAGE`
 
@@ -130,16 +128,15 @@ power-violation counter as the current power consumption value.
 - **Do not use / confusable with:** power throttling over time →
   `DCGM_FI_DEV_POWER_VIOLATION`.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How much power is the GPU using?", "What is the
   current GPU power draw?"
 - **Edge/confusable example:** user asks whether the GPU has been power
   throttling → use `DCGM_FI_DEV_POWER_VIOLATION`, not this metric.
-- **Metric-specific query/result semantics:** represents instantaneous GPU
-  power draw. No per-metric override of `SKILL.md` defaults is currently
-  defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override. (See
+  Confusable Measurements above for the usage-vs-violation distinction.)
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_POWER_VIOLATION`
 
@@ -155,7 +152,7 @@ power-violation counter as the current power consumption value.
 - **Do not use / confusable with:** current GPU power consumption/draw →
   `DCGM_FI_DEV_POWER_USAGE`.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "Has the GPU been power throttling?", "Detect power
   throttling over the last hour."
 - **Edge/confusable example:** user asks for the GPU's current power
@@ -190,8 +187,7 @@ power-violation counter as the current power consumption value.
   represents instantaneous power draw, while this Counter represents
   accumulated time spent power throttled.
 
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_SM_CLOCK`
 
@@ -204,16 +200,14 @@ power-violation counter as the current power consumption value.
 - **Do not use / confusable with:** GPU memory frequency →
   `DCGM_FI_DEV_MEM_CLOCK`.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the current GPU clock?", "What is the GPU core
   frequency?"
 - **Edge/confusable example:** user asks for memory clock frequency → use
   `DCGM_FI_DEV_MEM_CLOCK`, not this metric.
-- **Metric-specific query/result semantics:** represents the current SM/core
-  clock frequency. No per-metric override of `SKILL.md` defaults is currently
-  defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_DEV_MEM_CLOCK`
 
@@ -226,16 +220,14 @@ power-violation counter as the current power consumption value.
 - **Do not use / confusable with:** GPU SM/core clock frequency →
   `DCGM_FI_DEV_SM_CLOCK`.
 - **Relevant scope:** GPU memory (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No intrinsic dimension beyond the GPU-level scope is documented for this metric.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the current GPU memory clock?", "What is the
   GPU memory frequency?"
 - **Edge/confusable example:** user asks for the GPU core/SM clock → use
   `DCGM_FI_DEV_SM_CLOCK`, not this metric.
-- **Metric-specific query/result semantics:** represents the current GPU
-  memory clock frequency. No per-metric override of `SKILL.md` defaults is
-  currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Gauge handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ## Domain-Specific Guardrails
 

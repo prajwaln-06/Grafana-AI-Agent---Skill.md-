@@ -19,7 +19,7 @@ def skills_root() -> Path:
 @pytest.fixture(scope="session")
 def skill_index(skills_root):
     from app.skill_index import SkillIndex
-    return SkillIndex.load(skills_root)
+    return SkillIndex.load(skills_root, BACKEND_ROOT / "app" / "catalog" / "catalog.json")
 
 
 @pytest.fixture()

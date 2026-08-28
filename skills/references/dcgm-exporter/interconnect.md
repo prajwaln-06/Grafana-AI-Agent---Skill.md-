@@ -100,18 +100,17 @@ versa.
   vague, link-unspecified "GPU bandwidth" request → treat as metric-ambiguous
   across all four traffic metrics rather than defaulting to this one.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the PCIe transmit bandwidth?", "How much data
   is being sent over PCIe on GPU 0?"
 - **Edge/confusable example:** user asks about NVLink transmit traffic rather
   than PCIe → use `DCGM_FI_PROF_NVLINK_TX_BYTES`, not this metric.
-- **Metric-specific query/result semantics:** the authoritative metric
-  reference explicitly establishes `rate()` as the typical query intent for
-  this metric — the raw counter value alone is not the meaningful quantity;
-  a rate over time is normally needed to express "bandwidth." No further
-  per-metric override of `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Counter/range-query
+  handling per `SKILL.md`/`prometheus-fundamentals.md`; `rate()` is the
+  documented query intent for bandwidth (see Confusable Measurements and
+  Domain-Specific Guardrails above — applies identically to all four
+  metrics in this domain). No per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_PROF_PCIE_RX_BYTES`
 
@@ -127,18 +126,17 @@ versa.
   vague, link-unspecified "GPU bandwidth" request → treat as metric-ambiguous
   across all four traffic metrics rather than defaulting to this one.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the PCIe receive bandwidth?", "How much data
   is coming in over PCIe on GPU 0?"
 - **Edge/confusable example:** user asks about NVLink receive traffic rather
   than PCIe → use `DCGM_FI_PROF_NVLINK_RX_BYTES`, not this metric.
-- **Metric-specific query/result semantics:** the authoritative metric
-  reference explicitly establishes `rate()` as the typical query intent for
-  this metric — the raw counter value alone is not the meaningful quantity;
-  a rate over time is normally needed to express "bandwidth." No further
-  per-metric override of `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Counter/range-query
+  handling per `SKILL.md`/`prometheus-fundamentals.md`; `rate()` is the
+  documented query intent for bandwidth (see Confusable Measurements and
+  Domain-Specific Guardrails above — applies identically to all four
+  metrics in this domain). No per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_PROF_NVLINK_TX_BYTES`
 
@@ -156,18 +154,17 @@ versa.
   "GPU bandwidth" request → treat as metric-ambiguous across all four traffic
   metrics rather than defaulting to this one.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the NVLink transmit bandwidth?", "How much
   data is being sent over NVLink on GPU 0?"
 - **Edge/confusable example:** user asks about PCIe transmit traffic rather
   than NVLink → use `DCGM_FI_PROF_PCIE_TX_BYTES`, not this metric.
-- **Metric-specific query/result semantics:** the authoritative metric
-  reference explicitly establishes `rate()` as the typical query intent for
-  this metric — the raw counter value alone is not the meaningful quantity;
-  a rate over time is normally needed to express "bandwidth." No further
-  per-metric override of `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Counter/range-query
+  handling per `SKILL.md`/`prometheus-fundamentals.md`; `rate()` is the
+  documented query intent for bandwidth (see Confusable Measurements and
+  Domain-Specific Guardrails above — applies identically to all four
+  metrics in this domain). No per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `DCGM_FI_PROF_NVLINK_RX_BYTES`
 
@@ -185,18 +182,17 @@ versa.
   "GPU bandwidth" request → treat as metric-ambiguous across all four traffic
   metrics rather than defaulting to this one.
 - **Relevant scope:** GPU (not a label list).
-- **Additional known labels:** sourced dynamically at query-generation time from the runtime — see `SKILL.md` §5 Principle 9. No additional dimension beyond the GPU-level scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time — do not invent one.
+- **Additional known labels:** none beyond GPU-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What is the NVLink receive bandwidth?", "How much
   data is coming in over NVLink on GPU 0?"
 - **Edge/confusable example:** user asks about PCIe receive traffic rather
   than NVLink → use `DCGM_FI_PROF_PCIE_RX_BYTES`, not this metric.
-- **Metric-specific query/result semantics:** the authoritative metric
-  reference explicitly establishes `rate()` as the typical query intent for
-  this metric — the raw counter value alone is not the meaningful quantity;
-  a rate over time is normally needed to express "bandwidth." No further
-  per-metric override of `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified DCGM PromQL query example is currently
-  available. Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Counter/range-query
+  handling per `SKILL.md`/`prometheus-fundamentals.md`; `rate()` is the
+  documented query intent for bandwidth (see Confusable Measurements and
+  Domain-Specific Guardrails above — applies identically to all four
+  metrics in this domain). No per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ## Domain-Specific Guardrails
 

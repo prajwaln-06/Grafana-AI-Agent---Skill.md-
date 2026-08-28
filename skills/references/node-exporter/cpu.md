@@ -118,12 +118,10 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   "How much CPU time is idle?", "Show CPU utilization for CPU 2."
 - **Edge/confusable example:** user asks "Are there a lot of context switches?"
   → use `node_context_switches_total`, not this metric.
-- **Metric-specific query/result semantics:** a Counter representing
-  accumulated CPU time across CPU modes. Counter handling and range-query
-  construction follow `SKILL.md` and `prometheus-fundamentals.md`. The `mode`
-  dimension distinguishes CPU states (user/system/idle/iowait); preserve an
-  explicitly requested mode when constructing the query. No per-metric override
-  of `SKILL.md` defaults is currently defined.
+- **Metric-specific query/result semantics:** the `mode` dimension
+  distinguishes CPU states (user/system/idle/iowait); preserve an explicitly
+  requested mode when constructing the query. Standard Counter/range-query
+  handling otherwise (`SKILL.md`/`prometheus-fundamentals.md`); no override.
 - **Query examples:** a verified example from the project:
 
   ```promql
@@ -148,17 +146,14 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   `node_cpu_seconds_total`; interrupt activity → `node_intr_total`. Do not
   interpret a high context-switch count as a direct CPU-utilization measurement.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How many context switches are happening?", "Is there
   high scheduling activity?", "Show context-switch activity over the last hour."
 - **Edge/confusable example:** user asks "How much CPU is being used?" → use
   `node_cpu_seconds_total`, not this metric.
-- **Metric-specific query/result semantics:** a Counter representing
-  accumulated context switches. Counter handling and range-query construction
-  follow `SKILL.md` and `prometheus-fundamentals.md`. No per-metric override of
-  `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Counter handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_intr_total`
 
@@ -174,17 +169,14 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   `node_context_switches_total`. Do not interpret interrupt counts as a direct
   CPU-utilization measurement.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level entity scope is documented for this metric. Label keys are sourced dynamically from the runtime at query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "How many interrupts are being handled?", "Is this an
   interrupt-heavy workload?", "Show interrupt activity over the last hour."
 - **Edge/confusable example:** user asks "Are there a lot of context switches?"
   → use `node_context_switches_total`, not this metric.
-- **Metric-specific query/result semantics:** a Counter representing
-  accumulated interrupts handled. Counter handling and range-query construction
-  follow `SKILL.md` and `prometheus-fundamentals.md`. No per-metric override of
-  `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** standard Counter handling per
+  `SKILL.md`/`prometheus-fundamentals.md`; no per-metric override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_load1`
 
@@ -200,21 +192,16 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   see Confusable Measurements above) → `node_cpu_seconds_total`; sustained
   load → `node_load5`; long-term load trend → `node_load15`.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level
-  entity scope is documented for this metric. Label keys (including the
-  node-level scope itself) are sourced dynamically from the runtime at
-  query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "Is the system overloaded?", "What's the current load
   average?"
 - **Edge/confusable example:** user asks about sustained load over a longer
   window → use `node_load5` or `node_load15`, not this metric.
-- **Metric-specific query/result semantics:** represents the 1-minute load
-  average as a Gauge. What specifically composes the load figure is not
-  established by the authoritative document — do not assert a mechanism (e.g.
-  which process states are counted) beyond what is documented. No per-metric
-  override of `SKILL.md` defaults is currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** what composes the load figure
+  is not established — do not assert a mechanism (e.g. which process states
+  are counted) beyond what is documented. Standard Gauge handling otherwise;
+  no override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_load5`
 
@@ -229,21 +216,15 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   see Confusable Measurements above) → `node_cpu_seconds_total`; the
   short-term/current load → `node_load1`; the long-term trend → `node_load15`.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level
-  entity scope is documented for this metric. Label keys (including the
-  node-level scope itself) are sourced dynamically from the runtime at
-  query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What's the sustained load?", "What's the 5-minute load
   average?"
 - **Edge/confusable example:** user asks for the current, right-now load → use
   `node_load1`, not this metric.
-- **Metric-specific query/result semantics:** represents the 5-minute load
-  average as a Gauge. What specifically composes the load figure is not
-  established by the authoritative document — do not assert a mechanism
-  beyond what is documented. No per-metric override of `SKILL.md` defaults is
-  currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** what composes the load figure
+  is not established — do not assert a mechanism beyond what is documented.
+  Standard Gauge handling otherwise; no override.
+- **Query examples:** none verified; do not invent one.
 
 ### `node_load15`
 
@@ -258,21 +239,15 @@ specifying a window, this is metric-ambiguous across the three per `SKILL.md`
   see Confusable Measurements above) → `node_cpu_seconds_total`; the
   short-term/current load → `node_load1`; sustained load → `node_load5`.
 - **Relevant scope:** Node (not a label list).
-- **Additional known labels:** no additional dimension beyond the node-level
-  entity scope is documented for this metric. Label keys (including the
-  node-level scope itself) are sourced dynamically from the runtime at
-  query-generation time (`SKILL.md` §5 Principle 9) — do not invent one.
+- **Additional known labels:** none beyond node-level scope (see Common Labels & Dimensions above).
 - **Intent examples:** "What's the long-term load trend?", "What's the
   15-minute load average?"
 - **Edge/confusable example:** user asks for the current, right-now load → use
   `node_load1`, not this metric.
-- **Metric-specific query/result semantics:** represents the 15-minute load
-  average as a Gauge. What specifically composes the load figure is not
-  established by the authoritative document — do not assert a mechanism
-  beyond what is documented. No per-metric override of `SKILL.md` defaults is
-  currently defined.
-- **Query examples:** no verified PromQL query example is currently available.
-  Do not invent a literal query example.
+- **Metric-specific query/result semantics:** what composes the load figure
+  is not established — do not assert a mechanism beyond what is documented.
+  Standard Gauge handling otherwise; no override.
+- **Query examples:** none verified; do not invent one.
 
 ## Domain-Specific Guardrails
 
