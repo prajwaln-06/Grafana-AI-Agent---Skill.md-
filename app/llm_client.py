@@ -110,16 +110,37 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
         ) from e
 
     try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                temperature=0.0,
-            ),
-        )
+        import os
+        from app.config import get_settings
+        settings = get_settings()
+        is_vertex = api_key.startswith("AQ.") or os.environ.get("VERTEXAI", "").lower() in ("true", "1")
+        if is_vertex:
+            client = genai.Client(
+                vertexai=True,
+                api_key=api_key,
+                location=getattr(settings, "vertex_location", "global"),
+                project=getattr(settings, "vertex_project", "project-8d47da29-7cf0-45f0-b55"),
+            )
+            full_content = f"SYSTEM INSTRUCTION:\n{system_instruction}\n\nUSER REQUEST:\n{prompt}"
+            response = client.models.generate_content(
+                model=model,
+                contents=full_content,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                ),
+            )
+        else:
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                ),
+            )
         text = response.text
         if text is None:
             raise _TransientError("Gemini returned an empty response body.")

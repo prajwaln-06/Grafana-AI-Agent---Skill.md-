@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes_admin import router as admin_router
 from app.api.routes_health import router as health_router
+from app.api.routes_proposals import router as proposals_router
 from app.api.routes_query import router as query_router
 from app.config import get_settings
 from app.logging_config import configure_logging
@@ -83,4 +84,5 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 app.include_router(health_router)
 app.include_router(query_router)
+app.include_router(proposals_router)
 app.include_router(admin_router)

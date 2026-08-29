@@ -46,6 +46,25 @@ opensearch-* routing rows exist in SKILL.md, questions that need them start
 matching normally and this fallback stops being exercised for them --
 nothing about this mechanism is Prometheus/OpenSearch-specific; it's
 generic to "a sub-intent this skill package doesn't cover yet."
+
+Alert-rule creation (SKILL.md Section 12, feature-flagged off by default --
+see app/config.py's `alert_rule_creation_enabled`): the narrow, explicit
+exception to this skill's read-only nature. When the flag is off, the
+Router and Generator prompts are built WITHOUT the alert-rule-creation
+addenda at all (`_build_router_instructions` / `_build_generator_
+instructions` below) -- an alert-creation request is classified exactly as
+it always was, `out_of_scope_action`, with zero prompt-level change and
+zero regression surface for ordinary read-query classification. When the
+flag is on, the Router may tag a request with `action_intent:
+"propose_alert_rule"`; this pipeline then deterministically injects the
+deployment's default alert folder and forces `datasource_uid` to null
+(`_apply_alert_rule_defaults`) before validation, since neither is ever
+something the Generator should be trusted to supply itself (Section 12.5).
+The resulting `status: "alert_rule_proposed"` result is never auto-executed
+(see executor.py) and never creates anything in Grafana on its own -- that
+only happens via the separate confirmation endpoint in
+app/api/routes_alerts.py, which is this pipeline's sibling, not something
+it calls.
 """
 from __future__ import annotations
 
@@ -72,6 +91,16 @@ INTERNAL_VALIDATION_FAILED_STATUS = "validation_failed"
 # since a rising rate of these indicates a Router/Generator prompt problem,
 # not normal traffic.
 
+ALERT_PROPOSED_STATUS = "alert_rule_proposed"
+# SKILL.md Section 9/12. Imported by validator.py, executor.py (by
+# omission -- see its module docstring), and app/api/routes_alerts.py.
+_ALERT_ACTION_INTENT = "propose_alert_rule"
+# The Router's optional Shape B field (see _ALERT_ROUTER_ADDENDUM below)
+# that flags a request as alert-rule creation rather than a read question.
+# Absent/anything else means an ordinary read question -- this is an
+# additive, opt-in field, never a breaking change to Shape B's existing
+# consumers.
+
 
 @dataclass
 class PipelineContext:
@@ -95,6 +124,36 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
 
     matched = router_output.get("matched_references", [])
     panic_mode = bool(router_output.get("panic_mode", False))
+    action_intent = router_output.get("action_intent") or "read_query"
+
+    if action_intent == _ALERT_ACTION_INTENT and not settings.alert_rule_creation_enabled:
+        # Defense in depth, not the primary control: with the feature flag
+        # off, _build_router_instructions never tells the Router this field
+        # exists at all (see below), so the Router should never produce it.
+        # If it somehow does anyway (a stale prompt cache, a Router that
+        # ignored its instructions, etc.), fail closed to the EXACT same
+        # behavior this request would have gotten before SKILL.md Section 12
+        # existed -- out_of_scope_action -- rather than trusting an
+        # LLM-supplied flag the deployment hasn't opted into. This keeps the
+        # "flag off = zero behavior change" guarantee true even under a
+        # Router misfire, not just under normal operation.
+        logger.warning(
+            "Router returned action_intent=%r for question %r but "
+            "alert_rule_creation_enabled is False on this deployment -- forcing a "
+            "deterministic out_of_scope_action response instead of trusting the Router. "
+            "This should not happen while the flag is off (the addendum that even "
+            "mentions this field is never included in the Router's prompt); investigate "
+            "if this recurs.", action_intent, question,
+        )
+        contract = _wrap_gate_stop({
+            "status": "out_of_scope_action",
+            "requested_action": "create a new Grafana alert rule",
+            "explanation": (
+                "Alert-rule creation is currently disabled on this deployment; this skill "
+                "only constructs/runs read-only queries."
+            ),
+        })
+        return _finalize(contract, unresolved_topics)
 
     if not matched:
         if unresolved_topics:
@@ -123,8 +182,10 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
         return _finalize(contract, unresolved_topics)
 
     generator_context = _build_generator_context(matched, skill_index, settings)
-    contract = await _run_generator(question, matched, panic_mode, generator_context, skill_index, settings, context)
+    contract = await _run_generator(question, matched, panic_mode, generator_context, skill_index, settings,
+                                     context, action_intent=action_intent)
     contract = _normalize_contract_shape(contract)
+    contract = _apply_alert_rule_defaults(contract, settings)
 
     known_references = set(generator_context.reference_texts.keys()) | set(generator_context.overview_texts.keys())
     known_datasources = {(m.get("data_source") or "").strip().lower() for m in matched}
@@ -136,6 +197,34 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
         known_references=known_references,
         known_datasources=known_datasources,
     )
+
+
+def _apply_alert_rule_defaults(contract: dict, settings: Settings) -> dict:
+    """SKILL.md Section 12.5: `alert_rule.folder` is supplied by the
+    surrounding application (this function), never invented by the
+    Generator; `alert_rule.datasource_uid` is always null coming out of the
+    Generator, resolved only at confirmation time. This is deterministic
+    Python, not an LLM decision, for the same reason validator.py's checks
+    are deterministic -- there's exactly one right value for each (the
+    deployment's configured default folder; null), so there's nothing here
+    that benefits from a model's judgement. Only touches a contract that is
+    ALREADY shaped like `alert_rule_proposed`; anything else (including a
+    malformed near-miss) is returned untouched and left for validator.py to
+    reject on its own terms."""
+    if not isinstance(contract, dict) or contract.get("status") != ALERT_PROPOSED_STATUS:
+        return contract
+    alert_rule = contract.get("alert_rule")
+    if not isinstance(alert_rule, dict):
+        return contract
+    updated_alert_rule = dict(alert_rule)
+    if not updated_alert_rule.get("folder"):
+        updated_alert_rule["folder"] = settings.grafana_default_folder_uid
+    # Always overwritten, never merely defaulted -- Section 12.5 requires
+    # this to be null regardless of anything the Generator supplied, since a
+    # datasource UID is live Grafana configuration the Generator has no way
+    # to verify (Principle 9's "runtime-only fact" category).
+    updated_alert_rule["datasource_uid"] = None
+    return {**contract, "alert_rule": updated_alert_rule}
 
 
 # ---- Generator output normalization (structural only, never content) ---------------
@@ -321,14 +410,73 @@ and its keyword-matching rule), and Section 7 (error handling) exactly as
 written below. Do not invent a status outside the enum shown above.
 """
 
+_ALERT_ROUTER_ADDENDUM = """\
+
+ALERT-RULE CREATION IS ENABLED ON THIS DEPLOYMENT (SKILL.md Section 12).
+This adds exactly one narrow thing to everything above -- it changes nothing
+else about how you gate or route a request.
+
+A request to CREATE a brand-new alert rule for a metric this skill covers
+("alert me if CPU exceeds 90%", "create an alert for high GPU temperature",
+"set up alerting on low disk space", "notify me when swap usage goes above
+2GB") is NOT out_of_scope_action. Route it exactly like an ordinary Shape B
+data question -- match it against Section 4's table, resolve
+matched_references the same way -- and add exactly one extra top-level
+field to your Shape B response:
+
+{
+  "gate_stop": null,
+  "matched_references": [...],
+  "panic_mode": false,
+  "unresolved_topics": [],
+  "action_intent": "propose_alert_rule"
+}
+
+Omit `action_intent` entirely (or leave it out of your response) for an
+ordinary read question -- it defaults to a normal data request. Only set it
+to "propose_alert_rule" when the user is UNAMBIGUOUSLY asking to CREATE a
+new alerting rule. Never set it merely because the question mentions the
+word "alert" in passing -- "is there an alert on this?" or "show me active
+alerts" are read questions about alert STATE, not creation requests, and get
+no `action_intent` field at all.
+
+This changes NOTHING about requests to silence, acknowledge, delete, or
+otherwise modify an EXISTING alert or resource -- "silence this alert,"
+"delete that alert rule," "turn off the GPU temperature alert," and similar
+remain out_of_scope_action (Shape A), exactly as described above, with NO
+exception. If a request could plausibly be read either way -- creating
+something brand-new vs. mutating something that already exists -- classify
+it as out_of_scope_action; under-triggering this narrow addition is always
+the safer failure mode. When genuinely unsure, prefer out_of_scope_action.
+"""
+
+
+def _build_router_instructions(settings: Settings) -> str:
+    """Returns the Router's system instructions, appending the alert-rule-
+    creation addendum ONLY when the feature flag is on. This is the
+    highest-risk prompt-engineering surface in the alert-rule-creation
+    feature (SKILL.md Section 12) -- keeping the base `_ROUTER_INSTRUCTIONS`
+    string byte-for-byte unchanged, and gating the addendum behind a config
+    flag that defaults to False, means existing read-query routing gets
+    ZERO prompt changes unless a deployment has explicitly opted in. A
+    regression in alert-rule-creation classification can also never leak
+    into a deployment that hasn't turned the flag on, and a bad rollout is
+    fully reversible by flipping the flag back off -- no prompt rollback
+    required."""
+    if not settings.alert_rule_creation_enabled:
+        return _ROUTER_INSTRUCTIONS
+    return _ROUTER_INSTRUCTIONS + _ALERT_ROUTER_ADDENDUM
+
 
 async def _run_router(question: str, skill_index: SkillIndex, settings: Settings,
                        context: PipelineContext) -> dict:
-    sections = "\n\n".join([
-        skill_index.section("## 3."),
-        skill_index.section("## 4."),
-        skill_index.section("## 7."),
-    ])
+    section_headers = ["## 3.", "## 4.", "## 7."]
+    if settings.alert_rule_creation_enabled:
+        # Only loaded into the prompt when the deployment has opted in --
+        # see _build_router_instructions' docstring for why this mirrors
+        # the same "flag off => zero prompt change" guarantee.
+        section_headers.append("## 12.")
+    sections = "\n\n".join(skill_index.section(h) for h in section_headers)
     prompt_parts = [f"SKILL.md reference sections:\n\n{sections}", f"\nUser question: {question}"]
     if context.previous_question:
         prompt_parts.append(
@@ -342,7 +490,7 @@ async def _run_router(question: str, skill_index: SkillIndex, settings: Settings
 
     response = llm_client.call_llm_json(
         prompt=prompt,
-        system_instruction=_ROUTER_INSTRUCTIONS,
+        system_instruction=_build_router_instructions(settings),
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
     )
@@ -457,21 +605,138 @@ has a Purpose matching what was asked, that reference contributes no
 candidate at all (it may still be `unsupported_metric` on its own, per Step
 3g, if it was the only reference opened).
 
+CLOSED ENUMS -- do not invent values outside these lists, ever, under any
+framing. `status` is one of the exact values listed in Section 9's contract
+(`ok`, `panic_mode_best_effort`, `ambiguous_metric`, `unsupported_metric`,
+`unmapped`, `declined`, `out_of_scope_action`, and -- when applicable per
+Section 12 -- `alert_rule_proposed`). `measurement_used.type` is one of
+exactly two values: `"raw_metric"` (a single metric, whether or not
+functions like `rate()` / `sum()` are applied to it) or
+`"derived_measurement"` (a value computed from two or more distinct
+metrics combined). If you find yourself about to write anything else for
+either field (e.g. `raw_counter`, `raw_cluster_or_counter`,
+`calculated`, `aggregated`), stop -- pick `raw_metric` if it's a single
+metric with transformations, or `derived_measurement` if it truly
+combines multiple distinct metrics.
+
+`query_type` IS A REQUIRED FIELD on every Prometheus-backed `ok`/
+`panic_mode_best_effort` result (Section 8's "Instant vs. range", Section 9)
+-- never omit it and never default it to `"range"` out of habit. It is one
+of exactly two values: `"instant"` (the question asks for a single current
+value -- build a Prometheus instant query, `time_range: {"time": "now"}` or
+another single resolvable point) or `"range"` (the question implies a trend,
+history, or an explicit time window -- build a Prometheus range query,
+`time_range: {"from", "to", "step"}` as before). Decide which one per
+Section 8's rules BEFORE constructing `time_range` -- a bare "what is/how
+much/how busy" question with no window language is `"instant"`, not a
+short-window `"range"` standing in for it.
+
 Respond with ONLY the JSON object matching Section 9's contract -- no other
 text, no markdown fences.
 """
 
+_ALERT_GENERATOR_ADDENDUM = """\
+
+ALERT-RULE CREATION (SKILL.md Section 12): the routing phase determined this
+request is asking to CREATE a brand-new Grafana alert rule
+(action_intent = "propose_alert_rule" -- see below), not to retrieve data.
+Resolve the metric using the EXACT same Step 3 procedure as always --
+`ambiguous_metric` and `unsupported_metric` still apply exactly as for a
+read question if metric selection doesn't cleanly resolve. Once (and only
+once) a metric resolves cleanly, build `alert_rule.condition_query` using
+THE EXACT SAME Step 5 procedure you would use to build an ordinary read-only
+query for this metric (Section 12.4) -- there is no separate "alert query"
+concept and no separate per-metric alert-specific field to consult. This is
+deliberate: Step 5's own construction discipline (the metric's Query
+examples when verified, its Metric-Specific Query/Result Semantics
+otherwise, runtime-confirmed label keys per Principle 9, datasource
+fundamentals) is already the mechanism trusted not to fabricate a query --
+an alert condition is that same expression, compared against a threshold.
+
+1. Build the condition query per Step 5, exactly as you would for a read
+   question about this same metric:
+   - A verified Query Example exists -> build the condition query the same
+     way Step 5 would for a read question; the example may inform
+     construction but is never copied verbatim if the request differs from
+     it.
+   - No verified Query Example, but the metric's query/result semantics are
+     otherwise established (its Metric-Specific Query/Result Semantics
+     section, or datasource fundamentals) -> build it fresh, exactly as
+     Step 5 already allows for a read question; a missing worked example
+     does not by itself block construction.
+   - That metric's query/result semantics are THEMSELVES stated as
+     unverified for the interpretation being asked (Principle 8 -- e.g. an
+     unverified exposed unit) -> STOP, exactly as Step 5 already requires
+     for a read question about that same interpretation. Classify the
+     result as `unsupported_metric`, with `explanation` stating plainly
+     what is unverified. This is the ONLY case that blocks alert-condition
+     construction -- identical to, never stricter than, what already blocks
+     an ordinary read query for that same metric and interpretation. Do NOT
+     derive a condition from general domain knowledge about what a
+     "sensible" alert for this kind of metric might look like -- only from
+     Step 5's own construction procedure.
+2. Preserve any scope constraint (entity/device) the user explicitly
+   provided, using a live-confirmed label key (Principle 9) exactly as Step
+   5 already requires for a read question.
+3. The threshold value and comparison operator (>, <, >=, <=, ==, !=) are
+   NEVER supplied by a reference file and are never invented by you -- they
+   must be explicitly stated by the user. If either is missing, classify as
+   `declined`, `reason: "parameter_requires_clarification"`, with a
+   `clarification` field asking for the specific missing piece.
+   **`comparison.threshold` MUST be a raw JSON number, not a string. Extract
+   the numeric value from whatever unit or phrasing the user used and put
+   only that number here** -- e.g. the user saying "90%" becomes
+   `"threshold": 90` (not `"90"` and not `"90%"`); "85 degrees" becomes
+   `"threshold": 85`; "2GB" becomes `"threshold": 2` if the underlying
+   metric is in GB, or `"threshold": 2147483648` only if the metric is in
+   bytes AND the conversion is unambiguous from the metric's documented
+   Unit -- if the unit conversion is at all ambiguous, treat this as a
+   missing parameter and use `declined`/`parameter_requires_clarification`
+   instead. Same for `alert_rule.for_duration` (how long the condition
+   must hold before firing): if the user didn't state one, ask for it
+   rather than inventing a plausible-sounding duration like "5m". The
+   `for_duration` field IS a string (e.g. `"5m"`), unlike `threshold`.
+4. If (and only if) the condition query was successfully built per step 1
+   AND the user supplied both a threshold value and a comparison operator,
+   assemble
+   `status: "alert_rule_proposed"` (Section 9) with `alert_rule.title`,
+   `alert_rule.condition_query`, `alert_rule.comparison` (an object with
+   `operator` and `threshold`, verbatim from the user), and
+   `alert_rule.for_duration` (verbatim from the user). Leave
+   `alert_rule.folder` empty/omitted and set `alert_rule.datasource_uid` to
+   `null` -- both are filled in deterministically by the surrounding
+   application afterward (Section 12.5); inventing either yourself will
+   fail validation.
+
+This entire capability applies ONLY when action_intent is
+"propose_alert_rule" (given to you explicitly below). Never produce
+`status: "alert_rule_proposed"` for an ordinary read question, and never let
+its existence change how you would otherwise handle a request to silence,
+delete, or modify an EXISTING alert -- that was already resolved as
+`out_of_scope_action` by the routing phase before you ever saw this
+request.
+"""
+
+
+def _build_generator_instructions(settings: Settings, action_intent: str) -> str:
+    """Mirrors _build_router_instructions' gating: the alert-rule-creation
+    addendum is appended ONLY when the feature flag is on AND this specific
+    request was flagged by the Router as alert-rule creation. An ordinary
+    read question -- even on a deployment with the flag enabled -- gets the
+    exact same `_GENERATOR_INSTRUCTIONS` string every prior version of this
+    pipeline used, unchanged."""
+    if settings.alert_rule_creation_enabled and action_intent == _ALERT_ACTION_INTENT:
+        return _GENERATOR_INSTRUCTIONS + _ALERT_GENERATOR_ADDENDUM
+    return _GENERATOR_INSTRUCTIONS
+
 
 async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
                           ctx: GeneratorContext, skill_index: SkillIndex, settings: Settings,
-                          context: PipelineContext) -> dict:
-    sections = "\n\n".join([
-        skill_index.section("## 5."),
-        skill_index.section("## 6."),
-        skill_index.section("## 7."),
-        skill_index.section("## 8."),
-        skill_index.section("## 9."),
-    ])
+                          context: PipelineContext, action_intent: str = "read_query") -> dict:
+    section_headers = ["## 5.", "## 6.", "## 7.", "## 8.", "## 9."]
+    if settings.alert_rule_creation_enabled and action_intent == _ALERT_ACTION_INTENT:
+        section_headers.append("## 12.")
+    sections = "\n\n".join(skill_index.section(h) for h in section_headers)
 
     ref_blocks = "\n\n".join(f"--- {path} ---\n{text}" for path, text in ctx.reference_texts.items())
     overview_blocks = "\n\n".join(f"--- {path} ---\n{text}" for path, text in ctx.overview_texts.items())
@@ -491,6 +756,7 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
         prompt_parts.append(f"\n{ctx.attributes_block}")
     prompt_parts.append(f"\nUser question: {question}")
     prompt_parts.append(f"\npanic_mode is currently: {panic_mode}")
+    prompt_parts.append(f"\naction_intent (from the routing phase): {action_intent!r}")
     if context.previous_question:
         prompt_parts.append(
             f"\nThis is a follow-up clarification. Original question: "
@@ -501,7 +767,7 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
     prompt = "\n\n".join(prompt_parts)
     response = llm_client.call_llm_json(
         prompt=prompt,
-        system_instruction=_GENERATOR_INSTRUCTIONS,
+        system_instruction=_build_generator_instructions(settings, action_intent),
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
     )

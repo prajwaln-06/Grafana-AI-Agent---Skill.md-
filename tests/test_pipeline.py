@@ -319,3 +319,138 @@ def test_opensearch_side_of_generator_context_only_built_when_matched(skill_inde
         _run(pipeline.run_pipeline("load average", skill_index, settings))
 
     assert not mock_field_discovery.called
+
+
+# ---- Alert-rule creation (SKILL.md Section 12) ----------------------------------
+
+
+def _alert_settings(skills_root, **overrides):
+    from app.config import Settings
+    defaults = dict(
+        gemini_api_key="test-key-not-real", skills_root=skills_root,
+        prometheus_url="http://localhost:9090", opensearch_url="http://localhost:9600",
+        alert_rule_creation_enabled=True, grafana_url="http://localhost:3000",
+        grafana_service_account_token="glsa_test", grafana_default_folder_uid="alerts-folder",
+        grafana_default_datasource_uid="prom-uid",
+    )
+    defaults.update(overrides)
+    return Settings(**defaults)
+
+
+def test_alert_rule_creation_disabled_by_default_forces_out_of_scope_action(skill_index, settings):
+    """Defense-in-depth: even if the Router somehow returns action_intent
+    'propose_alert_rule' while the feature flag is off, the pipeline must
+    force a deterministic out_of_scope_action response -- the EXACT
+    behavior this request would have gotten before Section 12 existed --
+    and must NEVER call the Generator (only 1 LLM call)."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [], "action_intent": "propose_alert_rule",
+    })
+    assert settings.alert_rule_creation_enabled is False
+    with patch.object(llm_client, "call_llm_json", return_value=router_resp) as mock_call:
+        result = _run(pipeline.run_pipeline("alert me if CPU exceeds 90%", skill_index, settings))
+
+    assert result["mode"] == "single"
+    assert result["status"] == "out_of_scope_action"
+    assert mock_call.call_count == 1  # Generator never ran
+
+
+def test_router_prompt_omits_alert_addendum_when_flag_disabled(skill_index, settings):
+    """The highest-risk regression surface: when the flag is off, the
+    Router's system prompt must be byte-for-byte the base instructions --
+    no mention of action_intent or alert-rule creation at all."""
+    instructions = pipeline._build_router_instructions(settings)
+    assert instructions == pipeline._ROUTER_INSTRUCTIONS
+    assert "action_intent" not in instructions
+
+
+def test_router_prompt_includes_alert_addendum_when_flag_enabled(skill_index, settings):
+    enabled = _alert_settings(settings.skills_root)
+    instructions = pipeline._build_router_instructions(enabled)
+    assert "action_intent" in instructions
+    assert "propose_alert_rule" in instructions
+    # Base instructions are still present verbatim, only extended:
+    assert instructions.startswith(pipeline._ROUTER_INSTRUCTIONS)
+
+
+def test_generator_prompt_omits_alert_addendum_for_ordinary_read_question_even_when_enabled(skill_index, settings):
+    """Flag on, but THIS request wasn't tagged as alert-rule creation --
+    the Generator must get the plain, unmodified instructions."""
+    enabled = _alert_settings(settings.skills_root)
+    instructions = pipeline._build_generator_instructions(enabled, "read_query")
+    assert instructions == pipeline._GENERATOR_INSTRUCTIONS
+
+
+def test_generator_prompt_includes_alert_addendum_only_when_both_enabled_and_intent_set(skill_index, settings):
+    enabled = _alert_settings(settings.skills_root)
+    instructions = pipeline._build_generator_instructions(enabled, "propose_alert_rule")
+    assert "alert_rule_proposed" in instructions
+    assert instructions.startswith(pipeline._GENERATOR_INSTRUCTIONS)
+
+
+def test_alert_rule_proposed_gets_default_folder_and_null_datasource_uid_injected(skill_index, settings):
+    """SKILL.md Section 12.5: folder/datasource_uid are never trusted from
+    the Generator -- this pipeline must inject the deployment's configured
+    default folder and force datasource_uid to null before validation,
+    regardless of what the Generator supplied for either."""
+    enabled = _alert_settings(settings.skills_root)
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [], "action_intent": "propose_alert_rule",
+    })
+    gen_contract = {
+        "mode": "single", "status": "alert_rule_proposed",
+        "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+        "data_source": "prometheus",
+        "alert_rule": {
+            "title": "High CPU utilization",
+            "condition_query": '100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)',
+            "comparison": {"operator": ">", "threshold": 90},
+            "for_duration": "5m",
+            "folder": None,  # deliberately omitted by the Generator
+            "datasource_uid": "should-be-overwritten",  # deliberately wrong
+        },
+        "explanation": "Derived from the verified idle-based CPU utilization expression. Proposal only.",
+    }
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_cpu_seconds_total": []}):
+        result = _run(pipeline.run_pipeline("alert me if CPU exceeds 90% for 5m", skill_index, enabled))
+
+    assert result["status"] == "alert_rule_proposed"
+    assert result["alert_rule"]["folder"] == "alerts-folder"
+    assert result["alert_rule"]["datasource_uid"] is None
+
+
+def test_alert_rule_proposed_missing_threshold_is_not_auto_created(skill_index, settings):
+    """A malformed/incomplete alert_rule_proposed (no comparison object at
+    all) must fail deterministic validation rather than being papered
+    over -- this pipeline never invents a threshold either."""
+    enabled = _alert_settings(settings.skills_root)
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [], "action_intent": "propose_alert_rule",
+    })
+    gen_contract = {
+        "mode": "single", "status": "alert_rule_proposed",
+        "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+        "data_source": "prometheus",
+        "alert_rule": {
+            "title": "High CPU utilization",
+            "condition_query": '100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)',
+            "for_duration": "5m",
+            "folder": None,
+            "datasource_uid": None,
+        },
+        "explanation": "Missing comparison -- should have been declined/parameter_requires_clarification instead.",
+    }
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_cpu_seconds_total": []}):
+        result = _run(pipeline.run_pipeline("alert me on CPU", skill_index, enabled))
+
+    assert result["status"] == pipeline.INTERNAL_VALIDATION_FAILED_STATUS

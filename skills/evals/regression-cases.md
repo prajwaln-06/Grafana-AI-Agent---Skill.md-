@@ -103,14 +103,27 @@ previously used as an unsupported-measurement example. Load average
 resolves via `references/node-exporter/cpu.md` — see case 1 for its current
 expected routing behavior.)*
 
-## 8. Prevention of invented metric relationships / unverified query semantics
+## 8. Counter-increase checks vs. unit-dependent interpretation (DCGM_FI_DEV_POWER_VIOLATION)
 
 **Input:** "Is the GPU being power-throttled right now?"
+**Expected:** `status: "ok"` — resolves to `DCGM_FI_DEV_POWER_VIOLATION`
+(unambiguous), `measurement_used.type: "raw_metric"`. The query checks whether
+the Counter increased over a recent window (e.g. `increase(...[5m]) > 0`),
+which does not depend on knowing the Counter's exact exposed unit. Must not
+produce `unsupported_metric` merely because the unit is unverified — the
+unit-verification rule blocks unit-*dependent* interpretation (durations,
+conversions), not unit-*independent* increase checks. Must not produce an
+invented `measurement_used.type` value like `raw_counter`, `raw_index`, or
+`raw_cluster_or_counter` — any PromQL transformation applied to a single
+source metric is always `raw_metric` per §5 Principle 7.
+
+**Input (separate case, unit-dependent):** "How many seconds has the GPU been
+power throttled?"
 **Expected:** `status: "unsupported_metric"` for `DCGM_FI_DEV_POWER_VIOLATION`
-specifically — its unit is explicitly unverified in the source reference, and
-Principle 8 (§5) blocks query construction for it regardless of how confidently
-the metric itself was identified. This must not degrade to `ok` even though the
-metric identification is unambiguous.
+— the user is asking for a specific duration in seconds, which requires knowing
+the Counter's exposed unit. That unit is explicitly unverified in
+`thermal.md`'s metric definition. Must not invent a unit assumption (e.g.
+"the counter is probably in microseconds") to answer this.
 
 ## 9. Prevention of invented metric names / labels
 
@@ -484,3 +497,126 @@ ambiguity handling (link/direction unspecified beyond "NVLink" narrows away
 PCIe but not TX/RX). Must not additionally surface
 `reliability.md`'s NVLink health metrics as candidates — "traffic" is not
 ambiguous with "health" per the Cross-Domain Semantic Distinctions entry.
+
+## 34. Alert-rule creation (Section 12) — narrow exception vs. unchanged out-of-scope boundary
+
+**Input:** "Create an alert if CPU usage on node-1 exceeds 90% for 5 minutes."
+**Expected** (`alert_rule_creation_enabled = true`): `status:
+"alert_rule_proposed"`. Resolves `node_cpu_seconds_total` via `cpu.md`'s
+Step 3 metric-selection procedure — unchanged from a read question — then
+builds `alert_rule.condition_query` via the exact same Step 5 procedure
+Section 12.4 now specifies, which for this metric means reusing its verified
+Query Example expression. `alert_rule.condition_query` must reuse that exact
+base expression (scoped to `node-1` via a runtime-confirmed `instance`
+label, per Principle 9); `alert_rule.comparison` must be `{"operator": ">",
+"threshold": 90}` and `alert_rule.for_duration` must be `"5m"`, all taken
+verbatim from the request, never a "reasonable-sounding" substitute. A
+session id is returned; nothing is created in Grafana by this response —
+§12.1's separate confirmation step is required before anything is written.
+
+**Input:** "Alert me if GPU temperature gets too high."
+**Expected:** No threshold value or comparison direction stated →
+`status: "declined"`, `reason: "parameter_requires_clarification"`. Section
+12.4 never invents a threshold merely because "too high" is directionally
+unambiguous — the numeric value and comparison operator must both come from
+the user, with no exception for a request that sounds clear in plain
+English.
+
+**Input:** "Create an alert if double-bit ECC error volume on GPU 0 goes
+above 5, for 10 minutes."
+**Expected:** `status: "alert_rule_proposed"`. `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`
+resolves cleanly (same metric as case 32), and per the post-1.3 §12.4 its
+alert condition is built via the same Step 5 procedure already used for the
+read question in case 32 — this metric's query/result semantics are
+established (a Counter with no `rate()`/`increase()` documented for it, per
+its own Metric-Specific Query/Result Semantics), so it is NOT blocked by
+Principle 8 the way a genuinely-unverified metric (e.g. a unit-dependent
+reading of `DCGM_FI_DEV_POWER_VIOLATION`, see case 8) is. `alert_rule.
+condition_query` must be built the same way case 32's read query was (the
+raw counter, scoped to GPU 0 via a runtime-confirmed label), never copied
+from `node_cpu_seconds_total`'s CPU expression or any other metric's
+condition by analogy. `alert_rule.comparison` must be `{"operator": ">",
+"threshold": 5}` and `alert_rule.for_duration` must be `"10m"`, verbatim
+from the request. This case demonstrates alert-rule creation is no longer
+CPU-only: it now covers every metric whose read-query construction already
+succeeds, gated only by the same Principle 8 check that already gates reads
+— see case 8's negative-control-style pairing below for a metric that
+genuinely IS still blocked.
+
+**Input (negative control — genuinely unsupported):** "Create an alert if
+the GPU has been power-throttled for more than 30 seconds."
+**Expected:** `status: "unsupported_metric"`. `DCGM_FI_DEV_POWER_VIOLATION`
+resolves unambiguously, but this specific interpretation asks for a
+duration in seconds, which requires the Counter's exposed unit — explicitly
+unverified in `thermal.md` (same blocking condition as case 8's
+unit-dependent read-query example). Because Step 5 itself would block this
+exact interpretation for a read question, §12.4 blocks it identically for
+alert-rule creation — not because alerting has a stricter bar, but because
+it has the same one. A differently-phrased request that only needs a
+Counter-increase check (e.g. "alert me if the GPU is power-throttled at
+all in the next hour") is NOT blocked by this same metric, mirroring case
+8's unit-independent increase-check example.
+
+**Input:** "Silence the CPU alert on node-1."
+**Expected:** `status: "out_of_scope_action"`. Must **not** be reinterpreted
+as a request to create a new, differently-scoped alert merely because §12
+now permits alert-rule *creation* — silencing an EXISTING alert remains
+fully out of scope with no exception, exactly as before §12 existed. If a
+request could plausibly be read either way (creation vs. mutating something
+existing), the safer failure mode (`out_of_scope_action`) applies.
+
+**Input:** "Delete the alert rule for low disk space."
+**Expected:** `status: "out_of_scope_action"` — same reasoning as above;
+deleting is a mutation of something that already exists, not a creation
+request, regardless of phrasing.
+
+**Input:** "Turn off the GPU temperature alert, then set up a new one for 85°C instead."
+**Expected:** `status: "out_of_scope_action"` for the whole request, not a
+`mode: "multi"` split into one out_of_scope_action entry and one
+alert_rule_proposed entry. The request matches Step 1's silence/mutate
+gating condition ("turn off the GPU temperature alert"), and Step 1 stops
+the entire construction procedure immediately on the first matching gate
+condition (§6) — it never proceeds far enough to also consider the
+"set up a new one" clause. This is the existing gate-short-circuit
+behavior applied unchanged, not a new rule specific to alert-rule creation.
+
+**Input:** "Create an alert if CPU usage exceeds 90%." (re-run with
+`alert_rule_creation_enabled = false`, this deployment's default)
+**Expected:** `status: "out_of_scope_action"` — byte-for-byte the same
+classification this request would have received before §12 existed. With
+the feature flag off, the Router's prompt never even mentions alert-rule
+creation or the `action_intent` field at all
+(`app/pipeline.py`'s `_build_router_instructions`), so this is not a
+special case requiring its own reasoning — it is the original, unmodified
+behavior, which is the entire point of gating the addendum behind the flag
+rather than behind in-prompt reasoning about deployment configuration.
+
+## 35. `query_type` (Section 8/9) — instant value vs. range/trend
+
+**Input:** "What is the CPU utilization right now?"
+**Expected:** `status: "ok"`, `query_type: "instant"`, `time_range: {"time":
+"now"}` (not `{"from", "to", "step"}`). This phrasing asks for a single
+current value with no implied trend — before the `query_type` field existed
+in the output contract, this resolved to a short-window range query
+(effectively a one-point matrix) because the Generator had no way to signal
+an instant read at all; `execution.series[].points` must now come back as a
+single point per series via Prometheus's instant-query endpoint, not a
+short window standing in for one.
+
+**Input:** "How much memory is available?"
+**Expected:** `status: "ok"`, `query_type: "instant"` — same reasoning:
+"how much X is there" asks for a present value, not a trend.
+
+**Input:** "Has CPU utilization been high over the last hour?"
+**Expected:** `status: "ok"`, `query_type: "range"`, `time_range: {"from":
+"now-1h", "to": "now", "step": "<...>"}`. Explicit trend/window language
+("over the last hour," "been high") means a range query is correct here —
+this case is the negative control confirming the instant default introduced
+above does not over-trigger on genuinely trend-shaped questions.
+
+**Input:** "What was CPU utilization on node-3 at 3pm yesterday?"
+**Expected:** `status: "ok"`, `query_type: "instant"`, `time_range: {"time":
+"now-<N>h"}` (or another single resolvable point expressing "3pm
+yesterday" per `prometheus-fundamentals.md`'s Time Expression Grammar) — a
+single named point in the past is still an instant read, not a range,
+even though it isn't literally `"now"`.

@@ -5,3 +5,9 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.adk/
+app/.adk/
+node_modules/
+ui/node_modules/
+ui/dist/
+.DS_Store

@@ -23,7 +23,14 @@ python3 scripts/smoke_test_gemini.py       # is the SDK call itself working?
 python3 scripts/smoke_test_prometheus.py   # is Prometheus reachable the way the code expects?
 ```
 
-Once both pass, work through `skills/evals/regression-cases.md` — the skill
+If you're also turning on `ALERT_RULE_CREATION_ENABLED` (SKILL.md §12), run
+one more, first:
+
+```bash
+python3 scripts/smoke_test_grafana.py      # is Grafana reachable, and do the folder/datasource UIDs actually exist?
+```
+
+Once these pass, work through `skills/evals/regression-cases.md` — the skill
 package's own hand-authored test questions, covering routing, ambiguity,
 comparisons, panic mode, and label-fabrication prevention. That's the
 concrete, ready-made test plan; no need to invent test questions from
@@ -39,11 +46,21 @@ cp .env.example .env                  # fill in a real GEMINI_API_KEY
 # Confirm PROMETHEUS_URL / OPENSEARCH_URL match your local setup
 # (defaults: http://localhost:9090, http://localhost:9600)
 
-uvicorn app.api.main:app --reload --port 8000
+python run_server.py
 ```
 
 Then:
 
+**PowerShell (Windows):**
+```powershell
+# Using Invoke-RestMethod (recommended for PowerShell)
+Invoke-RestMethod -Uri http://localhost:8000/api/v1/query -Method Post -ContentType "application/json" -Body '{"question": "compare CPU utilization on node-1 and node-2 over the last hour"}'
+
+# Or using curl.exe (call curl.exe explicitly in PowerShell to bypass the Invoke-WebRequest alias)
+curl.exe -s -X POST http://localhost:8000/api/v1/query -H "Content-Type: application/json" -d "{\"question\": \"compare CPU utilization on node-1 and node-2 over the last hour\"}"
+```
+
+**Bash / macOS / Linux:**
 ```bash
 curl -X POST http://localhost:8000/api/v1/query \
   -H 'Content-Type: application/json' \
@@ -64,7 +81,10 @@ here, since it drifts every time a test is added.
 ## Project layout
 
 ```
+run_server.py          FastAPI wrapper instantiating the ADK ApiServer and
+                         overlaying compatibility routes.
 app/
+  agent.py              Defines the custom ADK Agent ObservabilityQueryBuilderAgent.
   skill_index.py        Parses SKILL.md's routing table + sections. The
                          single source of truth for "what does this skill
                          cover and where does each piece live" -- nothing
@@ -89,17 +109,16 @@ app/
                           entry against the right backend, per-entry
                           failure isolation.
   llm_client.py           The only module that calls the Gemini API.
+  grafana_client.py       Thin wrapper around Grafana's Alerting
+                          Provisioning HTTP API. The ONLY module that ever
+                          writes to Grafana, and only ever called from
+                          run_server.py's confirmation endpoint --
+                          never from pipeline.py/executor.py. See SKILL.md
+                          §12 and HANDOFF.md's "Alert Rule Creation" section.
   pipeline.py             Router -> Generator -> Validator orchestration,
                           plus partial-datasource-coverage handling (see
                           pipeline.py's module docstring).
-  session_store.py        In-memory clarification/follow-up session store.
   config.py                Typed settings (env vars, see .env.example).
-  api/
-    main.py                FastAPI app, startup, CORS, error handling.
-    routes_query.py        POST /api/v1/query
-    routes_health.py       /healthz, /readyz, /api/v1/capabilities
-    routes_admin.py         POST /api/v1/admin/reload-skill
-    schemas.py              Request/response models.
 skills/                    The observability-query-builder skill package
                             (SKILL.md + references/). Replace this directory
                             wholesale to update the skill; nothing in app/
@@ -130,6 +149,31 @@ is NOT executed yet — send it back as:
 See `HANDOFF.md` for the full, worked-example breakdown of every shape
 `result` can take.
 
+### `POST /api/v1/alerts/confirm`
+
+SKILL.md §12's confirmation step -- the only endpoint that ever creates
+anything in Grafana. Only reachable when `ALERT_RULE_CREATION_ENABLED=true`
+(see `.env.example`); disabled by default. Takes ONLY a `session_id` from a
+prior `alert_rule_proposed` result, never a restated rule payload:
+
+```json
+{"session_id": "<the id returned alongside an alert_rule_proposed result>"}
+```
+
+```json
+{"session_id": "<...>", "confirm": false}
+```
+
+`confirm` defaults to `true`. Setting it to `false` discards the proposal
+without creating anything -- the session is consumed either way (single-use).
+Returns `{"status": "created", "rule_uid": "...", "deeplink": "..."}` on
+success, or a 4xx/5xx with an explanatory `detail` otherwise (expired/
+unknown session → 410; session isn't a pending alert proposal → 409; feature
+disabled → 403; Grafana misconfigured → 500; Grafana unreachable/erroring →
+502; a rule with the same title/folder already exists → 409). See
+`HANDOFF.md`'s "Alert Rule Creation" section for the full flow and required
+Grafana-side setup.
+
 ### `GET /healthz` / `GET /readyz`
 
 Liveness / readiness. `/readyz` confirms the skill package loaded.
@@ -159,3 +203,10 @@ question to OpenSearch data. A question that needs OpenSearch-backed data
 gets an explicit `unmapped` result explaining that, rather than silently
 failing or being dropped — including when it's only PART of a larger
 question that also needs Prometheus data (see `HANDOFF.md`).
+
+Alert-rule CREATION (SKILL.md §12) is implemented end-to-end but disabled by
+default (`ALERT_RULE_CREATION_ENABLED=false`) — see `.env.example`'s
+`GRAFANA_*` block and `HANDOFF.md`'s "Alert Rule Creation" section before
+turning it on. This does not extend to silencing, deleting, or modifying an
+existing alert, which remains fully out of scope with no exception,
+unaffected by this flag either way.
