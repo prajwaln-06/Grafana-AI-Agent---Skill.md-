@@ -30,4 +30,5 @@ def settings(skills_root):
         skills_root=skills_root,
         prometheus_url="http://localhost:9090",
         opensearch_url="http://localhost:9600",
+        alert_rule_creation_enabled=False,
     )

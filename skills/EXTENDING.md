@@ -301,6 +301,21 @@ including the pre-migration architecture's numbering, for provenance.
 
 **Current architecture (this skill):**
 
+* **1.3** — Added the `query_type` output field (§8/§9) so an instant-value
+  question resolves to a true Prometheus instant query instead of always
+  being forced through a range/matrix query. Rewrote §12.4 so an alert
+  rule's `condition_query` is built via the same Step 5 procedure as an
+  ordinary read query, instead of requiring a separate, per-metric
+  hand-verified "Alert query/threshold" field — alert-rule creation now
+  covers every metric this skill can already build a read query for, not
+  only `node_cpu_seconds_total`. Removed the "Alert query/threshold" field
+  from `assets/templates/domain-reference-template.md` and from every
+  existing metric definition.
+* **1.2** — Added the narrow, explicit alert-rule-creation exception (§12):
+  this skill may PROPOSE creation of a brand-new Grafana alert rule for an
+  already-covered metric, subject to a separate, explicit user confirmation
+  step this skill never triggers itself. Added the `alert_rule_proposed`
+  output status (§9).
 * **1.1** — Dynamic-label-sourcing finalization pass: replaced static
   exporter/domain label catalogs with runtime-sourced label keys; added the
   Node Exporter Load and Filesystem extension (`cpu.md` extended,

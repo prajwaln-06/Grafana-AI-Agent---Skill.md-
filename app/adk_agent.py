@@ -24,6 +24,11 @@ from app.proposals.tools import (
     propose_dashboard,
     resolve_dashboard_intent,
 )
+from app.grafana_tools.wrapper import (
+    list_alert_rules,
+    propose_alert_rule,
+    resolve_alert_intent,
+)
 
 logger = logging.getLogger("grafana_ai.adk_agent")
 
@@ -76,6 +81,27 @@ For a request to create, update, or remove a dashboard:
 -> Present its structured proposal for review.
 -> Explain that modifications and explicit application approval happen in the proposal UI.
 -> This agent has no direct mutation tool; never claim the dashboard was created from proposal output.
+
+ALERT RULES
+For any request about creating, viewing, listing, or managing Grafana alert rules:
+-> Call resolve_alert_intent(request="<the user's exact request>") first to classify the intent.
+-> For LIST ("show alerts", "list alert rules", "what alerts exist"):
+   Call list_alert_rules() and summarize results.
+-> For CREATE ("alert when...", "notify me if...", "create an alert"):
+   Call propose_alert_rule(request="<the user's exact request>").
+   Present the proposal details clearly: metric, PromQL, threshold, duration, severity, folder.
+   Explain that the alert has NOT been created yet — the user must approve it via the
+   /api/alert-proposals/ID/approve endpoint, then execute via /api/alert-proposals/ID/execute.
+-> For DELETE / UPDATE: call propose_alert_rule with the full request; the backend handles the intent.
+
+Alert key info to extract and relay to the user from the proposal:
+- metric being monitored (cpu, memory, disk, etc.)
+- the exact PromQL query that will be evaluated
+- condition and threshold (e.g. greater than 90%)
+- for duration (how long it must persist before firing)
+- severity label (critical, warning, info)
+- which Grafana folder the rule will live in
+- the proposalId they need to approve
 
 RULES
 - For greetings or casual conversation: respond naturally without using any tools.
@@ -143,6 +169,9 @@ def get_adk_agent() -> LlmAgent:
                 query_opensearch_logs,
                 propose_dashboard,
                 resolve_dashboard_intent,
+                list_alert_rules,
+                propose_alert_rule,
+                resolve_alert_intent,
             ],
         )
     return _agent_instance
@@ -225,7 +254,7 @@ def run_adk_agent(
                         final_text = part.text
                         logger.info("Agent final response (author=%s): %s", author, part.text[:200])
 
-            if tool_outcome is not None:
+            if proposal_id is not None:
                 break
     except Exception as e:
         logger.error("Error during ADK agent execution: %s", e, exc_info=True)
@@ -240,6 +269,14 @@ def run_adk_agent(
     }
 
     raw_jsons = get_raw_json()
+
+    if not proposal_id and any(w in request.lower() for w in ["dashboard", "create", "make", "propose"]):
+        try:
+            tool_outcome = propose_dashboard(request=request, target=target or "", time_range=time_range or "1h")
+            if tool_outcome and tool_outcome.get("proposalId"):
+                proposal_id = tool_outcome["proposalId"]
+        except Exception as exc:
+            logger.debug("Direct dashboard proposal fallback skipped: %s", exc)
 
     if proposal_id:
         return {

@@ -61,10 +61,17 @@ async def get_session_manager() -> MCPSessionManager:
             grafana_url = os.environ.get("GRAFANA_URL", "http://localhost:3000")
             grafana_token = os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN", "glsa_local_dummy_token")
 
-            mcp_args = [
-                "mcp-grafana",
-                f"--enabled-tools={_ENABLED_TOOLS}",
-            ]
+            import shutil
+            venv_bin = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".venv", "bin", "mcp-grafana")
+            local_bin = venv_bin if os.path.exists(venv_bin) else shutil.which("mcp-grafana")
+            
+            if local_bin:
+                mcp_cmd = local_bin
+                mcp_args = [f"--enabled-tools={_ENABLED_TOOLS}"]
+            else:
+                mcp_cmd = "uvx"
+                mcp_args = ["mcp-grafana", f"--enabled-tools={_ENABLED_TOOLS}"]
+
             if os.environ.get("GRAFANA_MCP_ENABLE_WRITE", "").lower() not in {
                 "1", "true", "yes", "on"
             }:
@@ -72,7 +79,7 @@ async def get_session_manager() -> MCPSessionManager:
 
             connection_params = StdioConnectionParams(
                 server_params=StdioServerParameters(
-                    command="uvx",
+                    command=mcp_cmd,
                     args=mcp_args,
                     env={
                         "GRAFANA_URL": grafana_url,
@@ -82,7 +89,7 @@ async def get_session_manager() -> MCPSessionManager:
                 timeout=30,
             )
             _session_manager = MCPSessionManager(connection_params=connection_params)
-            logger.info("Initialized Grafana MCP session manager")
+            logger.info("Initialized Grafana MCP session manager with cmd=%s", mcp_cmd)
 
     return _session_manager
 

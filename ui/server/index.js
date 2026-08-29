@@ -33,7 +33,8 @@ const OPENSEARCH_URL = process.env.OPENSEARCH_URL || "";
 const OPENSEARCH_INDEX = process.env.OPENSEARCH_INDEX || "logs-*";
 const OPENSEARCH_TIMESTAMP_FIELD =
   process.env.OPENSEARCH_TIMESTAMP_FIELD || "@timestamp";
-const ADK_SERVICE_URL = process.env.ADK_SERVICE_URL || process.env.BACKEND_URL || "http://127.0.0.1:8000";
+const GRAFANA_URL = process.env.GRAFANA_URL || "http://localhost:3000";
+const ADK_SERVICE_URL = process.env.ADK_SERVICE_URL || process.env.BACKEND_URL || "http://127.0.0.1:8008";
 const ADK_PROXY_TIMEOUT_MS = readPositiveIntEnv("ADK_PROXY_TIMEOUT_MS", 5000, 60000);
 const BACKEND_TIMEOUT_MS = readPositiveIntEnv("BACKEND_TIMEOUT_MS", 12000, 60000);
 const MAX_ADK_PROXY_BYTES = 5 * 1024 * 1024;
@@ -588,10 +589,12 @@ app.post("/api/adk/chat", async (req, res) => {
 
     const remote = await proxyAdk("/api/adk/chat", {
       method: "POST",
-      timeoutMs: 5000,
-      body: JSON.stringify({ message: normalizedMessage, use_llm: false }),
+      timeoutMs: 30000,
+      body: JSON.stringify({ message: normalizedMessage, use_llm: true }),
     });
-    if (remote && remote.status !== "error") return res.json(remote);
+    if (remote && remote.statusCode >= 200 && remote.statusCode < 300 && remote.data?.status !== "error") {
+      return res.json(remote.data);
+    }
 
     const result = await runAdkFlow(normalizedMessage);
     res.json(result);
@@ -607,9 +610,10 @@ app.all("/api/proposals*", async (req, res) => {
   try {
     const remote = await proxyAdk(req.originalUrl, {
       method: req.method,
+      timeoutMs: 30000,
       body: ["POST", "PUT", "PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
     });
-    if (remote) return res.json(remote);
+    if (remote) return res.status(remote.statusCode).json(remote.data);
     res.status(502).json({ error: "Backend proposal service unreachable" });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -620,10 +624,35 @@ app.all("/api/conversations*", async (req, res) => {
   try {
     const remote = await proxyAdk(req.originalUrl, {
       method: req.method,
+      timeoutMs: 30000,
       body: ["POST", "PUT", "PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
     });
-    if (remote) return res.json(remote);
+    if (remote) return res.status(remote.statusCode).json(remote.data);
     res.status(502).json({ error: "Backend conversation service unreachable" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.all("/api/alert-proposals*", async (req, res) => {
+  try {
+    const remote = await proxyAdk(req.originalUrl, {
+      method: req.method,
+      timeoutMs: 30000,
+      body: ["POST", "PUT", "PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
+    });
+    if (remote) return res.status(remote.statusCode).json(remote.data);
+    res.status(502).json({ error: "Backend alert proposal service unreachable" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/alerts", async (req, res) => {
+  try {
+    const remote = await proxyAdk(req.originalUrl, { method: "GET" });
+    if (remote) return res.json(remote);
+    res.status(502).json({ error: "Backend alerts service unreachable" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1039,15 +1068,13 @@ async function proxyAdk(path, init = {}) {
           payload += chunk;
         });
         response.on("end", () => {
-          if ((response.statusCode || 500) < 200 || (response.statusCode || 500) >= 300) {
-            resolve(null);
-            return;
-          }
+          let parsed;
           try {
-            resolve(JSON.parse(payload));
+            parsed = payload ? JSON.parse(payload) : {};
           } catch {
-            resolve(null);
+            parsed = { raw: payload };
           }
+          resolve({ statusCode: response.statusCode || 200, data: parsed });
         });
       }
     );

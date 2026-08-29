@@ -135,6 +135,19 @@ Repeat this shape for every metric in the domain:
   example is currently available. Do not invent a literal query example." —
   never leave this ambiguous by omission.
 
+No separate "Alert query/threshold" field is needed. SKILL.md §12.4 builds an
+alert rule's `condition_query` using the exact same Step 5 construction
+procedure as an ordinary read query for this metric — driven by the Query
+examples and Metric-Specific Query/Result Semantics fields above, plus
+runtime-confirmed label keys (Principle 9) — so this metric becomes alertable
+automatically the moment its ordinary read-query construction is established,
+with no per-metric alert-specific content to author or keep in sync. The only
+thing that blocks alert-condition construction is the same thing that already
+blocks read-query construction: this metric's query/result semantics
+themselves stated as unverified (SKILL.md §5 Principle 8, e.g. an unverified
+exposed unit) — if that applies, it already lives in Metric-Specific
+Query/Result Semantics above and needs no restating here.
+
 ## Domain-Specific Guardrails
 
 Guardrails unique to this domain — do not repeat exporter-wide guardrails from

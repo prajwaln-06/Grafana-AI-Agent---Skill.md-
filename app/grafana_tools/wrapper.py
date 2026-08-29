@@ -15,6 +15,11 @@ from .scoring import score_and_select
 from .datasource import resolve_datasource, datasources_summary, _SUPPORTED_DS_TYPES
 from .prometheus import execute_prometheus, format_prometheus_result
 from .opensearch import execute_opensearch, normalize_opensearch_result
+from .alerting import (
+    list_alert_rules as _list_alert_rules_impl,
+    propose_alert_rule as _propose_alert_rule_impl,
+    resolve_alert_intent as _resolve_alert_intent_impl,
+)
 
 _RAW_JSON_RESULTS = []
 
@@ -386,3 +391,35 @@ async def _query_opensearch_logs_async(
 
 
 query_logs = query_opensearch_logs
+
+
+# ---------------------------------------------------------------------------
+# Alert rule tools — thin wrappers that delegate to alerting.py
+# ---------------------------------------------------------------------------
+
+def list_alert_rules() -> str:
+    """List all Grafana alert rules. Returns a human-readable summary of every alert rule
+    currently configured in this Grafana instance."""
+    return _list_alert_rules_impl()
+
+
+def propose_alert_rule(request: str) -> dict:
+    """Parse a natural-language alert request and propose an AlertRuleIR for human review.
+
+    Extracts metric, threshold, operator, duration, severity, and optional target from the
+    request, generates PromQL, and stores the proposal. No Grafana write occurs here —
+    the user must approve via the /api/alert-proposals endpoint.
+
+    Examples:
+        propose_alert_rule("alert when cpu usage > 90% for more than 2 hours")
+        propose_alert_rule("create a critical alert if memory exceeds 85% on node-01 for 30 minutes")
+        propose_alert_rule("warn me when disk usage is above 80% for 1 hour")
+    """
+    return _propose_alert_rule_impl(request)
+
+
+def resolve_alert_intent(request: str) -> dict:
+    """Classify an alert-related request as CREATE, LIST, UPDATE, or DELETE.
+    Call this before other alert tools to determine the correct action."""
+    return _resolve_alert_intent_impl(request)
+

@@ -14,6 +14,11 @@ from app.grafana_tools.dashboard_writing import (
     execute_approved_mutation,
     refresh_preview,
 )
+from app.grafana_tools.alerting import (
+    ALERT_PROPOSALS,
+    execute_approved_alert,
+    list_alert_rules,
+)
 
 logger = logging.getLogger("grafana_ai.routes_proposals")
 router = APIRouter(tags=["proposals"])
@@ -255,3 +260,70 @@ async def modify_proposal(proposal_id: str, req: ModifyRequest):
         raise HTTPException(status_code=404, detail="Proposal not found")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Alert rule proposal routes
+# ---------------------------------------------------------------------------
+
+@router.get("/api/alerts")
+async def get_alerts():
+    return {"alerts": list_alert_rules()}
+
+
+@router.get("/api/alert-proposals")
+async def list_alert_proposals():
+    return {"proposals": ALERT_PROPOSALS.list_all()}
+
+
+@router.get("/api/alert-proposals/{proposal_id}")
+async def get_alert_proposal(proposal_id: str):
+    try:
+        return ALERT_PROPOSALS.get(proposal_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Alert proposal not found")
+
+
+@router.post("/api/alert-proposals/{proposal_id}/approve")
+async def approve_alert_proposal(proposal_id: str, req: ActionRequest):
+    try:
+        prop = ALERT_PROPOSALS.get(proposal_id)
+        version = req.version if req.version is not None else prop["version"]
+        approved = ALERT_PROPOSALS.approve(proposal_id, version)
+        return approved
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Alert proposal not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/alert-proposals/{proposal_id}/reject")
+async def reject_alert_proposal(proposal_id: str, req: ActionRequest):
+    try:
+        prop = ALERT_PROPOSALS.get(proposal_id)
+        version = req.version if req.version is not None else prop["version"]
+        rejected = ALERT_PROPOSALS.reject(proposal_id, version)
+        return rejected
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Alert proposal not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/alert-proposals/{proposal_id}/execute")
+async def execute_alert_proposal(proposal_id: str, req: ActionRequest):
+    if not req.approvalToken:
+        raise HTTPException(status_code=400, detail="Missing approval token")
+    try:
+        prop = ALERT_PROPOSALS.get(proposal_id)
+        version = req.version if req.version is not None else prop["version"]
+        result = await execute_approved_alert(proposal_id, version, req.approvalToken)
+        return {"status": "success", **result}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Alert proposal not found")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logger.exception("Failed to execute alert proposal: %s", e)
+        raise HTTPException(status_code=500, detail=f"Execution error: {e}")
+

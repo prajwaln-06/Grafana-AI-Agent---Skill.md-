@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { adkChat, fetchAdkBoard } from "../api";
-import type { AdkChatResponse, ChatMessage, GlancePanelResult } from "../types";
+import { adkChat, confirmAlert, fetchAdkBoard } from "../api";
+import type { AdkChatResponse, AlertRuleProposal, ChatMessage, GlancePanelResult } from "../types";
 import ProposalCard from "./ProposalCard";
 import TimeSeriesChart from "./TimeSeriesChart";
 
@@ -561,8 +561,106 @@ function MessageBubble({
           {response.proposal && (
             <ProposalCard proposal={response.proposal} />
           )}
+
+          {response.alertRule && (
+            <AlertProposalCard
+              alertRule={response.alertRule}
+              sessionId={response.sessionId}
+            />
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+function AlertProposalCard({
+  alertRule,
+  sessionId,
+}: {
+  alertRule: AlertRuleProposal;
+  sessionId?: string | null;
+}) {
+  const [status, setStatus] = useState<"idle" | "creating" | "created" | "discarded" | "error">("idle");
+  const [deeplink, setDeeplink] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  if (status === "created") {
+    return (
+      <div className="alert-card-created">
+        <div className="alert-card-created-title">✓ Alert Rule Created in Grafana!</div>
+        {deeplink && (
+          <a
+            href={deeplink}
+            target="_blank"
+            rel="noreferrer"
+            className="alert-card-link"
+          >
+            View Alert in Grafana ↗
+          </a>
+        )}
+      </div>
+    );
+  }
+
+  if (status === "discarded") {
+    return (
+      <div style={{ marginTop: "10px", padding: "8px", background: "var(--bg-soft)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", fontSize: "12px", color: "var(--muted)" }}>
+        Alert proposal discarded.
+      </div>
+    );
+  }
+
+  return (
+    <div className="alert-proposal-card">
+      <div className="alert-proposal-header">🔔 Proposed Grafana Alert Rule</div>
+      <div className="alert-proposal-title">{alertRule.title}</div>
+      <div className="alert-proposal-code">
+        {alertRule.condition_query} {alertRule.comparison ? `> ${alertRule.comparison.threshold}` : ""} (for {alertRule.for_duration})
+      </div>
+      {errorMsg && <div style={{ fontSize: "12px", color: "var(--danger)", marginTop: "4px" }}>{errorMsg}</div>}
+      <div style={{ marginTop: "8px", display: "flex", gap: "8px" }}>
+        <button
+          type="button"
+          disabled={status === "creating" || !sessionId}
+          onClick={async () => {
+            setStatus("creating");
+            try {
+              const res = await confirmAlert(sessionId!, true);
+              if (res.status === "created") {
+                setDeeplink(res.deeplink || null);
+                setStatus("created");
+              } else {
+                setStatus("error");
+                setErrorMsg(res.status);
+              }
+            } catch (err: any) {
+              setStatus("error");
+              setErrorMsg(err.message || String(err));
+            }
+          }}
+          className="btn primary"
+          style={{ fontSize: "12px", padding: "5px 14px", cursor: "pointer" }}
+        >
+          {status === "creating" ? "Creating..." : "✓ Create in Grafana"}
+        </button>
+        <button
+          type="button"
+          disabled={status === "creating" || !sessionId}
+          onClick={async () => {
+            try {
+              await confirmAlert(sessionId!, false);
+            } catch {
+              // ignore
+            }
+            setStatus("discarded");
+          }}
+          className="btn quiet"
+          style={{ fontSize: "12px", padding: "5px 12px", cursor: "pointer" }}
+        >
+          ✕ Discard
+        </button>
+      </div>
     </div>
   );
 }

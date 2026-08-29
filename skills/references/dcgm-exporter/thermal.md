@@ -146,7 +146,7 @@ power-violation counter as the current power consumption value.
 - **Category:** Power
 - **Purpose:** Measures time spent power throttled.
 - **Type:** `Counter`
-- - **Unit:** Time spent power throttled; exact exposed unit should be verified
+- **Unit:** Time spent power throttled; exact exposed unit should be verified
   from the datasource before presenting a specific duration or performing
   conversion.
 - **Use when:** the user asks whether a GPU has been power throttling; wants
@@ -163,21 +163,28 @@ power-violation counter as the current power consumption value.
 - **Metric-specific query/result semantics:** this is a Counter representing
   accumulated time spent power throttled.
 
-  **Per-metric override — unit-dependent interpretation is restricted.** The
-  exact exposed unit for this counter has not been verified against the live
-  datasource. Queries that only determine whether the Counter increased over a
-  time range do not require the unit to be known. Unit-dependent presentation,
-  conversion, or interpretation requires the exposed unit to be verified first.
+  **What is allowed — Counter-increase checks on this single metric.**
+  Queries that only determine whether the Counter increased over a time range
+  (e.g. `increase(DCGM_FI_DEV_POWER_VIOLATION[1h]) > 0`) do NOT require the
+  unit to be known and MAY proceed. PromQL transformations such as
+  `increase()`, `rate()`, or `resets()` applied to this single source metric
+  do not change `measurement_used.type` — the result is always `raw_metric`
+  with `name: "DCGM_FI_DEV_POWER_VIOLATION"` and an empty `source_metrics`
+  array. No other `measurement_used.type` value is valid for this metric
+  (including invented values like `raw_counter`, `raw_index`,
+  `raw_cluster_or_counter`, etc.). `derived_measurement` applies only when
+  multiple distinct source metrics are combined — which never happens for a
+  single-metric Counter check.
 
-  For requests such as whether the GPU has been power throttling or whether
-  power-throttling activity occurred over a specified time range, query
-  construction may proceed using the Counter's documented accumulated-time
-  semantics. Do not claim a specific duration unit unless that unit is verified
-  against the live datasource.
-
-  For requests that require a specific unit, duration conversion, or a
-  unit-dependent quantitative result, verify the exposed unit before
-  constructing or presenting that result.
+  **What is NOT allowed — unit-dependent interpretation.** The exact exposed
+  unit for this counter has not been verified against the live datasource.
+  Unit-dependent presentation, conversion, or interpretation requires the
+  exposed unit to be verified first. Do not claim a specific duration unit
+  (seconds, milliseconds, etc.) unless that unit is verified. For requests
+  that require a specific unit, duration conversion, or a unit-dependent
+  quantitative result (e.g. "how many seconds was the GPU power throttled?"),
+  verify the exposed unit before constructing or presenting that result — if
+  the unit is not verified, respond with `unsupported_metric` explaining why.
 
   This metric remains distinct from `DCGM_FI_DEV_POWER_USAGE`: the latter
   represents instantaneous power draw, while this Counter represents

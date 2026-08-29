@@ -115,6 +115,18 @@ export type AdkStep = {
   result: unknown;
 };
 
+export type AlertRuleProposal = {
+  title: string;
+  condition_query: string;
+  comparison?: {
+    operator: string;
+    threshold: number;
+  };
+  for_duration: string;
+  folder?: string;
+  datasource_uid?: string;
+};
+
 export type AdkChatResponse = {
   status?: string;
   framework: string;
@@ -131,6 +143,7 @@ export type AdkChatResponse = {
   chartType?: string;
   proposalId?: string;
   proposal?: DashboardProposal;
+  alertRule?: AlertRuleProposal | null;
   kind?: "proposal" | "text" | string;
   agent_response?: string;
   raw_json?: any[];

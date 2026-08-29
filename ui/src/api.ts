@@ -277,6 +277,7 @@ export async function adkChat(
       chartType: (firstEntry?.execution as Record<string, unknown> | undefined)?.chart_type as string || "line",
       sessionId: raw.session_id || null,
       candidates: firstEntry?.candidates || undefined,
+      alertRule: (firstEntry as any)?.alert_rule || (raw.result as any)?.alert_rule || null,
       backendResult: raw,
     };
   } catch (err) {
@@ -287,6 +288,19 @@ export async function adkChat(
       throw err;
     });
   }
+}
+
+export function confirmAlert(
+  sessionId: string,
+  confirm: boolean = true
+): Promise<{ status: string; rule_uid?: string; deeplink?: string }> {
+  return json<{ status: string; rule_uid?: string; deeplink?: string }>(
+    "/api/v1/alerts/confirm",
+    {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId, confirm }),
+    }
+  );
 }
 
 export function fetchAdkExamples() {
@@ -319,20 +333,25 @@ export function fetchAdkBoard(panelIds?: string[], range = "1h") {
 
 export async function fetchHealth() {
   try {
-    const data = await json<{ status: string; skill_name?: string }>("/readyz");
-    return {
-      ok: data.status === "ready",
-      services: {
-        backend: data.status,
-        skill: data.skill_name || "observability-query-builder",
-      },
-    };
+    const data = await json<{ ok: boolean; services: Record<string, string> }>("/api/health");
+    return data;
   } catch {
     try {
-      const data = await json<{ status: string }>("/healthz");
-      return { ok: data.status === "ok", services: { backend: data.status } };
+      const data = await json<{ status: string; skill_name?: string }>("/readyz");
+      return {
+        ok: data.status === "ready",
+        services: {
+          backend: data.status,
+          skill: data.skill_name || "observability-query-builder",
+        },
+      };
     } catch {
-      return { ok: false, services: { backend: "offline" } };
+      try {
+        const data = await json<{ status: string }>("/healthz");
+        return { ok: data.status === "ok", services: { backend: data.status } };
+      } catch {
+        return { ok: false, services: { backend: "offline" } };
+      }
     }
   }
 }
@@ -401,4 +420,34 @@ export function modifyProposal(proposalId: string, ir: any) {
     }
   );
 }
+
+export function fetchAlerts() {
+  return json<{ alerts: string }>("/api/alerts");
+}
+
+export function fetchAlertProposals() {
+  return json<{ proposals: any[] }>("/api/alert-proposals");
+}
+
+export function approveAlertProposal(proposalId: string, version: number) {
+  return json<any>(`/api/alert-proposals/${proposalId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ version }),
+  });
+}
+
+export function rejectAlertProposal(proposalId: string, version: number) {
+  return json<any>(`/api/alert-proposals/${proposalId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ version }),
+  });
+}
+
+export function executeAlertProposal(proposalId: string, version: number, approvalToken: string) {
+  return json<any>(`/api/alert-proposals/${proposalId}/execute`, {
+    method: "POST",
+    body: JSON.stringify({ version, approvalToken }),
+  });
+}
+
 

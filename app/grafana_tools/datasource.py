@@ -49,6 +49,17 @@ async def ensure_datasource_registry() -> dict[str, list[dict]]:
             except json.JSONDecodeError:
                 logger.error("list_datasources did not return valid JSON.")
 
+        if "prometheus" not in registry:
+            import os
+            default_uid = os.environ.get("GRAFANA_DEFAULT_DATASOURCE_UID", "PBFA97CFB590B2093")
+            registry.setdefault("prometheus", []).append({
+                "uid": default_uid,
+                "name": "Prometheus",
+                "type": "prometheus",
+                "plugin_type": "prometheus",
+                "is_default": True,
+            })
+
         for ds_type, entries in registry.items():
             names = ", ".join(e["name"] for e in entries)
             logger.info(f"  Registry: {ds_type}: {names}")

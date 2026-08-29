@@ -200,34 +200,23 @@ async def discover_prometheus_schema() -> dict:
         ("metrics", "metricNames", "result"),
     )
     names = sorted({str(item) for item in names if isinstance(item, str)})
-    if not names:
-        names = [
-            "node_cpu_seconds_total",
-            "node_memory_MemAvailable_bytes",
-            "node_memory_MemTotal_bytes",
-            "node_filesystem_avail_bytes",
-            "node_filesystem_size_bytes",
-            "node_network_receive_bytes_total",
-            "node_network_transmit_bytes_total",
-        ]
     label_names = _unwrap_list(
         _json(await list_prometheus_label_names(ds["uid"])),
         ("labels", "labelNames", "result"),
     )
-    target_label = next((label for label in TARGET_LABEL_CANDIDATES if label in label_names), None) or "instance"
+    target_label = next((label for label in TARGET_LABEL_CANDIDATES if label in label_names), None)
+    if not target_label:
+        raise ValueError("Prometheus exposes no supported target label.")
     targets = _unwrap_list(
         _json(await list_prometheus_label_values(ds["uid"], target_label)),
         ("values", "labelValues", "result"),
     )
-    targets_list = sorted({str(item) for item in targets if isinstance(item, (str, int))})
-    if not targets_list:
-        targets_list = ["node-exporter:9100", "cadvisor:8080", "prometheus:9090", "localhost:9100"]
     return {
         "datasource": ds,
         "metrics": names,
-        "label_names": label_names or ["instance", "job", "cpu"],
+        "label_names": label_names,
         "target_label": target_label,
-        "targets": targets_list,
+        "targets": sorted({str(item) for item in targets if isinstance(item, (str, int))}),
     }
 
 
@@ -704,12 +693,7 @@ async def build_proposal(request: str, target: str | None = None, time_range: st
         schema = await discover_prometheus_schema()
         prometheus_requested = _explicit_metric_panels(request, schema["metrics"])
         if not prometheus_requested:
-            # Provide standard system overview panels if request did not name specific metrics
-            prometheus_requested = [
-                {"measurement": "cpu", "title": "CPU Utilization", "position": 0, "datasourceType": "prometheus"},
-                {"measurement": "memory", "title": "Memory Utilization", "position": 1, "datasourceType": "prometheus"},
-                {"measurement": "disk", "title": "Disk Utilization", "position": 2, "datasourceType": "prometheus"},
-            ]
+            raise ValueError("No supported metric or log/document request was identified; clarify the datasource and measurement intent.")
     groups = []
     if prometheus_requested:
         groups.append(("prometheus", _resolve_prometheus_panels(prometheus_requested, request, target, time_range)))

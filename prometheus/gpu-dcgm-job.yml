@@ -1,0 +1,9 @@
+# Add this scrape job to prometheus.yml only when running on an NVIDIA GPU host
+# with the dcgm-exporter Compose profile enabled.
+#
+# Start GPU exporter:
+# docker compose --profile nvidia-gpu up -d
+
+- job_name: dcgm-exporter
+  static_configs:
+    - targets: ["dcgm-exporter:9400"]

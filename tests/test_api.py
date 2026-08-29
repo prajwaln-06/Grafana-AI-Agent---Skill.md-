@@ -4,13 +4,13 @@ from fastapi.testclient import TestClient
 
 
 def _client():
-    from app.api import main as main_module
-    return TestClient(main_module.app)
+    from run_server import app
+    return TestClient(app)
 
 
 def test_healthz():
     with _client() as client:
-        r = client.get("/healthz")
+        r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
 
@@ -28,7 +28,7 @@ def test_capabilities_exposes_routing_table():
         r = client.get("/api/v1/capabilities")
     assert r.status_code == 200
     body = r.json()
-    assert body["skill_version"] == "1.1"
+    assert body["skill_version"] == "1.3"
     assert len(body["routing_rows"]) >= 10
 
 
@@ -44,8 +44,8 @@ def test_query_happy_path_returns_executed_result():
     async def fake_run_pipeline(*a, **kw):
         return fake_contract
 
-    with patch("app.api.routes_query.run_pipeline", side_effect=fake_run_pipeline), \
-         patch("app.api.routes_query.executor.execute_contract", return_value=fake_executed):
+    with patch("app.agent.run_pipeline", side_effect=fake_run_pipeline), \
+         patch("app.agent.executor.execute_contract", return_value=fake_executed):
         with _client() as client:
             r = client.post("/api/v1/query", json={"question": "load average on node-1"})
     assert r.status_code == 200
@@ -65,8 +65,8 @@ def test_query_ambiguous_metric_returns_session_id_and_skips_execution():
     async def fake_run_pipeline(*a, **kw):
         return fake_contract
 
-    with patch("app.api.routes_query.run_pipeline", side_effect=fake_run_pipeline) as mock_pipeline, \
-         patch("app.api.routes_query.executor.execute_contract") as mock_execute:
+    with patch("app.agent.run_pipeline", side_effect=fake_run_pipeline) as mock_pipeline, \
+         patch("app.agent.executor.execute_contract") as mock_execute:
         with _client() as client:
             r = client.post("/api/v1/query", json={"question": "how much memory is free"})
     assert r.status_code == 200
@@ -97,8 +97,8 @@ def test_query_follow_up_with_session_id_threads_prior_context():
             return resolved_contract
         return ambiguous_contract
 
-    with patch("app.api.routes_query.run_pipeline", side_effect=fake_run_pipeline), \
-         patch("app.api.routes_query.executor.execute_contract", return_value=fake_executed):
+    with patch("app.agent.run_pipeline", side_effect=fake_run_pipeline), \
+         patch("app.agent.executor.execute_contract", return_value=fake_executed):
         with _client() as client:
             r1 = client.post("/api/v1/query", json={"question": "how much memory is free"})
             session_id = r1.json()["session_id"]
@@ -118,13 +118,6 @@ def test_query_with_unknown_session_id_returns_410():
 
 
 def test_multi_mode_with_one_ambiguous_entry_defers_all_execution():
-    """Regression test for a gap found while auditing 'will this handle all
-    Prometheus questions': §9 allows a mode:"multi" response's `results`
-    array to mix statuses -- one entry `ok`, another `ambiguous_metric`.
-    Before this fix, that fell through _needs_clarification (which only
-    checked a TOP-level `status`, absent on multi-mode contracts) straight
-    into execution, silently discarding the user's chance to resolve the
-    ambiguity via the session flow."""
     mixed_contract = {
         "mode": "multi",
         "results": [
@@ -143,8 +136,8 @@ def test_multi_mode_with_one_ambiguous_entry_defers_all_execution():
     async def fake_run_pipeline(*a, **kw):
         return mixed_contract
 
-    with patch("app.api.routes_query.run_pipeline", side_effect=fake_run_pipeline), \
-         patch("app.api.routes_query.executor.execute_contract") as mock_execute:
+    with patch("app.agent.run_pipeline", side_effect=fake_run_pipeline), \
+         patch("app.agent.executor.execute_contract") as mock_execute:
         with _client() as client:
             r = client.post("/api/v1/query", json={"question": "show me swap and memory usage"})
 
@@ -156,11 +149,6 @@ def test_multi_mode_with_one_ambiguous_entry_defers_all_execution():
 
 
 def test_reload_skill_picks_up_a_new_routing_row(tmp_path, monkeypatch):
-    """End-to-end proof that the reload endpoint makes a structural SKILL.md
-    change (a new routing row) visible without a process restart -- and,
-    since the fix that threads skill_index through the pipeline instead of
-    a separate internal cache, that the SAME reloaded object is what the
-    Generator/Validator phases see too, not just /api/v1/capabilities."""
     refs = tmp_path / "references"
     refs.mkdir()
     (refs / "cpu.md").write_text("# CPU\n", encoding="utf-8")
@@ -170,11 +158,12 @@ def test_reload_skill_picks_up_a_new_routing_row(tmp_path, monkeypatch):
         "## 4. Routing table\n"
         "| CPU | prometheus | [references/cpu.md](references/cpu.md) |\n", encoding="utf-8")
     from app.config import Settings
-    monkeypatch.setattr("app.api.main.get_settings", lambda: Settings(gemini_api_key="test", skills_root=tmp_path))
-    monkeypatch.setattr("app.api.routes_admin.get_settings", lambda: Settings(gemini_api_key="test", skills_root=tmp_path))
+    monkeypatch.setattr("run_server.get_settings", lambda: Settings(gemini_api_key="test", skills_root=tmp_path))
+    monkeypatch.setattr("app.agent.get_settings", lambda: Settings(gemini_api_key="test", skills_root=tmp_path))
 
-    from app.api import main as main_module
-    with TestClient(main_module.app) as client:
+    with _client() as client:
+        from app.agent import root_agent
+        root_agent.reload_skill()
         r0 = client.get("/api/v1/capabilities")
         assert len(r0.json()["routing_rows"]) == 1
 
@@ -208,11 +197,12 @@ def test_reload_skill_keeps_previous_skill_on_bad_edit(tmp_path, monkeypatch):
         "## 4. Routing table\n"
         "| CPU | prometheus | [references/cpu.md](references/cpu.md) |\n", encoding="utf-8")
     from app.config import Settings
-    monkeypatch.setattr("app.api.main.get_settings", lambda: Settings(gemini_api_key="test", skills_root=tmp_path))
-    monkeypatch.setattr("app.api.routes_admin.get_settings", lambda: Settings(gemini_api_key="test", skills_root=tmp_path))
+    monkeypatch.setattr("run_server.get_settings", lambda: Settings(gemini_api_key="test", skills_root=tmp_path))
+    monkeypatch.setattr("app.agent.get_settings", lambda: Settings(gemini_api_key="test", skills_root=tmp_path))
 
-    from app.api import main as main_module
-    with TestClient(main_module.app) as client:
+    with _client() as client:
+        from app.agent import root_agent
+        root_agent.reload_skill()
         # Break it: point a routing row at a file that doesn't exist.
         skill_md.write_text(
             "---\nname: test-skill\ndescription: y\nmetadata:\n  version: \"1.0\"\n---\n"
@@ -231,23 +221,19 @@ def test_pipeline_exception_returns_502_not_a_crash():
     async def fake_run_pipeline(*a, **kw):
         raise RuntimeError("boom")
 
-    with patch("app.api.routes_query.run_pipeline", side_effect=fake_run_pipeline):
+    with patch("app.agent.run_pipeline", side_effect=fake_run_pipeline):
         with _client() as client:
             r = client.post("/api/v1/query", json={"question": "anything"})
     assert r.status_code == 502
 
 
 def test_pipeline_timeout_returns_504_not_a_hang():
-    """Regression test for a real gap found in review: PIPELINE_TIMEOUT_SECONDS
-    was declared in config.py/.env but never actually enforced anywhere --
-    a hung Gemini call or unresponsive backend could hang a request
-    forever. routes_query.py now wraps run_pipeline in asyncio.wait_for."""
     import asyncio
 
     async def fake_run_pipeline(*a, **kw):
         raise asyncio.TimeoutError()
 
-    with patch("app.api.routes_query.run_pipeline", side_effect=fake_run_pipeline):
+    with patch("app.agent.run_pipeline", side_effect=fake_run_pipeline):
         with _client() as client:
             r = client.post("/api/v1/query", json={"question": "anything"})
     assert r.status_code == 504
@@ -255,13 +241,9 @@ def test_pipeline_timeout_returns_504_not_a_hang():
 
 
 def test_pipeline_timeout_is_actually_wired_to_settings():
-    """Confirms the wrapper uses settings.pipeline_timeout_seconds (not a
-    hardcoded number) by making it comically short via a patched Settings
-    object and confirming a slightly-slow (but otherwise fine) pipeline
-    call gets cut off at that exact budget."""
     import asyncio
 
-    from app.api.routes_query import get_settings as route_get_settings
+    from run_server import get_settings as route_get_settings
 
     short_timeout_settings = route_get_settings().model_copy(update={"pipeline_timeout_seconds": 0.01})
 
@@ -269,8 +251,9 @@ def test_pipeline_timeout_is_actually_wired_to_settings():
         await asyncio.sleep(1)
         return {"mode": "single", "status": "ok"}
 
-    with patch("app.api.routes_query.get_settings", return_value=short_timeout_settings), \
-         patch("app.api.routes_query.run_pipeline", side_effect=slow_run_pipeline):
+    with patch("run_server.get_settings", return_value=short_timeout_settings), \
+         patch("app.agent.get_settings", return_value=short_timeout_settings), \
+         patch("app.agent.run_pipeline", side_effect=slow_run_pipeline):
         with _client() as client:
             r = client.post("/api/v1/query", json={"question": "anything"})
     assert r.status_code == 504
