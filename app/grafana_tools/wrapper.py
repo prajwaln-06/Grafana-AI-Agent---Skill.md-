@@ -422,4 +422,3 @@ def resolve_alert_intent(request: str) -> dict:
     """Classify an alert-related request as CREATE, LIST, UPDATE, or DELETE.
     Call this before other alert tools to determine the correct action."""
     return _resolve_alert_intent_impl(request)
-

@@ -102,53 +102,6 @@ def _find_metric_in_schema(term: str, discovered: list[str]) -> str:
     )
 
 
-_CONDITION_ALIASES: dict[str, str] = {
-    ">=": "gte",
-    "<=": "lte",
-    "!=": "ne",
-    "==": "eq",
-    ">": "gt",
-    "<": "lt",
-    "=": "eq",
-    "greater than or equal to": "gte",
-    "greater than or equal": "gte",
-    "greater than": "gt",
-    "greater": "gt",
-    "more than": "gt",
-    "above": "gt",
-    "exceeds": "gt",
-    "exceed": "gt",
-    "over": "gt",
-    "higher than": "gt",
-    "higher": "gt",
-    "less than or equal to": "lte",
-    "less than or equal": "lte",
-    "less than": "lt",
-    "less": "lt",
-    "under": "lt",
-    "below": "lt",
-    "lower than": "lt",
-    "lower": "lt",
-    "equals": "eq",
-    "equal to": "eq",
-    "equal": "eq",
-    "is": "eq",
-}
-
-_SEVERITY_ALIASES: dict[str, str] = {
-    "critical": "critical",
-    "crit": "critical",
-    "fatal": "critical",
-    "error": "critical",
-    "err": "critical",
-    "warning": "warning",
-    "warn": "warning",
-    "info": "info",
-    "informational": "info",
-    "notice": "info",
-}
-
-
 def parse_alert_request(request: str) -> dict[str, Any]:
     """Parse a natural-language alert request into structured parameters.
 
