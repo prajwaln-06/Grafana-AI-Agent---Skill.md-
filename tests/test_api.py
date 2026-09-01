@@ -1,6 +1,23 @@
-from unittest.mock import patch
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def _use_legacy_pipeline_for_api_tests():
+    """Keep legacy API fixtures independent of a developer's local opt-in flag."""
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(
+        update={"dependent_query_resolution_enabled": False}
+    )
+    with patch("app.agent.get_settings", return_value=settings):
+        yield
 
 
 def _client():
@@ -28,8 +45,64 @@ def test_capabilities_exposes_routing_table():
         r = client.get("/api/v1/capabilities")
     assert r.status_code == 200
     body = r.json()
-    assert body["skill_version"] == "1.3"
+    assert body["skill_version"] == "1.4"
     assert len(body["routing_rows"]) >= 10
+    assert set(body["feature_flags"]) == {
+        "alert_rule_creation_enabled",
+        "dependent_query_resolution_enabled",
+    }
+
+
+def test_alert_confirmation_cannot_create_when_feature_is_disabled():
+    """An old pending proposal must not bypass a later feature-flag change."""
+    from run_server import ConfirmAlertRequest, adk_web_server, confirm_alert
+
+    pending_session = SimpleNamespace(
+        state={"pending_alert_proposal": {"alert_rule": {"title": "old proposal"}}}
+    )
+    disabled_settings = SimpleNamespace(alert_rule_creation_enabled=False)
+
+    with patch("run_server.get_settings", return_value=disabled_settings), \
+         patch.object(
+             adk_web_server.session_service,
+             "get_session",
+             new=AsyncMock(return_value=pending_session),
+         ) as get_session, \
+         patch("app.grafana_client.create_alert_rule") as create_alert:
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(confirm_alert(ConfirmAlertRequest(session_id="pending-session", confirm=True)))
+
+    assert exc_info.value.status_code == 403
+    assert get_session.await_count == 1
+    create_alert.assert_not_called()
+
+
+def test_text_alert_confirmation_cannot_create_when_feature_is_disabled():
+    """The ADK conversational confirmation path has the same write gate."""
+    from app.agent import root_agent
+    from app.config import get_settings
+
+    ctx = SimpleNamespace(
+        user_content=SimpleNamespace(parts=[SimpleNamespace(text="yes")]),
+        session=SimpleNamespace(
+            state={"pending_alert_proposal": {"alert_rule": {"title": "old proposal"}}}
+        ),
+        invocation_id="confirmation-test",
+    )
+    disabled_settings = get_settings().model_copy(
+        update={"alert_rule_creation_enabled": False}
+    )
+
+    async def consume_confirmation():
+        return [event async for event in root_agent._run_async_impl(ctx)]
+
+    with patch("app.agent.get_settings", return_value=disabled_settings), \
+         patch("app.grafana_client.create_alert_rule") as create_alert:
+        events = asyncio.run(consume_confirmation())
+
+    assert len(events) == 1
+    assert json.loads(events[0].message.parts[0].text)["result"]["status"] == "discarded"
+    create_alert.assert_not_called()
 
 
 def test_query_happy_path_returns_executed_result():
@@ -245,7 +318,10 @@ def test_pipeline_timeout_is_actually_wired_to_settings():
 
     from run_server import get_settings as route_get_settings
 
-    short_timeout_settings = route_get_settings().model_copy(update={"pipeline_timeout_seconds": 0.01})
+    short_timeout_settings = route_get_settings().model_copy(update={
+        "pipeline_timeout_seconds": 0.01,
+        "dependent_query_resolution_enabled": False,
+    })
 
     async def slow_run_pipeline(*a, **kw):
         await asyncio.sleep(1)

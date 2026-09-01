@@ -75,6 +75,13 @@ async def capabilities():
             dataclasses.asdict(row)
             for row in skill_index.routing_rows
         ],
+        # These are deliberately non-secret runtime values. They let callers
+        # verify the configuration held by this server process (which can
+        # differ from a newly started shell after an .env edit).
+        "feature_flags": {
+            "alert_rule_creation_enabled": get_settings().alert_rule_creation_enabled,
+            "dependent_query_resolution_enabled": get_settings().dependent_query_resolution_enabled,
+        },
     }
 
 
@@ -170,11 +177,6 @@ async def confirm_alert(body: ConfirmAlertRequest):
 
     pending_proposal = session.state.get("pending_alert_proposal")
     if not pending_proposal:
-        if not settings.alert_rule_creation_enabled:
-            raise HTTPException(
-                status_code=403,
-                detail="Alert-rule creation is currently disabled on this deployment."
-            )
         raise HTTPException(
             status_code=409,
             detail="This session does not contain a pending alert proposal."
@@ -194,6 +196,17 @@ async def confirm_alert(body: ConfirmAlertRequest):
         )
         await adk_web_server.session_service.append_event(session=session, event=discard_event)
         return {"status": "discarded"}
+
+    # The flag gates the WRITE boundary itself, not merely proposal
+    # generation. A proposal can outlive a configuration change in session
+    # state, so checking it only when the proposal is generated would allow
+    # an old proposal to create a Grafana rule after the capability was
+    # disabled. Discarding remains available while disabled.
+    if not settings.alert_rule_creation_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Alert-rule creation is currently disabled on this deployment.",
+        )
 
     from app import grafana_client
     alert_rule = pending_proposal.get("alert_rule")

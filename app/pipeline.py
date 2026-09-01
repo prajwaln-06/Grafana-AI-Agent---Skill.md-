@@ -5,14 +5,16 @@ Orchestrates the full request lifecycle against the observability-query-
 builder skill package: Router -> Generator -> deterministic Validator ->
 Executor.
 
-Two LLM calls, not three. The previous version of this pipeline spent a
-third Gemini call re-checking the Generator's own output against rules that
-are almost entirely mechanical (closed enums, required fields, a query
-being non-empty, a label key belonging to a fixed discovered list). See
-validator.py's module docstring for the full reasoning -- that phase is now
-plain Python, which makes it strictly deterministic (same contract always
-validates the same way), faster, cheaper, and not dependent on a second
-model call succeeding.
+The default flat path uses two LLM calls, not three. The previous version of
+this pipeline spent a third Gemini call re-checking the Generator's own output
+against rules that are almost entirely mechanical (closed enums, required
+fields, a query being non-empty, a label key belonging to a fixed discovered
+list). See validator.py's module docstring for the full reasoning -- that
+phase is now plain Python, which makes it strictly deterministic (same
+contract always validates the same way), faster, cheaper, and not dependent on
+a second model call succeeding. The opt-in dependency-aware path intentionally
+adds one narrow Generator call per dependent intent, after its upstream query
+has executed; its post-execution synthesis remains deterministic Python.
 
   ROUTER     -- SKILL.md Section 6 Steps 1-2 (gate, then route against
                 Section 4). ALSO identifies any part of a compound question
@@ -26,7 +28,8 @@ model call succeeding.
                 Section 7 (error handling -- needed for panic-mode framing),
                 and live-discovered label keys / Attributes keys.
   VALIDATOR  -- no LLM. See validator.py.
-  EXECUTOR   -- no LLM. See executor.py.
+  EXECUTOR   -- no LLM. See executor.py. In the opt-in dependency-aware
+                branch, roots execute before each dependent Generator pass.
 
 Partial datasource coverage (see also: skills/SKILL.md Section 4's
 OpenSearch note, and skills/opensearch-fundamentals.md's status note):
@@ -69,10 +72,12 @@ it calls.
 from __future__ import annotations
 
 import logging
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from app import field_discovery, label_discovery, llm_client, validator
+from app import executor, field_discovery, label_discovery, llm_client, validator
 from app.config import Settings
 from app.skill_index import SkillIndex
 
@@ -101,6 +106,20 @@ _ALERT_ACTION_INTENT = "propose_alert_rule"
 # additive, opt-in field, never a breaking change to Shape B's existing
 # consumers.
 
+# This deliberately narrow, deterministic backstop protects the feature-off
+# boundary when an LLM omits `action_intent` despite an unambiguous creation
+# request. It is not the normal alert-intent classifier (the Router remains
+# that when the feature is enabled); it merely recognizes direct creation
+# wording that must never be allowed to reach alert proposal construction in
+# a disabled deployment.
+_EXPLICIT_ALERT_CREATION_RE = re.compile(
+    r"\b(?:create|add|set\s+up|setup|configure|define|make)\s+"
+    r"(?:an?\s+)?(?:new\s+)?(?:grafana\s+)?alert(?:\s+rule)?\b"
+    r"|\b(?:alert|notify)\s+me\s+(?:when|if)\b"
+    r"|\b(?:i\s+(?:want|need)|please)\s+(?:an?\s+)?alert(?:\s+rule)?\s+(?:when|if|for)\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class PipelineContext:
@@ -111,16 +130,71 @@ class PipelineContext:
     clarification_answer: str | None = None
 
 
+@dataclass
+class PipelineExecutionResult:
+    """The feature-flagged staged path's result for the ADK wrapper.
+
+    `already_executed` is deliberately transport-level metadata, not part of
+    SKILL.md's user-facing Output Contract.  It lets agent.py avoid running a
+    second flat executor pass after this module has already staged roots and
+    dependents.
+    """
+    contract: dict
+    already_executed: bool = False
+
+
+@dataclass
+class _RoutedRequest:
+    unresolved_topics: list[dict]
+    matched: list[dict] = field(default_factory=list)
+    panic_mode: bool = False
+    action_intent: str = "read_query"
+    terminal_contract: dict | None = None
+
+
 async def run_pipeline(question: str, skill_index: SkillIndex, settings: Settings,
                         context: PipelineContext | None = None) -> dict:
     context = context or PipelineContext()
 
+    routed = await _route_request(question, skill_index, settings, context)
+    if routed.terminal_contract is not None:
+        return routed.terminal_contract
+    return await _generate_standard_contract(question, routed, skill_index, settings, context)
+
+
+async def _route_request(question: str, skill_index: SkillIndex, settings: Settings,
+                         context: PipelineContext) -> _RoutedRequest:
+    """Runs the common Router/gate portion shared by flat and staged paths.
+
+    Keeping this before the feature branch is what retains the Router's
+    exactly-once property even for a dependency-aware request.
+    """
+
     router_output = await _run_router(question, skill_index, settings, context)
     unresolved_topics = _clean_unresolved_topics(router_output.get("unresolved_topics"))
 
+    if (not settings.alert_rule_creation_enabled
+            and _is_explicit_alert_creation_request(question)):
+        # The Router normally identifies this as an out-of-scope action while
+        # the flag is off. Do not make that model behavior the sole security
+        # boundary: it can omit the optional action_intent annotation, after
+        # which the Generator's general output schema still contains the
+        # alert_rule_proposed status. Preserve Router-once semantics, but
+        # refuse the explicit disabled action before Generator construction.
+        logger.warning(
+            "Refusing explicit alert-rule creation request while "
+            "alert_rule_creation_enabled is False: %r", question,
+        )
+        contract = _disabled_alert_creation_contract()
+        return _RoutedRequest(
+            unresolved_topics=unresolved_topics,
+            terminal_contract=_finalize(contract, unresolved_topics),
+        )
+
     if router_output.get("gate_stop"):
         contract = _wrap_gate_stop(router_output["gate_stop"])
-        return _finalize(contract, unresolved_topics)
+        return _RoutedRequest(unresolved_topics=unresolved_topics,
+                              terminal_contract=_finalize(contract, unresolved_topics))
 
     matched = router_output.get("matched_references", [])
     panic_mode = bool(router_output.get("panic_mode", False))
@@ -153,7 +227,8 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
                 "only constructs/runs read-only queries."
             ),
         })
-        return _finalize(contract, unresolved_topics)
+        return _RoutedRequest(unresolved_topics=unresolved_topics,
+                              terminal_contract=_finalize(contract, unresolved_topics))
 
     if not matched:
         if unresolved_topics:
@@ -179,24 +254,462 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
                 "guess through -- falling back to a generic unmapped response.", question,
             )
             contract = _wrap_gate_stop({"status": "unmapped", "explanation": _unmapped_explanation()})
-        return _finalize(contract, unresolved_topics)
+        return _RoutedRequest(unresolved_topics=unresolved_topics,
+                              terminal_contract=_finalize(contract, unresolved_topics))
 
+    return _RoutedRequest(
+        unresolved_topics=unresolved_topics,
+        matched=matched,
+        panic_mode=panic_mode,
+        action_intent=action_intent,
+    )
+
+
+async def _generate_standard_contract(question: str, routed: _RoutedRequest,
+                                      skill_index: SkillIndex, settings: Settings,
+                                      context: PipelineContext) -> dict:
+    """The legacy one-shot Generator/Validator path, factored without changing it."""
+    matched = routed.matched
     generator_context = _build_generator_context(matched, skill_index, settings)
-    contract = await _run_generator(question, matched, panic_mode, generator_context, skill_index, settings,
-                                     context, action_intent=action_intent)
+    contract = await _run_generator(question, matched, routed.panic_mode, generator_context, skill_index, settings,
+                                     context, action_intent=routed.action_intent)
     contract = _normalize_contract_shape(contract)
+    contract = _block_disabled_alert_proposals(contract, settings)
     contract = _apply_alert_rule_defaults(contract, settings)
 
     known_references = set(generator_context.reference_texts.keys()) | set(generator_context.overview_texts.keys())
     known_datasources = {(m.get("data_source") or "").strip().lower() for m in matched}
 
     return _finalize(
-        contract, unresolved_topics,
+        contract, routed.unresolved_topics,
         known_metrics=generator_context.known_prometheus_metrics,
         labels_by_metric=generator_context.labels_by_metric,
         known_references=known_references,
         known_datasources=known_datasources,
     )
+
+
+# ---- Dependency-aware compound resolution (feature-flagged) -----------------
+
+
+@dataclass
+class _IntentPlan:
+    intent_id: str
+    matched_references: list[dict]
+    depends_on: list[str]
+
+
+async def run_dependency_aware_pipeline(
+    question: str,
+    skill_index: SkillIndex,
+    settings: Settings,
+    context: PipelineContext | None = None,
+) -> PipelineExecutionResult:
+    """Opt-in staged Router -> Generator -> Validator -> Executor flow.
+
+    The default path deliberately remains `run_pipeline()` followed by the
+    Agent's one executor call.  Only a Router plan with an explicit, valid
+    dependency reaches this function's staged branch.  Root intents are
+    generated and executed first; dependent intents receive only normalized
+    already-executed values before their own narrower generation/execution.
+    """
+    context = context or PipelineContext()
+    routed = await _route_request(question, skill_index, settings, context)
+    if routed.terminal_contract is not None:
+        return PipelineExecutionResult(routed.terminal_contract)
+
+    plan = _dependency_plan_from_matches(routed.matched)
+    if plan is None or not any(intent.depends_on for intent in plan):
+        # Even when the deployment has opted in, independent compounds use
+        # the legacy one-shot construction path. agent.py adds best-effort
+        # deterministic synthesis only after its ordinary executor pass.
+        return PipelineExecutionResult(
+            await _generate_standard_contract(question, routed, skill_index, settings, context)
+        )
+
+    return await _run_staged_dependency_plan(question, routed, plan, skill_index, settings, context)
+
+
+def _dependency_plan_from_matches(matched: list[dict]) -> list[_IntentPlan] | None:
+    """Builds an ordered, acyclic intent graph from opt-in Router metadata.
+
+    Returning None is intentionally fail-safe: malformed metadata never
+    creates an invented relationship or changes the legacy execution shape.
+    """
+    groups: dict[str, _IntentPlan] = {}
+    saw_dependency_field = False
+    for item in matched:
+        if not isinstance(item, dict):
+            return None
+        intent_id = item.get("intent_id")
+        depends_on = item.get("depends_on")
+        if intent_id is None and depends_on is None:
+            continue
+        saw_dependency_field = True
+        if not isinstance(intent_id, str) or not intent_id or not isinstance(depends_on, list):
+            return None
+        if not all(isinstance(parent, str) and parent for parent in depends_on):
+            return None
+        existing = groups.get(intent_id)
+        if existing is None:
+            groups[intent_id] = _IntentPlan(intent_id, [item], list(depends_on))
+        elif existing.depends_on == depends_on:
+            existing.matched_references.append(item)
+        else:
+            return None
+
+    if not saw_dependency_field or not groups:
+        return None
+    if len(groups) == 1 and next(iter(groups.values())).depends_on:
+        return None
+    if set(groups) != {item.get("intent_id") for item in matched if isinstance(item, dict)}:
+        return None
+    for intent in groups.values():
+        if intent.intent_id in intent.depends_on or any(parent not in groups for parent in intent.depends_on):
+            return None
+
+    # Kahn-style validation while preserving the Router's first-seen order.
+    remaining = {intent.intent_id: set(intent.depends_on) for intent in groups.values()}
+    ordered: list[_IntentPlan] = []
+    while remaining:
+        ready = [intent_id for intent_id, parents in remaining.items() if not parents]
+        if not ready:
+            logger.warning("Ignoring cyclic dependency metadata from Router: %r", matched)
+            return None
+        for intent_id in ready:
+            ordered.append(groups[intent_id])
+            del remaining[intent_id]
+        ready_set = set(ready)
+        for parents in remaining.values():
+            parents.difference_update(ready_set)
+    return ordered
+
+
+async def _run_staged_dependency_plan(question: str, routed: _RoutedRequest,
+                                      plan: list[_IntentPlan], skill_index: SkillIndex,
+                                      settings: Settings, context: PipelineContext) -> PipelineExecutionResult:
+    roots = [intent for intent in plan if not intent.depends_on]
+    root_matches = [reference for intent in roots for reference in intent.matched_references]
+    root_ctx = _build_generator_context(root_matches, skill_index, settings)
+    root_contract = await _run_generator(
+        question, root_matches, routed.panic_mode, root_ctx, skill_index, settings, context,
+        action_intent=routed.action_intent,
+        resolution_ids=[intent.intent_id for intent in roots],
+    )
+    root_contract = _normalize_contract_shape(root_contract)
+    root_contract = _block_disabled_alert_proposals(root_contract, settings)
+    root_contract = _apply_alert_rule_defaults(root_contract, settings)
+    root_contract = _finalize(root_contract, [], **_validator_kwargs(root_ctx, root_matches))
+    root_entries_by_id = _stage_entries_by_id(root_contract, {intent.intent_id for intent in roots})
+    if root_entries_by_id is None:
+        return PipelineExecutionResult(_dependency_validation_failure(
+            "The root dependency-resolution stage did not return one valid result for each routed intent."
+        ))
+
+    root_entries = [_strip_resolution_id(root_entries_by_id[intent.intent_id]) for intent in roots]
+    root_visible_contract = _contract_for_entries(root_entries, routed.unresolved_topics)
+    if any(_entry_needs_clarification(entry) for entry in root_entries):
+        # Do not execute a partial root set while the normal clarification
+        # flow is active; agent.py will preserve the same session behavior as
+        # the flat path.
+        return PipelineExecutionResult(_finalize(
+            root_visible_contract, [], **_validator_kwargs(root_ctx, root_matches)
+        ))
+
+    executed_roots = executor.execute_contract(_contract_for_entries(root_entries), settings)
+    completed: dict[str, dict] = {
+        intent.intent_id: entry
+        for intent, entry in zip(roots, _entries_from_contract(executed_roots), strict=True)
+    }
+
+    for intent in plan:
+        if not intent.depends_on:
+            continue
+        parents = [completed[parent] for parent in intent.depends_on]
+        if not all(_has_usable_execution(parent) for parent in parents):
+            completed[intent.intent_id] = _dependency_scope_unavailable_entry(intent)
+            continue
+
+        dep_ctx = _build_generator_context(intent.matched_references, skill_index, settings)
+        dependent_contract = await _run_generator(
+            question, intent.matched_references, routed.panic_mode, dep_ctx, skill_index, settings, context,
+            action_intent=routed.action_intent,
+            resolution_ids=[intent.intent_id],
+            resolved_dependencies=_dependency_prompt_data(intent.depends_on, parents),
+        )
+        dependent_contract = _normalize_contract_shape(dependent_contract)
+        dependent_contract = _block_disabled_alert_proposals(dependent_contract, settings)
+        dependent_contract = _apply_alert_rule_defaults(dependent_contract, settings)
+        dependent_contract = _finalize(
+            dependent_contract, [], **_validator_kwargs(dep_ctx, intent.matched_references)
+        )
+        stage_entries = _stage_entries_by_id(dependent_contract, {intent.intent_id})
+        if stage_entries is None:
+            completed[intent.intent_id] = _dependency_validation_failure_entry(intent)
+            continue
+        entry = _strip_resolution_id(stage_entries[intent.intent_id])
+        if not _query_contains_resolved_scope(entry, parents):
+            entry = _dependency_scope_unavailable_entry(intent)
+        completed[intent.intent_id] = executor.execute_contract(entry, settings)
+
+    entries = [completed[intent.intent_id] for intent in plan]
+    final_contract = _contract_for_entries(entries, routed.unresolved_topics)
+    # Each generated stage was validated against exactly its own opened
+    # references before execution. `_contract_for_entries` only assembles
+    # those valid entries and the same fixed unresolved-topic entries that
+    # `_finalize` normally adds; revalidating here against the root-only
+    # discovery set would incorrectly reject valid dependent references.
+    return PipelineExecutionResult(synthesize_executed_contract(final_contract), already_executed=True)
+
+
+def _validator_kwargs(ctx: GeneratorContext, matched: list[dict]) -> dict:
+    return {
+        "known_metrics": ctx.known_prometheus_metrics,
+        "labels_by_metric": ctx.labels_by_metric,
+        "known_references": set(ctx.reference_texts) | set(ctx.overview_texts),
+        "known_datasources": {(item.get("data_source") or "").strip().lower() for item in matched},
+    }
+
+
+def _entries_from_contract(contract: dict) -> list[dict]:
+    return list(contract.get("results", [])) if contract.get("mode") == "multi" else [
+        {key: value for key, value in contract.items() if key != "mode"}
+    ]
+
+
+def _contract_for_entries(entries: list[dict], unresolved_topics: list[dict] | None = None) -> dict:
+    unresolved_topics = unresolved_topics or []
+    if len(entries) == 1 and not unresolved_topics:
+        return {"mode": "single", **entries[0]}
+    return _merge_unresolved_topics({"mode": "multi", "results": entries, "synthesis": None}, unresolved_topics)
+
+
+def _stage_entries_by_id(contract: dict, expected_ids: set[str]) -> dict[str, dict] | None:
+    entries = _entries_from_contract(contract)
+    mapped: dict[str, dict] = {}
+    for entry in entries:
+        resolution_id = entry.get("resolution_id")
+        if not isinstance(resolution_id, str) or resolution_id not in expected_ids or resolution_id in mapped:
+            return None
+        mapped[resolution_id] = entry
+    return mapped if set(mapped) == expected_ids else None
+
+
+def _strip_resolution_id(entry: dict) -> dict:
+    return {key: value for key, value in entry.items() if key != "resolution_id"}
+
+
+def _entry_needs_clarification(entry: dict) -> bool:
+    return entry.get("status") == "ambiguous_metric" or (
+        entry.get("status") == "declined" and entry.get("reason") == "parameter_requires_clarification"
+    )
+
+
+def _has_usable_execution(entry: dict) -> bool:
+    execution = entry.get("execution")
+    return isinstance(execution, dict) and execution.get("execution_status") == "success" and bool(execution.get("series"))
+
+
+def _dependency_prompt_data(intent_ids: list[str], entries: list[dict]) -> list[dict]:
+    """A bounded, normalized upstream view: labels plus each series' latest value."""
+    data = []
+    for intent_id, entry in zip(intent_ids, entries, strict=True):
+        series_data = []
+        for series in entry.get("execution", {}).get("series", []):
+            latest = _latest_numeric_value(series)
+            series_data.append({"labels": series.get("labels", {}), "latest_value": latest})
+        data.append({
+            "intent_id": intent_id,
+            "measurement": entry.get("measurement_used", {}).get("name"),
+            "series": series_data,
+        })
+    return data
+
+
+def _query_contains_resolved_scope(entry: dict, parents: list[dict]) -> bool:
+    """Fail closed if a dependent PromQL query discarded its resolved scope."""
+    if entry.get("status") not in {"ok", "panic_mode_best_effort"}:
+        return True
+    if (entry.get("data_source") or "").strip().lower() != "prometheus":
+        return True
+    query = entry.get("query")
+    if not isinstance(query, str):
+        return False
+    values = []
+    for parent in parents:
+        for series in parent.get("execution", {}).get("series", []):
+            for label_key, value in series.get("labels", {}).items():
+                if _looks_like_entity_label(label_key) and value:
+                    values.append(str(value))
+    # A top-N upstream result may contain several entities. All resolved
+    # entity values must survive in the dependent selector (typically as a
+    # regex alternation), never merely one arbitrarily selected winner.
+    return bool(values) and all(value in query for value in set(values))
+
+
+def _looks_like_entity_label(label_key: str) -> bool:
+    normalized = label_key.lower()
+    return any(token in normalized for token in ("node", "host", "instance", "device", "gpu", "pod"))
+
+
+def _dependency_scope_unavailable_entry(intent: _IntentPlan) -> dict:
+    return {
+        "status": "declined",
+        "reason": "parameter_requires_clarification",
+        "clarification": "I could not safely retain the entity selected by the earlier result. Please specify the entity directly.",
+        "explanation": "The dependent measurement was not executed because its required resolved scope was unavailable or could not be represented safely.",
+    }
+
+
+def _dependency_validation_failure_entry(intent: _IntentPlan) -> dict:
+    return {
+        "status": "declined",
+        "reason": "parameter_requires_clarification",
+        "clarification": "Please specify the entity directly for the dependent measurement.",
+        "explanation": "The dependent query could not be validated after resolving the earlier result.",
+    }
+
+
+def _dependency_validation_failure(explanation: str) -> dict:
+    return {"mode": "single", "status": INTERNAL_VALIDATION_FAILED_STATUS, "explanation": explanation}
+
+
+def synthesize_executed_contract(contract: dict) -> dict:
+    """Best-effort deterministic synthesis over already-normalized results.
+
+    This intentionally has no LLM call and never raises. A failure or an
+    unrepresentable result leaves the Section 9-compatible `synthesis: null`
+    fallback intact.
+    """
+    if not isinstance(contract, dict) or contract.get("mode") != "multi":
+        return contract
+    # Generator-era synthesis is only a pre-execution placeholder. Once this
+    # opt-in stage runs, replace it with a deterministic result or null --
+    # never expose an LLM-written summary as though it came from live data.
+    base_contract = {**contract, "synthesis": None}
+    try:
+        return _synthesize_executed_contract(base_contract)
+    except Exception:  # noqa: BLE001 -- synthesis must never block a response
+        logger.exception("Best-effort multi-result synthesis failed")
+        return base_contract
+
+
+def _synthesize_executed_contract(contract: dict) -> dict:
+    if contract.get("mode") != "multi" or contract.get("synthesis") is not None:
+        return contract
+    entries = contract.get("results")
+    if not isinstance(entries, list) or len(entries) < 2:
+        return contract
+    if not all(_has_usable_execution(entry) for entry in entries if entry.get("status") in executor.EXECUTABLE_STATUSES):
+        return contract
+    executable_entries = [entry for entry in entries if entry.get("status") in executor.EXECUTABLE_STATUSES]
+    if len(executable_entries) < 2:
+        return contract
+
+    grouped: dict[str, list[str]] = {}
+    for entry in executable_entries:
+        measurement = entry.get("measurement_used", {}).get("name")
+        if not isinstance(measurement, str) or not measurement:
+            return contract
+        for series in entry.get("execution", {}).get("series", []):
+            value = _latest_numeric_value(series)
+            if value is None:
+                return contract
+            entity = _series_entity_label(series.get("labels", {}))
+            grouped.setdefault(entity, []).append(f"{measurement} ({_format_synthesis_value(value, entry)})")
+    if not grouped or any(len(values) < 2 for values in grouped.values()):
+        return contract
+    sentences = [f"{entity} has " + " and ".join(values) + "." for entity, values in grouped.items()]
+    return {**contract, "synthesis": " ".join(sentences)}
+
+
+def _latest_numeric_value(series: dict) -> float | None:
+    points = series.get("points", []) if isinstance(series, dict) else []
+    for point in reversed(points):
+        value = point.get("value") if isinstance(point, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _series_entity_label(labels: dict) -> str:
+    if isinstance(labels, dict):
+        # Prefer stable entity identity labels over incidental transport
+        # labels such as `instance`. This lets a root result carrying only
+        # `node_id=node-02` join a dependent result that also has
+        # `instance=node-02:9200`, `job`, and metric-name labels.
+        for preferred_key in ("node_id", "node", "hostname", "host", "instance", "device", "gpu", "pod"):
+            value = labels.get(preferred_key)
+            if value:
+                return f"{preferred_key}={value}"
+        for key, value in labels.items():
+            if _looks_like_entity_label(str(key)) and value:
+                return f"{key}={value}"
+        if labels:
+            key = sorted(labels)[0]
+            return f"{key}={labels[key]}"
+    return "the resolved result"
+
+
+def _format_synthesis_value(value: float, entry: dict) -> str:
+    metric = str(entry.get("measurement_used", {}).get("name") or "").lower()
+    query = str(entry.get("query") or "")
+    if metric.endswith("_bytes"):
+        gib = value / (1024 ** 3)
+        if abs(gib) >= 1:
+            return f"{gib:.2f} GB"
+        return f"{value / (1024 ** 2):.2f} MB"
+    if re.search(r"\*\s*100\b", query):
+        return f"{value:.1f}%"
+    return f"{value:.3g}"
+
+
+def _is_explicit_alert_creation_request(question: str) -> bool:
+    return bool(_EXPLICIT_ALERT_CREATION_RE.search(question or ""))
+
+
+def _disabled_alert_creation_contract() -> dict:
+    return {
+        "mode": "single",
+        "status": "out_of_scope_action",
+        "requested_action": "create a new Grafana alert rule",
+        "explanation": (
+            "Alert-rule creation is currently disabled on this deployment; this skill "
+            "only constructs/runs read-only queries."
+        ),
+    }
+
+
+def _block_disabled_alert_proposals(contract: dict, settings: Settings) -> dict:
+    """Fail closed if an LLM leaks alert_rule_proposed while the flag is off.
+
+    Section 9 must document every possible output status, including the
+    feature-gated one. A Generator that sees that general schema can still
+    emit the status even without the enabled-only prompt addendum. This
+    deterministic output guard is therefore the final proposal-generation
+    boundary; confirmation has a separate write-boundary check in
+    run_server.py / agent.py.
+    """
+    if settings.alert_rule_creation_enabled or not isinstance(contract, dict):
+        return contract
+
+    if contract.get("mode") == "single" and contract.get("status") == ALERT_PROPOSED_STATUS:
+        logger.warning("Blocked leaked alert_rule_proposed output while feature is disabled")
+        return _disabled_alert_creation_contract()
+
+    if contract.get("mode") == "multi" and isinstance(contract.get("results"), list):
+        replaced = False
+        results = []
+        for entry in contract["results"]:
+            if isinstance(entry, dict) and entry.get("status") == ALERT_PROPOSED_STATUS:
+                replaced = True
+                results.append({k: v for k, v in _disabled_alert_creation_contract().items() if k != "mode"})
+            else:
+                results.append(entry)
+        if replaced:
+            logger.warning("Blocked leaked alert_rule_proposed entry while feature is disabled")
+            return {**contract, "results": results, "synthesis": None}
+    return contract
 
 
 def _apply_alert_rule_defaults(contract: dict, settings: Settings) -> dict:
@@ -451,21 +964,44 @@ the safer failure mode. When genuinely unsure, prefer out_of_scope_action.
 """
 
 
+_DEPENDENCY_ROUTER_ADDENDUM = """\
+
+DEPENDENT COMPOUND-QUERY RESOLUTION IS ENABLED ON THIS DEPLOYMENT.
+This is an additive routing annotation for ordinary read questions only.
+For every item in `matched_references`, add an `intent_id` and `depends_on`:
+
+{
+  "reference_path": "references/...",
+  "data_source": "prometheus",
+  "intent_id": "short_stable_identifier_for_one_sub_intent",
+  "depends_on": []
+}
+
+Use the same `intent_id` for every reference needed to resolve one sub-intent.
+`depends_on` is a list of earlier `intent_id` values. Leave it empty for an
+independent intent. Add a dependency ONLY when the later intent's entity/scope
+cannot be known until an earlier query is executed, such as "memory available
+on that node" after "which node has highest CPU". In that case, the memory
+intent depends on the top-CPU intent. Do not add dependencies merely because
+two independent measurements happen to mention the same user-supplied node.
+Never create a cycle, self-dependency, or reference to an unknown intent.
+"""
+
+
 def _build_router_instructions(settings: Settings) -> str:
-    """Returns the Router's system instructions, appending the alert-rule-
-    creation addendum ONLY when the feature flag is on. This is the
-    highest-risk prompt-engineering surface in the alert-rule-creation
-    feature (SKILL.md Section 12) -- keeping the base `_ROUTER_INSTRUCTIONS`
-    string byte-for-byte unchanged, and gating the addendum behind a config
-    flag that defaults to False, means existing read-query routing gets
-    ZERO prompt changes unless a deployment has explicitly opted in. A
-    regression in alert-rule-creation classification can also never leak
-    into a deployment that hasn't turned the flag on, and a bad rollout is
-    fully reversible by flipping the flag back off -- no prompt rollback
-    required."""
-    if not settings.alert_rule_creation_enabled:
-        return _ROUTER_INSTRUCTIONS
-    return _ROUTER_INSTRUCTIONS + _ALERT_ROUTER_ADDENDUM
+    """Returns the base Router prompt plus only enabled feature addenda.
+
+    With both feature flags false this returns `_ROUTER_INSTRUCTIONS`
+    byte-for-byte, preserving the established no-regression property for
+    existing read traffic. Each addendum is independently reversible by its
+    corresponding deployment flag.
+    """
+    instructions = _ROUTER_INSTRUCTIONS
+    if settings.alert_rule_creation_enabled:
+        instructions += _ALERT_ROUTER_ADDENDUM
+    if settings.dependent_query_resolution_enabled:
+        instructions += _DEPENDENCY_ROUTER_ADDENDUM
+    return instructions
 
 
 async def _run_router(question: str, skill_index: SkillIndex, settings: Settings,
@@ -718,21 +1254,50 @@ request.
 """
 
 
-def _build_generator_instructions(settings: Settings, action_intent: str) -> str:
+_DEPENDENCY_GENERATOR_ADDENDUM = """\
+
+DEPENDENCY-RESOLUTION STAGE: this is a deliberately narrow construction
+stage, not the normal flat compound-question pass. The prompt identifies the
+intent IDs you must resolve and, for a dependent stage, supplies normalized
+results already returned by earlier queries. Produce exactly one result object
+per requested intent ID and include that ID as a top-level `resolution_id` on
+that result object. `resolution_id` is pipeline bookkeeping and is removed
+before the user receives the Output Contract.
+
+For a dependent stage, use the concrete labels/values supplied in the resolved
+upstream data to scope the new query. Do not rerun, restate, or emit an entry
+for an upstream intent. In particular, a phrase such as "that node" must
+become an actual selector with the resolved value, never an unfiltered query.
+When an upstream intent asks for the current top/bottom N entities, use an
+instant query for that ranking. A range `topk` query can return the union of
+different winners across the time window, which is not a current top-N set.
+If the supplied data cannot be represented safely as a concrete scope using a
+runtime-confirmed label key, return the normal `declined` /
+`parameter_requires_clarification` result instead of dropping the constraint.
+"""
+
+
+def _build_generator_instructions(settings: Settings, action_intent: str,
+                                  dependency_stage: bool = False) -> str:
     """Mirrors _build_router_instructions' gating: the alert-rule-creation
     addendum is appended ONLY when the feature flag is on AND this specific
     request was flagged by the Router as alert-rule creation. An ordinary
     read question -- even on a deployment with the flag enabled -- gets the
     exact same `_GENERATOR_INSTRUCTIONS` string every prior version of this
     pipeline used, unchanged."""
+    instructions = _GENERATOR_INSTRUCTIONS
     if settings.alert_rule_creation_enabled and action_intent == _ALERT_ACTION_INTENT:
-        return _GENERATOR_INSTRUCTIONS + _ALERT_GENERATOR_ADDENDUM
-    return _GENERATOR_INSTRUCTIONS
+        instructions += _ALERT_GENERATOR_ADDENDUM
+    if dependency_stage:
+        instructions += _DEPENDENCY_GENERATOR_ADDENDUM
+    return instructions
 
 
 async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
                           ctx: GeneratorContext, skill_index: SkillIndex, settings: Settings,
-                          context: PipelineContext, action_intent: str = "read_query") -> dict:
+                          context: PipelineContext, action_intent: str = "read_query",
+                          resolution_ids: list[str] | None = None,
+                          resolved_dependencies: list[dict] | None = None) -> dict:
     section_headers = ["## 5.", "## 6.", "## 7.", "## 8.", "## 9."]
     if settings.alert_rule_creation_enabled and action_intent == _ALERT_ACTION_INTENT:
         section_headers.append("## 12.")
@@ -757,6 +1322,17 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
     prompt_parts.append(f"\nUser question: {question}")
     prompt_parts.append(f"\npanic_mode is currently: {panic_mode}")
     prompt_parts.append(f"\naction_intent (from the routing phase): {action_intent!r}")
+    if resolution_ids:
+        prompt_parts.append(
+            f"\nDependency-resolution stage: produce results ONLY for these intent IDs: "
+            f"{json.dumps(resolution_ids)}. Include the matching `resolution_id` on every result."
+        )
+    if resolved_dependencies:
+        prompt_parts.append(
+            "\nAlready-executed dependency results (authoritative runtime data; use their concrete "
+            "labels/values to scope this stage's query):\n"
+            + json.dumps(resolved_dependencies, ensure_ascii=False)
+        )
     if context.previous_question:
         prompt_parts.append(
             f"\nThis is a follow-up clarification. Original question: "
@@ -767,7 +1343,9 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
     prompt = "\n\n".join(prompt_parts)
     response = llm_client.call_llm_json(
         prompt=prompt,
-        system_instruction=_build_generator_instructions(settings, action_intent),
+        system_instruction=_build_generator_instructions(
+            settings, action_intent, dependency_stage=bool(resolution_ids)
+        ),
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
     )

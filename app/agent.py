@@ -6,7 +6,12 @@ from google.adk.agents.base_agent import BaseAgent
 from google.adk.events.event import Event
 from google.adk.agents.invocation_context import InvocationContext
 
-from app.pipeline import PipelineContext, run_pipeline
+from app.pipeline import (
+    PipelineContext,
+    run_dependency_aware_pipeline,
+    run_pipeline,
+    synthesize_executed_contract,
+)
 from app.config import get_settings
 from app import executor
 from app.skill_index import SkillIndex
@@ -39,7 +44,16 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         clean_question = question.strip().lower()
 
         if pending_proposal and clean_question in ("yes", "confirm", "y", "no", "discard", "cancel", "n"):
-            if clean_question in ("yes", "confirm", "y"):
+            if clean_question in ("yes", "confirm", "y") and not settings.alert_rule_creation_enabled:
+                # A proposal may have been stored while this feature was on
+                # and then survive until a later request after it is turned
+                # off. Enforce the flag at this second write boundary too.
+                logger.warning("Discarding pending alert proposal because alert-rule creation is disabled")
+                result = {
+                    "status": "discarded",
+                    "explanation": "Alert-rule creation is currently disabled on this deployment.",
+                }
+            elif clean_question in ("yes", "confirm", "y"):
                 from app import grafana_client
                 alert_rule = pending_proposal.get("alert_rule")
                 try:
@@ -97,10 +111,19 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         # 4. Run the pipeline
         try:
             import asyncio
-            contract = await asyncio.wait_for(
-                run_pipeline(question, skill_index, settings, context=pipeline_context),
-                timeout=settings.pipeline_timeout_seconds,
-            )
+            if settings.dependent_query_resolution_enabled:
+                staged_result = await asyncio.wait_for(
+                    run_dependency_aware_pipeline(question, skill_index, settings, context=pipeline_context),
+                    timeout=settings.pipeline_timeout_seconds,
+                )
+                contract = staged_result.contract
+                already_executed = staged_result.already_executed
+            else:
+                contract = await asyncio.wait_for(
+                    run_pipeline(question, skill_index, settings, context=pipeline_context),
+                    timeout=settings.pipeline_timeout_seconds,
+                )
+                already_executed = False
         except asyncio.TimeoutError:
             logger.error("Pipeline timed out after %.0fs", settings.pipeline_timeout_seconds)
             yield Event(
@@ -159,7 +182,9 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             return
 
         # 6. Execute contract
-        executed = executor.execute_contract(contract, settings)
+        executed = contract if already_executed else executor.execute_contract(contract, settings)
+        if settings.dependent_query_resolution_enabled:
+            executed = synthesize_executed_contract(executed)
         yield Event(
             invocation_id=ctx.invocation_id,
             author=self.name,

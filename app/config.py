@@ -49,6 +49,14 @@ class Settings(BaseSettings):
                     "explicit confirmation call (see app/api/routes_alerts.py); it only "
                     "controls whether that proposal step is reachable at all.",
     )
+    dependent_query_resolution_enabled: bool = Field(
+        default=False,
+        description="Feature flag for staged resolution of compound queries whose later "
+                    "intent depends on an entity selected by an earlier query. Defaults "
+                    "to OFF so ordinary Router/Generator prompts and the legacy flat "
+                    "execution path remain byte-for-byte unchanged until a deployment "
+                    "has explicitly opted in.",
+    )
     grafana_url: str = Field(
         default="http://localhost:3000",
         description="Base URL of the Grafana instance alert rules are created against. "
