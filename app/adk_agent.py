@@ -108,6 +108,8 @@ RULES
 - For greetings or casual conversation: respond naturally without using any tools.
 - Never fabricate dashboard names, UIDs, or metric values.
 - Never expose raw JSON. Summarize naturally.
+- CONTEXT RESOLUTION: When the user refers to "this dashboard", "the dashboard", or "it", inspect the prior conversation turns in this session to identify which dashboard name or UID was previously discussed. Do not ask for the dashboard name or UID again if it was already identified earlier in this chat.
+- If the user asks to "update this dashboard" without specifying changes, explicitly confirm the dashboard you will be modifying (by name and UID) and ask what specific changes, metrics, or panels they want to apply.
 """
 
 from google.adk.models.google_llm import Gemini
@@ -290,6 +292,8 @@ def run_adk_agent(
             "proposal": PROPOSALS.get(proposal_id),
             "errors": (tool_outcome or {}).get("errors", []),
             "timings": timings,
+            "sessionId": session_id,
+            "conversationId": session_id,
         }
 
     if final_text:
@@ -299,6 +303,8 @@ def run_adk_agent(
             "agent_response": final_text,
             "raw_json": raw_jsons,
             "timings": timings,
+            "sessionId": session_id,
+            "conversationId": session_id,
         }
 
     if tool_outcome:
@@ -318,6 +324,8 @@ def run_adk_agent(
             "raw_json": raw_jsons,
             "errors": tool_outcome.get("errors", []),
             "timings": timings,
+            "sessionId": session_id,
+            "conversationId": session_id,
         }
 
     return {
@@ -326,4 +334,6 @@ def run_adk_agent(
         "agent_response": "Agent completed the turn with no output.",
         "raw_json": raw_jsons,
         "timings": timings,
+        "sessionId": session_id,
+        "conversationId": session_id,
     }
