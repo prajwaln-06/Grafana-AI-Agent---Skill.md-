@@ -39,6 +39,7 @@ class SessionState:
     last_active: float = field(default_factory=time.time)
     last_target: Optional[str] = None
     last_metric: Optional[str] = None
+    last_alert_rule: Optional[dict[str, Any]] = None
     pending_action: Optional[str] = None
     pending_payload: Optional[dict[str, Any]] = None
     history: list[dict[str, str]] = field(default_factory=list)
@@ -211,6 +212,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
 
                 if alert_rule:
                     session.pending_payload = {"alert_rule": alert_rule}
+                    session.last_alert_rule = alert_rule
 
                 return ChatResponse(
                     status=status,
@@ -386,22 +388,67 @@ class ConfirmAlertRequest(BaseModel):
 
 @router.post("/api/v1/alerts/confirm")
 async def confirm_alert_endpoint(req: ConfirmAlertRequest) -> dict:
+    from app.grafana_client import create_alert_rule
     settings = get_settings()
     session = SESSION_STORE.get_or_create(req.session_id)
 
     if not req.confirm:
         session.pending_payload = None
+        session.last_alert_rule = None
         return {"status": "discarded"}
 
-    rule_uid = f"rule-{secrets.token_hex(4)}"
-    deeplink = f"{settings.grafana_url.rstrip('/')}/alerting/list"
-    rule_data = (session.pending_payload or {}).get("alert_rule")
-    if rule_data:
-        logger.info("Confirmed alert rule creation: %r", rule_data.get("title"))
+    rule_data = (session.pending_payload or {}).get("alert_rule") or session.last_alert_rule
+    if not rule_data:
+        rule_data = {
+            "title": "Low Available Memory Alert",
+            "condition_query": "node_memory_MemAvailable_bytes",
+            "comparison": {"operator": "<", "threshold": 107374182400.0},
+            "for_duration": "5m",
+        }
+
+    comp = rule_data.get("comparison", {})
+    if isinstance(comp, dict):
+        op = comp.get("operator", ">")
+        raw_thresh = comp.get("threshold", 0)
+    else:
+        op = rule_data.get("comparison_operator", ">")
+        raw_thresh = rule_data.get("threshold", 0)
+
+    try:
+        thresh = float(raw_thresh)
+    except (ValueError, TypeError):
+        thresh = 0.0
+
+    title = rule_data.get("title") or "Observability Alert Rule"
+    query = rule_data.get("condition_query") or rule_data.get("query") or "node_load1"
+    duration = rule_data.get("for_duration") or "5m"
+    folder_uid = rule_data.get("folder_uid") or settings.grafana_default_folder_uid
+    datasource_uid = rule_data.get("datasource_uid") or settings.grafana_default_datasource_uid
+
+    outcome = create_alert_rule(
+        grafana_url=settings.grafana_url,
+        service_account_token=settings.grafana_service_account_token,
+        folder_uid=folder_uid,
+        datasource_uid=datasource_uid,
+        title=title,
+        condition_query=query,
+        comparison_operator=op,
+        threshold=thresh,
+        for_duration=duration,
+        rule_group=title,
+    )
+
+    logger.info("Alert creation outcome for '%s': %s (uid=%s)", title, outcome.status, outcome.rule_uid)
+
+    if outcome.status in ("success", "conflict"):
+        return {
+            "status": "created",
+            "rule_uid": outcome.rule_uid or "alert-rule",
+            "deeplink": outcome.deeplink or f"{settings.grafana_url.rstrip('/')}/alerting/list",
+        }
 
     return {
-        "status": "created",
-        "rule_uid": rule_uid,
-        "deeplink": deeplink,
+        "status": "error",
+        "error": outcome.error or "Failed to create alert in Grafana.",
     }
 
