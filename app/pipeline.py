@@ -744,20 +744,20 @@ def _apply_alert_rule_defaults(contract: dict, settings: Settings) -> dict:
 
 
 def _normalize_contract_shape(contract: dict) -> dict:
-    """Repairs one specific, observed class of Generator near-miss: the
-    model produces a structurally-correct single result object (a valid
-    `status` plus that status's own required fields, e.g. a well-formed
-    `unsupported_metric` entry) but omits the top-level `"mode"` envelope
-    key SKILL.md Section 9 requires around it. This is purely a wrapper
-    inference -- it never invents, guesses, or alters any field's VALUE, so
-    it cannot introduce a fabricated metric name, label key, or query the
-    way a content-level "fix" would. If `contract` already has a `mode`
-    key, or doesn't look like a recognizable single/multi shape at all,
-    it's returned untouched and the deterministic validator will report
-    whatever's actually wrong with it -- this function only ever adds the
-    one specific key it's confident about, never papers over anything else.
+    """Repairs safe, envelope-only Generator near-misses.
+
+    A model can omit `mode` from an otherwise-complete result, or choose a
+    `multi` envelope while producing exactly one result. Both have a single
+    deterministic representation in Section 9 and can be repaired without
+    changing any result content. Other malformed shapes remain validator
+    failures rather than being guessed into validity.
     """
-    if not isinstance(contract, dict) or "mode" in contract:
+    if not isinstance(contract, dict):
+        return contract
+    if contract.get("mode") == "multi" and isinstance(contract.get("results"), list) \
+            and len(contract["results"]) == 1:
+        return {"mode": "single", **contract["results"][0]}
+    if "mode" in contract:
         return contract
     if isinstance(contract.get("results"), list) and "synthesis" in contract:
         return {"mode": "multi", **contract}
@@ -1127,6 +1127,14 @@ live-confirmed label list given to you below -- if a scope constraint the
 user gave you can't be mapped to a confirmed label key, do not guess; use
 declined/parameter_requires_clarification (Section 5 Principle 9, Section
 7.2, Section 8) instead of inventing one.
+
+Representative live label values, when supplied below, are runtime metadata
+that may establish a label key's semantic scope. For example, observed values
+such as `node-01` under `node_id` establish that this confirmed key carries
+node identifiers, so you may use it to preserve a user-supplied node value
+(the sample is not an exhaustive value-existence check). Do not infer scope
+from the label key's name; if the runtime values do not establish a mapping,
+decline for clarification.
 
 When you classify a request as `ambiguous_metric`, every entry in
 `candidates` must be a metric whose OWN documented Purpose genuinely matches

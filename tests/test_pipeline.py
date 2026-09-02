@@ -240,6 +240,30 @@ def test_generator_multi_mode_missing_wrapper_is_also_repaired(skill_index, sett
     assert len(result["results"]) == 2
 
 
+def test_generator_single_entry_inside_multi_envelope_is_repaired(skill_index, settings):
+    """A one-entry result must use the single envelope. This harmless model
+    wrapper error should not become an internal validation failure in the UI."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    generated = {
+        "mode": "multi",
+        "results": [{
+            "status": "declined", "reason": "parameter_requires_clarification",
+            "explanation": "The requested node scope cannot be mapped safely.",
+            "clarification": "Which runtime label identifies these nodes?",
+        }],
+        "synthesis": None,
+    }
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=generated)]), \
+         patch.object(label_discovery, "discover_labels_for_metrics", return_value={}):
+        result = _run(pipeline.run_pipeline("CPU utilization for node-01 and node-02", skill_index, settings))
+
+    assert result == {"mode": "single", **generated["results"][0]}
+
+
 def test_out_of_scope_action_missing_requested_action_still_fails_loudly(skill_index, settings):
     """The companion real bug from the same test run: the Router
     misclassified a plain data request ('Show me memory.') as
