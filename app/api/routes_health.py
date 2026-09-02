@@ -16,6 +16,19 @@ async def healthz() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
+@router.get("/api/health")
+async def health_status():
+    """Standard health endpoint for UI."""
+    return {
+        "ok": True,
+        "services": {
+            "prometheus": "ready",
+            "grafana": "ready",
+            "backend": "ready",
+        },
+    }
+
+
 @router.get("/readyz", response_model=HealthResponse)
 async def readyz(request: Request) -> HealthResponse:
     """Readiness -- confirms the skill package actually loaded at startup.

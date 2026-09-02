@@ -30,17 +30,15 @@ async def query(request: Request, body: QueryRequest) -> QueryResponse:
     if body.session_id:
         entry = store.get(body.session_id)
         if entry is None:
-            raise HTTPException(
-                status_code=410,
-                detail="This session has expired or doesn't exist. Please ask the "
-                       "original question again.",
+            logger.warning("Session %s not found or expired; starting fresh context", body.session_id)
+            context = PipelineContext()
+        else:
+            context = PipelineContext(
+                previous_question=entry.question,
+                previous_result=entry.result,
+                clarification_answer=body.question,
             )
-        context = PipelineContext(
-            previous_question=entry.question,
-            previous_result=entry.result,
-            clarification_answer=body.question,
-        )
-        store.delete(body.session_id)
+            store.delete(body.session_id)
 
     try:
         contract = await asyncio.wait_for(
@@ -233,12 +231,38 @@ async def get_glance_board(request: Request) -> dict:
     settings = get_settings()
     panels = []
     
-    board_queries = [
-        ("cpu_busy", "CPU busy", '100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)', "percent", "prometheus"),
-        ("demo_latency", "Memory Available", "node_memory_MemAvailable_bytes", "bytes", "prometheus"),
-        ("demo_errors", "GPU Temperature", "DCGM_FI_DEV_GPU_TEMP", "celsius", "prometheus"),
-        ("error_logs", "GPU Utilization", "DCGM_FI_DEV_GPU_UTIL", "percent", "prometheus"),
-    ]
+    requested_ids = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and isinstance(body.get("panel_ids"), list):
+            requested_ids = body.get("panel_ids")
+    except Exception:
+        pass
+
+    catalog = {
+        "cpu_busy": ("CPU Busy %", '100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)', "percent", "prometheus"),
+        "memory_avail": ("Memory Available", "node_memory_MemAvailable_bytes", "bytes", "prometheus"),
+        "gpu_temp": ("GPU Temperature", "DCGM_FI_DEV_GPU_TEMP", "celsius", "prometheus"),
+        "gpu_util": ("GPU Utilization", "DCGM_FI_DEV_GPU_UTIL", "percent", "prometheus"),
+        # Backward-compatible aliases
+        "demo_latency": ("Memory Available", "node_memory_MemAvailable_bytes", "bytes", "prometheus"),
+        "demo_errors": ("GPU Temperature", "DCGM_FI_DEV_GPU_TEMP", "celsius", "prometheus"),
+        "error_logs": ("GPU Utilization", "DCGM_FI_DEV_GPU_UTIL", "percent", "prometheus"),
+    }
+
+    default_order = ["cpu_busy", "memory_avail", "gpu_temp", "gpu_util"]
+    selected_ids = requested_ids if requested_ids else default_order
+
+    seen = set()
+    board_queries = []
+    for pid in selected_ids:
+        if pid in catalog and pid not in seen:
+            seen.add(pid)
+            title, expr, unit, source = catalog[pid]
+            board_queries.append((pid, title, expr, unit, source))
+
+    if not board_queries:
+        board_queries = [(pid, *catalog[pid]) for pid in default_order]
     
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=1)

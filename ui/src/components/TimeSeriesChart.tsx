@@ -327,14 +327,17 @@ export default function TimeSeriesChart({
     padding: "8px 12px",
   };
 
+  // If only 1 time point (instant query), auto-render gauge instead of empty line
+  const effectiveType = data.length <= 1 && (selectedType === "line" || selectedType === "area") ? "gauge" : selectedType;
+
   return (
     <div className="chart-container" style={{ position: "relative" }}>
       {/* Render View Based on selectedType chosen autonomously by chart_selection */}
-      {selectedType === "gauge" ? (
+      {effectiveType === "gauge" ? (
         <SvgGauge
           value={stats.latest}
           min={0}
-          max={unit === "percent" || unit === "%" ? 100 : Math.ceil(stats.max * 1.2) || 100}
+          max={unit === "percent" || unit === "%" || stats.latest <= 100 ? 100 : Math.ceil(stats.max * 1.2) || 100}
           unit={unit}
           title={series[0]?.name || "Telemetry Gauge"}
           theme={theme}
@@ -420,7 +423,7 @@ export default function TimeSeriesChart({
       ) : selectedType === "area" ? (
         <div className="chart-wrap" style={{ height }}>
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}>
+            <AreaChart data={data} margin={compact ? { top: 4, right: 4, left: 4, bottom: 2 } : { top: 8, right: 12, left: 0, bottom: 4 }}>
               <defs>
                 {visibleKeys.map((key, i) => (
                   <linearGradient key={key} id={`area-grad-${i}`} x1="0" y1="0" x2="0" y2="1">
@@ -429,13 +432,13 @@ export default function TimeSeriesChart({
                   </linearGradient>
                 ))}
               </defs>
-              <CartesianGrid stroke={theme.grid} strokeDasharray="2 8" vertical={false} />
-              <XAxis dataKey="t" tickFormatter={formatTick} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} minTickGap={48} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} tickFormatter={(v) => formatValue(Number(v), unit)} width={56} />
+              {!compact && <CartesianGrid stroke={theme.grid} strokeDasharray="2 8" vertical={false} />}
+              <XAxis hide={compact} dataKey="t" tickFormatter={formatTick} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} minTickGap={48} />
+              <YAxis hide={compact} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} tickFormatter={(v) => formatValue(Number(v), unit)} width={compact ? 0 : 56} />
               <Tooltip contentStyle={tooltipStyle} labelFormatter={(ts) => formatTooltipTime(Number(ts))} formatter={(val: number, name: string) => [formatValue(val, unit), name]} />
-              <Legend align="left" verticalAlign="top" height={24} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 11, color: theme.muted }} />
+              {!compact && <Legend align="left" verticalAlign="top" height={24} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 11, color: theme.muted }} />}
               {visibleKeys.map((key, i) => (
-                <Area key={key} type="monotone" dataKey={key} stroke={COLORS[i % COLORS.length]} strokeWidth={2} fill={`url(#area-grad-${i})`} connectNulls />
+                <Area key={key} type="monotone" dataKey={key} stroke={COLORS[i % COLORS.length]} strokeWidth={compact ? 1.6 : 2} fill={`url(#area-grad-${i})`} connectNulls />
               ))}
             </AreaChart>
           </ResponsiveContainer>
@@ -443,14 +446,14 @@ export default function TimeSeriesChart({
       ) : (
         <div className="chart-wrap" style={{ height }}>
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}>
-              <CartesianGrid stroke={theme.grid} strokeDasharray="2 8" vertical={false} />
-              <XAxis dataKey="t" tickFormatter={formatTick} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} minTickGap={48} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} tickFormatter={(v) => formatValue(Number(v), unit)} width={56} />
+            <LineChart data={data} margin={compact ? { top: 4, right: 4, left: 4, bottom: 2 } : { top: 8, right: 12, left: 0, bottom: 4 }}>
+              {!compact && <CartesianGrid stroke={theme.grid} strokeDasharray="2 8" vertical={false} />}
+              <XAxis hide={compact} dataKey="t" tickFormatter={formatTick} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} minTickGap={48} />
+              <YAxis hide={compact} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} tickFormatter={(v) => formatValue(Number(v), unit)} width={compact ? 0 : 56} />
               <Tooltip cursor={{ stroke: theme.cursor, strokeWidth: 1 }} contentStyle={tooltipStyle} labelFormatter={(ts) => formatTooltipTime(Number(ts))} formatter={(val: number, name: string) => [formatValue(val, unit), name]} />
-              <Legend align="left" verticalAlign="top" height={24} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 11, color: theme.muted }} />
+              {!compact && <Legend align="left" verticalAlign="top" height={24} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 11, color: theme.muted }} />}
               {visibleKeys.map((key, i) => (
-                <Line key={key} type="monotone" dataKey={key} stroke={COLORS[i % COLORS.length]} strokeWidth={2.1} dot={false} activeDot={{ r: 3.5 }} connectNulls />
+                <Line key={key} type="monotone" dataKey={key} stroke={COLORS[i % COLORS.length]} strokeWidth={compact ? 1.6 : 2.1} dot={false} activeDot={{ r: 3.5 }} connectNulls />
               ))}
             </LineChart>
           </ResponsiveContainer>

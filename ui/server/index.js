@@ -35,7 +35,7 @@ const OPENSEARCH_TIMESTAMP_FIELD =
   process.env.OPENSEARCH_TIMESTAMP_FIELD || "@timestamp";
 const GRAFANA_URL = process.env.GRAFANA_URL || "http://localhost:3000";
 const ADK_SERVICE_URL = process.env.ADK_SERVICE_URL || process.env.BACKEND_URL || "http://127.0.0.1:8008";
-const ADK_PROXY_TIMEOUT_MS = readPositiveIntEnv("ADK_PROXY_TIMEOUT_MS", 30000, 60000);
+const ADK_PROXY_TIMEOUT_MS = readPositiveIntEnv("ADK_PROXY_TIMEOUT_MS", 120000, 120000);
 const BACKEND_TIMEOUT_MS = readPositiveIntEnv("BACKEND_TIMEOUT_MS", 12000, 60000);
 const MAX_ADK_PROXY_BYTES = 5 * 1024 * 1024;
 const MAX_BOARD_PANELS = 12;
@@ -173,24 +173,24 @@ app.get("/api/search", async (req, res) => {
 
     const panelDefs = [
       {
-        id: "demo_errors",
-        title: "Errors",
-        terms: ["error", "errors", "demo", "panel", "metric"],
-      },
-      {
-        id: "demo_latency",
-        title: "Latency",
-        terms: ["latency", "ms", "demo", "panel", "metric"],
-      },
-      {
         id: "cpu_busy",
         title: "CPU Busy %",
         terms: ["cpu", "usage", "busy", "processor", "node", "panel", "metric", "health"],
       },
       {
-        id: "error_logs",
-        title: "Error Log Rate",
-        terms: ["log", "logs", "error", "loki", "opensearch", "panel"],
+        id: "memory_avail",
+        title: "Memory Available",
+        terms: ["memory", "ram", "available", "node", "panel", "metric"],
+      },
+      {
+        id: "gpu_temp",
+        title: "GPU Temperature",
+        terms: ["gpu", "temp", "temperature", "celsius", "thermal", "panel", "metric"],
+      },
+      {
+        id: "gpu_util",
+        title: "GPU Utilization",
+        terms: ["gpu", "utilization", "usage", "compute", "load", "panel", "metric"],
       },
     ];
 
@@ -589,10 +589,18 @@ app.post("/api/adk/chat", async (req, res) => {
 
     const remote = await proxyAdk("/api/adk/chat", {
       method: "POST",
-      timeoutMs: 30000,
-      body: JSON.stringify({ message: normalizedMessage, use_llm: true }),
+      timeoutMs: 120000,
+      body: JSON.stringify({
+        message: normalizedMessage,
+        use_llm: true,
+        sessionId: req.body?.sessionId || req.body?.conversationId || null,
+        conversation_id: req.body?.sessionId || req.body?.conversationId || null,
+      }),
     });
     if (remote && remote.statusCode >= 200 && remote.statusCode < 300 && remote.data?.status !== "error") {
+      return res.json(remote.data);
+    }
+    if (remote && remote.data && (remote.data.kind || remote.data.text || remote.data.proposal || remote.data.proposalId)) {
       return res.json(remote.data);
     }
 
@@ -624,7 +632,7 @@ app.all("/api/conversations*", async (req, res) => {
   try {
     const remote = await proxyAdk(req.originalUrl, {
       method: req.method,
-      timeoutMs: 30000,
+      timeoutMs: ADK_PROXY_TIMEOUT_MS,
       body: ["POST", "PUT", "PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
     });
     if (remote) return res.status(remote.statusCode).json(remote.data);
@@ -638,7 +646,7 @@ app.all("/api/v1/query*", async (req, res) => {
   try {
     const remote = await proxyAdk(req.originalUrl, {
       method: req.method,
-      timeoutMs: 30000,
+      timeoutMs: ADK_PROXY_TIMEOUT_MS,
       body: ["POST", "PUT", "PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
     });
     if (remote) return res.status(remote.statusCode).json(remote.data);
@@ -786,7 +794,7 @@ app.post("/api/adk/flows/run", async (req, res) => {
 
 app.post("/api/adk/glance/board", async (req, res) => {
   try {
-    const defaultIds = ["demo_errors", "demo_latency", "cpu_busy", "error_logs"];
+    const defaultIds = ["cpu_busy", "memory_avail", "gpu_temp", "gpu_util"];
     const requestedIds = req.body?.panel_ids;
     if (requestedIds != null && !Array.isArray(requestedIds)) {
       return res.status(400).json({ error: "panel_ids must be an array" });
@@ -825,7 +833,7 @@ function readPositiveIntEnv(name, fallback, maximum) {
 function normalizeTimeout(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0
-    ? Math.min(Math.floor(parsed), 60000)
+    ? Math.min(Math.floor(parsed), 120000)
     : fallback;
 }
 
@@ -1002,20 +1010,33 @@ function fetchBackend(url, init = {}) {
 
 async function runLocalGlancePanel(panelId, rangeLabel = "1h") {
   const panels = {
-    demo_errors: { title: "Errors", expr: "demo_errors_total", unit: "short", source: "prometheus" },
-    demo_latency: { title: "Latency", expr: "demo_latency_ms", unit: "ms", source: "prometheus" },
     cpu_busy: {
       title: "CPU Busy %",
       expr: '100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
       unit: "percent",
       source: "prometheus",
     },
-    error_logs: {
-      title: "Error Log Rate",
-      expr: 'sum(count_over_time({container="log-generator-ai-lab"} |= "level=error" [5m]))',
-      unit: "short",
-      source: "loki",
+    memory_avail: {
+      title: "Memory Available",
+      expr: "node_memory_MemAvailable_bytes",
+      unit: "bytes",
+      source: "prometheus",
     },
+    gpu_temp: {
+      title: "GPU Temperature",
+      expr: "DCGM_FI_DEV_GPU_TEMP",
+      unit: "celsius",
+      source: "prometheus",
+    },
+    gpu_util: {
+      title: "GPU Utilization",
+      expr: "DCGM_FI_DEV_GPU_UTIL",
+      unit: "percent",
+      source: "prometheus",
+    },
+    demo_errors: { title: "GPU Temperature", expr: "DCGM_FI_DEV_GPU_TEMP", unit: "celsius", source: "prometheus" },
+    demo_latency: { title: "Memory Available", expr: "node_memory_MemAvailable_bytes", unit: "bytes", source: "prometheus" },
+    error_logs: { title: "GPU Utilization", expr: "DCGM_FI_DEV_GPU_UTIL", unit: "percent", source: "prometheus" },
   };
   const panel = panels[panelId];
   if (!panel) return { panel_id: panelId, title: panelId, status: "error", error: "Unknown panel", series: [] };
@@ -1249,7 +1270,7 @@ async function runAdkFlow(message) {
   let toolResult = null;
 
   if (intent === "glance") {
-    const panelIds = ["demo_errors", "demo_latency", "cpu_busy", "error_logs"];
+    const panelIds = ["cpu_busy", "memory_avail", "gpu_temp", "gpu_util"];
     const panels = await Promise.all(panelIds.map((panelId) => runLocalGlancePanel(panelId, "1h")));
     charts = panels.filter((panel) => panel.status === "success");
     const failures = panels.filter((panel) => panel.status !== "success");

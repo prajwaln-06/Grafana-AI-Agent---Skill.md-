@@ -213,20 +213,21 @@ def _explicit_metric_panels(text: str, discovered_metrics: list[str]) -> list[di
         match = re.search(rf"(?<![A-Za-z0-9_:]){re.escape(metric)}(?![A-Za-z0-9_:])", text)
         if match:
             matches.append({"metric": metric, "position": match.start()})
-    if len(matches) > 1:
-        raise ValueError("Multiple concrete metrics were identified; specify the panels and visualizations you want for each metric.")
     if not matches:
         return []
     visualization_match = re.search(r"\b(time\s*series|timeseries|stat|gauge|bar\s*chart|barchart|table|pie\s*chart|piechart|histogram|heatmap|geomap|node\s*graph|nodegraph|logs?)\b", text, re.I)
     visualization = _visualization_name(visualization_match.group(1)) if visualization_match else "timeseries"
-    return [{
-        "measurement": None,
-        "metric": matches[0]["metric"],
-        "visualization": visualization,
-        "existingVisualization": "",
-        "allowEquivalent": bool(re.search(r"\b(another|additional|extra|second)\b", text, re.I)),
-        "position": matches[0]["position"],
-    }]
+    panels = []
+    for m in matches:
+        panels.append({
+            "measurement": None,
+            "metric": m["metric"],
+            "visualization": visualization,
+            "existingVisualization": "",
+            "allowEquivalent": bool(re.search(r"\b(another|additional|extra|second)\b", text, re.I)),
+            "position": m["position"],
+        })
+    return panels
 
 
 def _panel_matches_metric(panel: dict, metric: str) -> bool:

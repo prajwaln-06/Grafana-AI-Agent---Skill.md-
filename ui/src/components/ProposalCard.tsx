@@ -501,26 +501,50 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
   );
 }
 
+function getPanelSeries(panel: PanelIR) {
+  const qr = (panel as any).queryResult;
+  return ((qr?.series || []) as Array<{ labels?: Record<string, string>; points?: Array<{ timestamp: number | string; value: number | null }> }>)
+    .map((s, index) => ({
+      index,
+      labels: s.labels || {},
+      points: (s.points || [])
+        .map((p) => ({ timestamp: Number(p.timestamp), value: Number(p.value) }))
+        .filter((p) => Number.isFinite(p.timestamp) && Number.isFinite(p.value)),
+    }))
+    .filter((s) => s.points.length > 0);
+}
+
+function getLatestPoint(panel: PanelIR) {
+  const s = getPanelSeries(panel);
+  return s.flatMap((item) => item.points).sort((a, b) => b.timestamp - a.timestamp)[0] || null;
+}
+
+function formatPanelValue(v: number | null | undefined, panel: PanelIR) {
+  if (v == null || !Number.isFinite(Number(v))) return "—";
+  const unit = panel.visualizationConfig?.unit;
+  const suffix = unit === "percent" || unit === "%" ? "%" : unit === "celsius" ? " °C" : unit === "bytes" ? " B" : unit ? ` ${unit}` : "";
+  return `${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}${suffix}`;
+}
+
 /**
  * Renders SVG visualization themed with the Grafana application palette
  */
 function RenderExactPreview({ panel }: { panel: PanelIR }) {
-  const viz = (panel.visualizationType || "gauge").toLowerCase();
+  const viz = (panel.visualizationType || "timeseries").toLowerCase();
   const cfg = (panel as any).visualizationConfig || {};
   const queryResult = (panel as any).queryResult;
 
+  if (queryResult?.status === "loading") {
+    return <div className="empty" style={{ textAlign: "center", color: "var(--muted)", padding: "40px" }}>Loading preview...</div>;
+  }
+  if (queryResult?.status === "error") {
+    return <div className="empty error" style={{ textAlign: "center", color: "#f87171", padding: "40px" }}>{queryResult.error || "Datasource query failed"}</div>;
+  }
+
   // 1. Radial SVG Gauge
   if (viz === "gauge") {
-    let rawVal = 0;
-    if (typeof queryResult?.value === "number") {
-      rawVal = queryResult.value;
-    } else if (queryResult?.value) {
-      rawVal = parseFloat(queryResult.value) || 0;
-    } else if (queryResult?.series?.[0]?.points?.length) {
-      const pts = queryResult.series[0].points;
-      rawVal = pts[pts.length - 1]?.value ?? 0;
-    }
-
+    const latestPt = getLatestPoint(panel);
+    let rawVal = latestPt?.value ?? (typeof queryResult?.value === "number" ? queryResult.value : 0);
     const min = typeof cfg.min === "number" ? cfg.min : 0;
     const max = typeof cfg.max === "number" ? cfg.max : 100;
     const ratio = Math.max(0, Math.min(1, (rawVal - min) / (max - min || 1)));
@@ -528,117 +552,93 @@ function RenderExactPreview({ panel }: { panel: PanelIR }) {
     const rad = (angle * Math.PI) / 180;
     const x = 150 + 105 * Math.cos(rad);
     const y = 135 + 105 * Math.sin(rad);
-
-    const display = `${Math.round(rawVal)}${cfg.unit === "percent" || !cfg.unit ? "%" : ` ${cfg.unit}`}`;
+    const display = formatPanelValue(rawVal, panel);
 
     return (
-      <svg
-        className="gauge"
-        viewBox="0 0 300 175"
-        style={{ width: "100%", height: "100%" }}
-      >
-        {/* Title above gauge */}
-        <text
-          x="150"
-          y="42"
-          textAnchor="middle"
-          fill="var(--muted)"
-          fontSize="13"
-          fontWeight="600"
-        >
+      <svg className="gauge" viewBox="0 0 300 175" style={{ width: "100%", height: "100%" }}>
+        <text x="150" y="42" textAnchor="middle" fill="var(--muted)" fontSize="13" fontWeight="600">
           {panel.title}
         </text>
-
-        {/* Background Track Arc */}
-        <path
-          d="M45 135 A105 105 0 0 1 255 135"
-          fill="none"
-          stroke="var(--border-strong)"
-          strokeWidth="18"
-          strokeLinecap="round"
-        />
-
-        {/* Active Amount Arc */}
-        <path
-          d="M45 135 A105 105 0 0 1 255 135"
-          fill="none"
-          stroke="var(--primary)"
-          strokeWidth="18"
-          strokeLinecap="round"
-          pathLength="100"
-          strokeDasharray={`${ratio * 100} 100`}
-        />
-
-        {/* Needle */}
-        <line
-          x1="150"
-          y1="135"
-          x2={x}
-          y2={y}
-          stroke="var(--text)"
-          strokeWidth="3"
-          strokeLinecap="round"
-        />
+        <path d="M45 135 A105 105 0 0 1 255 135" fill="none" stroke="var(--border-strong)" strokeWidth="18" strokeLinecap="round" />
+        <path d="M45 135 A105 105 0 0 1 255 135" fill="none" stroke="var(--primary)" strokeWidth="18" strokeLinecap="round" pathLength="100" strokeDasharray={`${ratio * 100} 100`} />
+        <line x1="150" y1="135" x2={x} y2={y} stroke="var(--text)" strokeWidth="3" strokeLinecap="round" />
         <circle cx="150" cy="135" r="4" fill="var(--primary)" />
-
-        {/* Big centered numeric readout */}
-        <text
-          x="150"
-          y="165"
-          textAnchor="middle"
-          fill="var(--text)"
-          fontSize="22"
-          fontWeight="bold"
-        >
-          {display}
-        </text>
+        <text x="150" y="165" textAnchor="middle" fill="var(--text)" fontSize="22" fontWeight="bold">{display}</text>
       </svg>
     );
   }
 
-  // 2. Time Series SVG Chart
+  // 2. Real Time Series SVG Chart from actual Prometheus points
   if (viz === "timeseries") {
+    const data = getPanelSeries(panel);
+    if (!data.length) {
+      return <div className="empty" style={{ textAlign: "center", color: "var(--muted)", padding: "40px" }}>No data available</div>;
+    }
+    const all = data.flatMap((s) => s.points);
+    const xs = all.map((p) => p.timestamp);
+    const ys = all.map((p) => p.value);
+    const xmin = Math.min(...xs);
+    const xmax = Math.max(...xs);
+    const ymin = Math.min(...ys);
+    const ymax = Math.max(...ys);
+    const xd = xmax - xmin || 1;
+    const yd = ymax - ymin || 1;
+    const xy = (p: { timestamp: number; value: number }) => ({
+      x: 34 + ((p.timestamp - xmin) / xd) * 532,
+      y: 178 - ((p.value - ymin) / yd) * 140,
+    });
+    const colors = ["#55d7c3", "#f5b95f", "#8aa8ff", "#ef769f"];
+    const latestPt = getLatestPoint(panel);
+
     return (
-      <svg
-        className="chart"
-        viewBox="0 0 600 210"
-        style={{ width: "100%", height: "100%" }}
-      >
+      <svg className="chart" viewBox="0 0 600 210" style={{ width: "100%", height: "100%" }}>
         <line x1="34" y1="178" x2="566" y2="178" stroke="var(--border)" />
         <line x1="34" y1="38" x2="34" y2="178" stroke="var(--border)" />
-        <line x1="34" y1="108" x2="566" y2="108" stroke="var(--border)" strokeDasharray="4" />
-        {/* Wave path */}
-        <path
-          d="M 34 140 Q 150 70, 250 120 T 420 90 T 566 115"
-          fill="none"
-          stroke="var(--primary)"
-          strokeWidth="3"
-        />
-        <path
-          d="M 34 140 Q 150 70, 250 120 T 420 90 T 566 115 L 566 178 L 34 178 Z"
-          fill="var(--primary-soft)"
-        />
-        {/* Sample points */}
-        <circle cx="34" cy="140" r="5" fill="var(--primary)" />
-        <circle cx="250" cy="120" r="5" fill="var(--primary)" />
-        <circle cx="420" cy="90" r="5" fill="var(--primary)" />
-        <circle cx="566" cy="115" r="5" fill="var(--primary)" />
-        <text x="38" y="25" fill="var(--text)" fontSize="13" fontWeight="bold">
-          Latest {panel.title}
+        <line x1="34" y1="108" x2="566" y2="108" stroke="var(--border)" strokeDasharray="4" opacity="0.3" />
+
+        {data.map((s, i) => {
+          const color = colors[i % colors.length];
+          const dPath = s.points
+            .map((p, j) => {
+              const c = xy(p);
+              return `${j ? "L" : "M"} ${c.x} ${c.y}`;
+            })
+            .join(" ");
+          return (
+            <g key={i}>
+              <path d={dPath} fill="none" stroke={color} strokeWidth="2.5" />
+              {s.points.map((p, j) => {
+                const c = xy(p);
+                return (
+                  <circle
+                    key={j}
+                    cx={c.x}
+                    cy={c.y}
+                    r={3.5}
+                    fill={color}
+                  >
+                    <title>{`${new Date(p.timestamp * 1000).toLocaleTimeString()}: ${p.value}`}</title>
+                  </circle>
+                );
+              })}
+            </g>
+          );
+        })}
+
+        <text x="38" y="25" fill="#55d7c3" fontSize="13" fontWeight="bold">
+          {latestPt ? `Latest ${formatPanelValue(latestPt.value, panel)}` : panel.title}
         </text>
       </svg>
     );
   }
 
-  // 3. Stat KPI
+  // 3. Real Stat KPI
   if (viz === "stat") {
+    const latestPt = getLatestPoint(panel);
     return (
-      <div
-        className="stat"
-        style={{ textAlign: "center", display: "grid", gap: "4px" }}
-      >
-        <strong style={{ fontSize: "3.8rem", color: "var(--primary)" }}>
-          {panel.title.includes("CPU") ? "12.4%" : "48.2%"}
+      <div className="stat" style={{ textAlign: "center", display: "grid", gap: "4px", padding: "20px" }}>
+        <strong style={{ fontSize: "3.2rem", color: "var(--primary)" }}>
+          {latestPt ? formatPanelValue(latestPt.value, panel) : "—"}
         </strong>
         <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
           Current live result
@@ -647,76 +647,38 @@ function RenderExactPreview({ panel }: { panel: PanelIR }) {
     );
   }
 
-  // 4. Bar Chart
-  if (viz === "barchart") {
+  // 4. Real Table / Logs
+  const data = getPanelSeries(panel);
+  if (data.length > 0) {
     return (
-      <div
-        className="bars"
-        style={{
-          width: "92%",
-          height: "80%",
-          display: "flex",
-          alignItems: "flex-end",
-          gap: "8px",
-          borderBottom: "1px solid var(--border)",
-          paddingBottom: "4px",
-        }}
-      >
-        {[40, 65, 30, 85, 50, 75, 45, 90].map((h, i) => (
-          <i
-            key={i}
-            style={{
-              flex: 1,
-              background: i % 2 === 0 ? "var(--primary)" : "var(--warn)",
-              height: `${h}%`,
-              borderRadius: "4px 4px 0 0",
-              minWidth: "8px",
-            }}
-          />
-        ))}
+      <div className="table" style={{ width: "100%", height: "100%", overflow: "auto", padding: "10px" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.78rem", color: "var(--text)" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
+              <th style={{ padding: "6px", textAlign: "left" }}>Labels</th>
+              <th style={{ padding: "6px", textAlign: "left" }}>Timestamp</th>
+              <th style={{ padding: "6px", textAlign: "left" }}>Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.map((s) =>
+              s.points.slice(-6).map((p, j) => (
+                <tr key={`${s.index}-${j}`} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <td style={{ padding: "6px" }}>{Object.entries(s.labels).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}</td>
+                  <td style={{ padding: "6px" }}>{new Date(p.timestamp * 1000).toLocaleTimeString()}</td>
+                  <td style={{ padding: "6px", color: "var(--primary)" }}>{formatPanelValue(p.value, panel)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
       </div>
     );
   }
 
-  // 5. Table / Logs
   return (
-    <div
-      className="table"
-      style={{
-        width: "100%",
-        height: "100%",
-        overflow: "auto",
-        padding: "10px",
-      }}
-    >
-      <table
-        style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: "0.78rem",
-          color: "var(--text)",
-        }}
-      >
-        <thead>
-          <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
-            <th style={{ padding: "8px", textAlign: "left" }}>Timestamp</th>
-            <th style={{ padding: "8px", textAlign: "left" }}>Instance</th>
-            <th style={{ padding: "8px", textAlign: "left" }}>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr style={{ borderBottom: "1px solid var(--border)" }}>
-            <td style={{ padding: "8px" }}>now-5m</td>
-            <td style={{ padding: "8px" }}>node-exporter:9100</td>
-            <td style={{ padding: "8px", color: "var(--green)" }}>healthy</td>
-          </tr>
-          <tr>
-            <td style={{ padding: "8px" }}>now-1m</td>
-            <td style={{ padding: "8px" }}>cadvisor:8080</td>
-            <td style={{ padding: "8px", color: "var(--green)" }}>healthy</td>
-          </tr>
-        </tbody>
-      </table>
+    <div className="empty" style={{ textAlign: "center", color: "var(--muted)", padding: "40px" }}>
+      No data available
     </div>
   );
 }

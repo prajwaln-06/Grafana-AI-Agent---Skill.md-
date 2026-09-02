@@ -40,6 +40,7 @@ from typing import Any
 
 from app import normalizer, opensearch_client, prometheus_client, time_utils
 from app.config import Settings
+from chart_selection.selector import select_chart_type
 
 logger = logging.getLogger(__name__)
 
@@ -265,12 +266,15 @@ def _find_range_clauses(node: Any) -> list[tuple[str, dict]]:
 
 def _success_block(normalized: normalizer.NormalizedResult, endpoint: str,
                     resolved_time_range: dict | None) -> dict:
+    norm_dict = normalized.to_dict()
+    chart_type = select_chart_type(norm_dict)
     return {
         "execution_status": "success" if normalized.count > 0 else "empty_result",
+        "chart_type": chart_type,
         "resolved_time_range": resolved_time_range,
         "endpoint": endpoint,
         "fetched_at": _now_iso(),
-        **normalized.to_dict(),
+        **norm_dict,
     }
 
 

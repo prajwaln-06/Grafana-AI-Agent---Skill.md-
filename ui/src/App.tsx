@@ -18,25 +18,40 @@ type ExplorerTarget = {
 const THEME_KEY = "observability-lab-theme";
 
 const PANEL_TO_EXPLORER: Record<string, ExplorerTarget> = {
-  demo_errors: {
+  gpu_temp: {
     sourceId: "prometheus",
-    metricId: "demo_dataset",
-    queryId: "demo_error_rate",
+    metricId: "gpu",
+    queryId: "gpu_temp",
   },
-  demo_latency: {
+  gpu_util: {
     sourceId: "prometheus",
-    metricId: "demo_dataset",
-    queryId: "demo_latency",
+    metricId: "gpu",
+    queryId: "gpu_util",
+  },
+  memory_avail: {
+    sourceId: "prometheus",
+    metricId: "memory",
+    queryId: "memory_avail",
   },
   cpu_busy: {
     sourceId: "prometheus",
     metricId: "cpu",
     queryId: "cpu_busy",
   },
+  demo_errors: {
+    sourceId: "prometheus",
+    metricId: "gpu",
+    queryId: "gpu_temp",
+  },
+  demo_latency: {
+    sourceId: "prometheus",
+    metricId: "memory",
+    queryId: "memory_avail",
+  },
   error_logs: {
-    sourceId: "opensearch",
-    metricId: "app_logs",
-    queryId: "error_logs_rate",
+    sourceId: "prometheus",
+    metricId: "gpu",
+    queryId: "gpu_util",
   },
 };
 

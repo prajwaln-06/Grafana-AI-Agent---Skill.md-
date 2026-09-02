@@ -1,5 +1,6 @@
 import logging
 import os
+import secrets
 import time
 from typing import Any, Optional
 
@@ -207,8 +208,8 @@ def run_adk_agent(
         user_text += f"\nTime range: {time_range}"
 
     runner = get_adk_runner()
-    user_id = f"user-{conversation_id}"
-    session_id = conversation_id
+    user_id = f"user-{conversation_id or 'default'}"
+    session_id = conversation_id or f"sess_{secrets.token_hex(8)}"
 
     message = genai_types.Content(
         role="user",

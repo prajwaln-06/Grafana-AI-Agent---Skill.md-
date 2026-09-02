@@ -159,7 +159,7 @@ async def create_proposal_direct(req: CreateProposalRequest):
 
 @router.post("/api/adk/chat")
 async def adk_chat_endpoint(req: AdkChatRequest):
-    cid = req.conversationId or req.sessionId or "default-session"
+    cid = req.conversationId or req.sessionId or f"sess_{secrets.token_hex(8)}"
     result = run_adk_agent(
         request=req.message,
         conversation_id=cid,

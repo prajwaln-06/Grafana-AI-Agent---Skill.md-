@@ -5,10 +5,10 @@ import ProposalCard from "./ProposalCard";
 import TimeSeriesChart from "./TimeSeriesChart";
 
 const DEFAULT_PANEL_IDS = [
-  "demo_errors",
-  "demo_latency",
   "cpu_busy",
-  "error_logs",
+  "memory_avail",
+  "gpu_temp",
+  "gpu_util",
 ];
 
 function uid() {
@@ -26,6 +26,7 @@ export default function AdkAssistantTab({
 }: Props) {
   const [board, setBoard] = useState<GlancePanelResult[]>([]);
   const [boardLoading, setBoardLoading] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -129,73 +130,106 @@ export default function AdkAssistantTab({
 
   return (
     <div className="glance-shell">
-      <div className="glance-workspace">
-        <aside className="glance-metrics" aria-label="Live metrics">
-          <header className="glance-panel-head">
-            <div>
-              <h3>Metrics</h3>
-              <p className="glance-sub rail">
-                {boardLoading
-                  ? "Loading…"
-                  : boardStats.total
-                    ? `${boardStats.live} live · ${boardStats.offline} offline`
-                    : "No panels"}
-              </p>
-            </div>
-            <button
-              type="button"
-              className="btn quiet"
-              onClick={() => void loadBoard()}
-              disabled={boardLoading}
-            >
-              {boardLoading ? "…" : "Refresh"}
-            </button>
-          </header>
-
-          <div className="metrics-rail">
-            {boardLoading &&
-              [0, 1, 2, 3].map((i) => (
-                <div
-                  key={i}
-                  className="glance-card skeleton"
-                  aria-hidden="true"
-                >
-                  <div className="skel-line w40" />
-                  <div className="skel-line w70" />
-                  <div className="skel-chart" />
-                </div>
-              ))}
-
-            {!boardLoading &&
-              board.map((panel) => (
-                <GlanceCard
-                  key={panel.panel_id}
-                  panel={panel}
-                  expanded={expandedId === panel.panel_id}
-                  onToggle={() =>
-                    setExpandedId((id) =>
-                      id === panel.panel_id ? null : panel.panel_id
-                    )
-                  }
-                />
-              ))}
-
-            {!boardLoading && !board.length && (
-              <div className="metrics-rail-empty">
-                <p className="query-empty-title">No metrics</p>
-                <p className="muted small">
-                  Start local services, then refresh.
+      <div
+        className="glance-workspace"
+        style={{
+          gridTemplateColumns: sidebarOpen
+            ? "minmax(300px, 340px) minmax(0, 1fr)"
+            : "minmax(0, 1fr)",
+        }}
+      >
+        {sidebarOpen && (
+          <aside className="glance-metrics" aria-label="Live metrics">
+            <header className="glance-panel-head">
+              <div>
+                <h3>Metrics</h3>
+                <p className="glance-sub rail">
+                  {boardLoading
+                    ? "Loading…"
+                    : boardStats.total
+                      ? `${boardStats.live} live · ${boardStats.offline} offline`
+                      : "No panels"}
                 </p>
               </div>
-            )}
-          </div>
-        </aside>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <button
+                  type="button"
+                  className="btn quiet"
+                  onClick={() => void loadBoard()}
+                  disabled={boardLoading}
+                >
+                  {boardLoading ? "…" : "Refresh"}
+                </button>
+                <button
+                  type="button"
+                  className="btn quiet"
+                  onClick={() => setSidebarOpen(false)}
+                  title="Collapse metrics rail"
+                  style={{ padding: "4px 8px" }}
+                >
+                  ✕
+                </button>
+              </div>
+            </header>
+
+            <div className="metrics-rail">
+              {boardLoading &&
+                [0, 1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    className="glance-card skeleton"
+                    aria-hidden="true"
+                  >
+                    <div className="skel-line w40" />
+                    <div className="skel-line w70" />
+                    <div className="skel-chart" />
+                  </div>
+                ))}
+
+              {!boardLoading &&
+                board.map((panel) => (
+                  <GlanceCard
+                    key={panel.panel_id}
+                    panel={panel}
+                    expanded={expandedId === panel.panel_id}
+                    onToggle={() =>
+                      setExpandedId((id) =>
+                        id === panel.panel_id ? null : panel.panel_id
+                      )
+                    }
+                  />
+                ))}
+
+              {!boardLoading && !board.length && (
+                <div className="metrics-rail-empty">
+                  <p className="query-empty-title">No metrics</p>
+                  <p className="muted small">
+                    Start local services, then refresh.
+                  </p>
+                </div>
+              )}
+            </div>
+          </aside>
+        )}
 
         <section className="glance-chat">
           <header className="glance-panel-head chat">
-            <div>
-              <h3>Chat</h3>
-              <p className="glance-sub rail">Ask anything about your system</p>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              {!sidebarOpen && (
+                <button
+                  type="button"
+                  className="btn quiet"
+                  style={{ fontSize: "12px", padding: "4px 10px" }}
+                  onClick={() => setSidebarOpen(true)}
+                  title="Show Metrics Rail"
+                >
+                  📊 Show Metrics
+                </button>
+              )}
+              <div>
+                <h3>Chat</h3>
+                <p className="glance-sub rail">Ask anything about your system</p>
+              </div>
             </div>
             {loading && <span className="chat-status-live">Working…</span>}
           </header>
@@ -235,11 +269,11 @@ export default function AdkAssistantTab({
             }}
           >
             {[
-              { label: "📋 Create Dashboard", prompt: "Create a dashboard on Grafana." },
-              { label: "📈 CPU Utilization", prompt: "What is the CPU utilization on node-exporter:9100?" },
-              { label: "📊 Memory Usage", prompt: "Show memory utilization on my instances" },
-              { label: "🔍 List Dashboards", prompt: "List all available dashboards" },
-              { label: "📜 Error Logs", prompt: "Show recent error logs" },
+              { label: "📋 Create Dashboard", prompt: "create a dashboard for node_cpu_seconds_total" },
+              { label: "📈 CPU Over Time", prompt: "Compare CPU utilization across all nodes over the last hour" },
+              { label: "📊 Memory Usage", prompt: "Show memory utilization across instances over the last hour" },
+              { label: "🔍 List Dashboards", prompt: "list dashboards" },
+              { label: "⚡ CPU Gauge", prompt: "What is current CPU utilization" },
             ].map((chip) => (
               <button
                 key={chip.label}
@@ -298,7 +332,7 @@ function GlanceCard({
   const hasSeries = ok && panel.series?.length > 0;
   const kind = sourceKind(panel.source);
   const errorCopy = friendlyPanelError(panel.error);
-  const chartHeight = expanded ? 180 : 72;
+  const chartHeight = expanded ? 200 : 85;
 
   return (
     <article
@@ -364,7 +398,7 @@ function GlanceCard({
               series={panel.series}
               unit={panel.unit}
               height={chartHeight}
-              compact
+              compact={!expanded}
             />
           )
         ) : (
@@ -392,13 +426,17 @@ function friendlySource(source?: string) {
 }
 
 function friendlyPanelTitle(panel: GlancePanelResult) {
+  if (panel.title) return panel.title;
   const map: Record<string, string> = {
-    demo_errors: "Errors",
-    demo_latency: "Latency",
+    gpu_temp: "GPU Temperature",
+    gpu_util: "GPU Utilization",
     cpu_busy: "CPU busy",
-    error_logs: "Error log rate",
+    memory_avail: "Memory Available",
+    demo_errors: "GPU Temperature",
+    demo_latency: "Memory Available",
+    error_logs: "GPU Utilization",
   };
-  return map[panel.panel_id] || panel.title;
+  return map[panel.panel_id] || panel.panel_id;
 }
 
 function friendlyPanelError(error?: string) {
@@ -715,6 +753,7 @@ function polishAnswer(answer: string): string {
 function formatLatest(value: number | null | undefined, unit?: string) {
   if (value == null || Number.isNaN(value)) return "—";
   if (unit === "percent") return `${value.toFixed(1)}%`;
+  if (unit === "celsius" || unit === "°C") return `${value.toFixed(1)} °C`;
   if (unit === "ms") return `${value.toFixed(1)} ms`;
   if (unit === "bytes") {
     return value > 1e9

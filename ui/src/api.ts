@@ -67,9 +67,12 @@ export async function adkChat(
   message: string,
   sessionId?: string | null
 ): Promise<AdkChatResponse> {
-  const isDashboardQuery = /\b(dashboard|dashboards|propose|panel|panels|create|remove|delete|list)\b/i.test(message);
+  const normalized = message.trim();
+  const isDashboardAction = /\b(dashboard|dashboards|panel|panels)\b/i.test(normalized) &&
+    !/\b(alert|alerts|alarm|rule|notification|notify)\b/i.test(normalized);
 
-  if (isDashboardQuery) {
+  // 1. Dashboard authoring & inspection -> ADK proposal engine
+  if (isDashboardAction) {
     try {
       const adkRaw = await json<{
         kind?: string;
@@ -77,13 +80,11 @@ export async function adkChat(
         agent_response?: string;
         proposalId?: string;
         proposal?: any;
-        raw_json?: any[];
-        timings?: any;
         errors?: any[];
       }>("/api/adk/chat", {
         method: "POST",
         body: JSON.stringify({
-          message,
+          message: normalized,
           sessionId: sessionId || null,
         }),
       });
@@ -109,185 +110,158 @@ export async function adkChat(
         };
       }
 
-      if (adkRaw.text || adkRaw.agent_response) {
-        return {
-          status: "ok",
-          framework: "Google ADK + FastMCP",
-          intent: "dashboard",
-          agents: ["ADK Agent", "MCP-Grafana"],
-          steps: [
-            { step: 1, agent: "ADK Agent", action: "queried Grafana MCP", result: "completed" },
-          ],
-          answer: adkRaw.text || adkRaw.agent_response || "Done.",
-          queryUsed: null,
-          series: null,
-          dashboardLink: null,
-          usedLlm: true,
-          sessionId: sessionId || null,
-        };
-      }
-    } catch {
-      // Fall through to query pipeline if adk chat errors
+      return {
+        status: "ok",
+        framework: "Google ADK + FastMCP",
+        intent: "dashboard",
+        agents: ["ADK Agent", "MCP-Grafana"],
+        steps: [
+          { step: 1, agent: "ADK Agent", action: "queried Grafana MCP", result: "completed" },
+        ],
+        answer: adkRaw.text || adkRaw.agent_response || "Done.",
+        queryUsed: null,
+        series: null,
+        dashboardLink: null,
+        usedLlm: true,
+        sessionId: sessionId || null,
+      };
+    } catch (err: any) {
+      // If dashboard tool failed, surface error directly
+      throw new Error(err?.message || "Failed to communicate with dashboard agent.");
     }
   }
 
-    type QueryEntry = {
-      mode?: string;
-      status?: string;
-      explanation?: string;
-      clarification?: string;
-      candidates?: Array<{ name: string; purpose?: string }>;
-      caveat?: string;
-      data_source?: string;
-      query?: string | Record<string, unknown>;
-      reference_used?: string;
-      execution?: {
-        execution_status?: string;
-        chart_type?: string;
-        result_type?: string;
-        series?: Array<{
-          labels?: Record<string, string>;
-          legend_label?: string;
-          points?: Array<{ timestamp: string | number; value: number | null }>;
-        }>;
-        buckets?: Array<{ key: string; doc_count: number }>;
-        hits?: Array<{ timestamp: string; severity: string; body: string }>;
-        error?: string;
-      };
+  // 2. Metrics queries, alerting, and observability -> Query Pipeline
+  type QueryEntry = {
+    mode?: string;
+    status?: string;
+    explanation?: string;
+    clarification?: string;
+    candidates?: Array<{ name: string; purpose?: string }>;
+    caveat?: string;
+    data_source?: string;
+    query?: string | Record<string, unknown>;
+    reference_used?: string;
+    alert_rule?: any;
+    execution?: {
+      execution_status?: string;
+      chart_type?: string;
+      result_type?: string;
+      series?: Array<{
+        labels?: Record<string, string>;
+        legend_label?: string;
+        points?: Array<{ timestamp: string | number; value: number | null }>;
+      }>;
+      buckets?: Array<{ key: string; doc_count: number }>;
+      hits?: Array<{ timestamp: string; severity: string; body: string }>;
+      error?: string;
     };
+  };
 
-  try {
-    const raw = await json<{
-      result: QueryEntry & {
-        results?: QueryEntry[];
-        synthesis?: string | null;
-      };
-      session_id?: string | null;
-    }>("/api/v1/query", {
-      method: "POST",
-      body: JSON.stringify({
-        question: message,
-        session_id: sessionId || null,
-      }),
-    });
+  const raw = await json<{
+    result: QueryEntry & {
+      results?: QueryEntry[];
+      synthesis?: string | null;
+      alert_rule?: any;
+    };
+    session_id?: string | null;
+  }>("/api/v1/query", {
+    method: "POST",
+    body: JSON.stringify({
+      question: normalized,
+      session_id: sessionId || null,
+    }),
+  });
 
-    const res = raw.result;
-    const mode = res.mode || "single";
-    const entries: QueryEntry[] = mode === "multi" ? res.results || [] : [res];
+  const res = raw.result;
+  const mode = res.mode || "single";
+  const entries: QueryEntry[] = mode === "multi" ? res.results || [] : [res];
 
-    let answer = "";
-    if (mode === "multi" && res.synthesis) {
-      answer = res.synthesis;
-    } else {
-      const explanations = entries
-        .map((e) => e.explanation || e.clarification || "")
-        .filter(Boolean);
-      answer = explanations.join("\n\n") || "Query executed.";
+  let answer = "";
+  if (mode === "multi" && res.synthesis) {
+    answer = res.synthesis;
+  } else {
+    const explanations = entries
+      .map((e) => e.explanation || e.clarification || "")
+      .filter(Boolean);
+    answer = explanations.join("\n\n") || "Query executed.";
+  }
+
+  const allSeries: Array<{
+    name: string;
+    labels: Record<string, string>;
+    points: Array<{ t: number; v: number | null }>;
+  }> = [];
+
+  const queriesUsed: string[] = [];
+
+  for (const entry of entries) {
+    if (entry.query) {
+      queriesUsed.push(
+        typeof entry.query === "string"
+          ? entry.query
+          : JSON.stringify(entry.query)
+      );
     }
 
-    // If query was unsupported by metrics pipeline, try ADK agent
-    if (res.status === "unsupported_metric" || answer.includes("outside the scope")) {
-      try {
-        const adkFallback = await json<any>("/api/adk/chat", {
-          method: "POST",
-          body: JSON.stringify({ message, sessionId: sessionId || null }),
-        });
-        if (adkFallback.text || adkFallback.agent_response) {
+    if (entry.execution?.series) {
+      for (const s of entry.execution.series) {
+        let name = s.legend_label;
+        if (!name) {
+          const labels = s.labels || {};
+          const parts: string[] = [];
+          if (labels.node_id) parts.push(labels.node_id);
+          else if (labels.instance) parts.push(labels.instance.replace(/:\d+$/, ""));
+          if (labels.mode) parts.push(labels.mode);
+          if (labels.cpu !== undefined) parts.push(`cpu${labels.cpu}`);
+          if (labels.service) parts.push(labels.service);
+          if (parts.length > 0) {
+            name = parts.join(" · ");
+          } else {
+            const filtered = Object.entries(labels).filter(([k]) => !["job", "cluster", "__name__"].includes(k));
+            name = filtered.length > 0 ? filtered.map(([k, v]) => `${k}=${v}`).join(", ") : "metric";
+          }
+        }
+        const points = (s.points || []).map((p) => {
+          const rawTs = p.timestamp;
+          const ts = typeof rawTs === "string" ? new Date(rawTs).getTime() : Number(rawTs);
           return {
-            status: "ok",
-            framework: "Google ADK + FastMCP",
-            intent: "general",
-            agents: ["ADK Agent", "MCP-Grafana"],
-            steps: [{ step: 1, agent: "ADK Agent", action: "queried tools", result: "success" }],
-            answer: adkFallback.text || adkFallback.agent_response,
-            queryUsed: null,
-            series: null,
-            dashboardLink: null,
-            usedLlm: true,
-            sessionId: sessionId || null,
-            proposalId: adkFallback.proposalId,
-            proposal: adkFallback.proposal,
+            t: ts > 1e12 ? Math.floor(ts / 1000) : ts,
+            v: p.value,
           };
-        }
-      } catch {
-        // use original answer
+        });
+        allSeries.push({ name, labels: s.labels || {}, points });
       }
     }
-
-    const allSeries: Array<{
-      name: string;
-      labels: Record<string, string>;
-      points: Array<{ t: number; v: number | null }>;
-    }> = [];
-
-    const queriesUsed: string[] = [];
-
-    for (const entry of entries) {
-      if (entry.query) {
-        queriesUsed.push(
-          typeof entry.query === "string"
-            ? entry.query
-            : JSON.stringify(entry.query)
-        );
-      }
-
-      if (entry.execution?.series) {
-        for (const s of entry.execution.series) {
-          const name =
-            s.legend_label ||
-            (s.labels
-              ? Object.entries(s.labels)
-                  .map(([k, v]) => `${k}=${v}`)
-                  .join(", ")
-              : "metric");
-          const points = (s.points || []).map((p) => {
-            const rawTs = p.timestamp;
-            const ts = typeof rawTs === "string" ? new Date(rawTs).getTime() : Number(rawTs);
-            return {
-              t: ts > 1e12 ? Math.floor(ts / 1000) : ts,
-              v: p.value,
-            };
-          });
-          allSeries.push({ name, labels: s.labels || {}, points });
-        }
-      }
-    }
-
-    const steps = [
-      { step: 1, agent: "Router", action: "matched domain skill", result: entries[0]?.reference_used || "skills" },
-      { step: 2, agent: "Generator", action: "constructed query", result: queriesUsed[0] || "PromQL" },
-      { step: 3, agent: "Validator", action: "mechanically audited rules", result: "passed" },
-      { step: 4, agent: "Executor", action: "executed query", result: entries[0]?.execution?.execution_status || "success" },
-    ];
-
-    const firstEntry = entries[0];
-    const caveat = firstEntry?.caveat ? `\n\n*Note: ${firstEntry.caveat}*` : "";
-
-    return {
-      status: firstEntry?.status || "ok",
-      framework: "FastAPI + SKILL.md v3",
-      intent: (firstEntry?.data_source as string) || "metrics",
-      agents: ["Router", "Generator", "Validator", "Executor"],
-      steps,
-      answer: answer + caveat,
-      queryUsed: queriesUsed.join("\n") || null,
-      series: allSeries.length > 0 ? allSeries : null,
-      dashboardLink: null,
-      usedLlm: true,
-      chartType: (firstEntry?.execution as Record<string, unknown> | undefined)?.chart_type as string || "line",
-      sessionId: raw.session_id || null,
-      candidates: firstEntry?.candidates || undefined,
-      alertRule: (firstEntry as any)?.alert_rule || (raw.result as any)?.alert_rule || null,
-      backendResult: raw,
-    };
-  } catch (err) {
-    return json<AdkChatResponse>("/api/adk/chat", {
-      method: "POST",
-      body: JSON.stringify({ message }),
-    }).catch(() => {
-      throw err;
-    });
   }
+
+  const steps = [
+    { step: 1, agent: "Router", action: "matched domain skill", result: entries[0]?.reference_used || "skills" },
+    { step: 2, agent: "Generator", action: "constructed query", result: queriesUsed[0] || "PromQL" },
+    { step: 3, agent: "Validator", action: "mechanically audited rules", result: "passed" },
+    { step: 4, agent: "Executor", action: "executed query", result: entries[0]?.execution?.execution_status || "success" },
+  ];
+
+  const firstEntry = entries[0];
+  const caveat = firstEntry?.caveat ? `\n\n*Note: ${firstEntry.caveat}*` : "";
+
+  return {
+    status: firstEntry?.status || "ok",
+    framework: "FastAPI + SKILL.md v3",
+    intent: (firstEntry?.data_source as string) || "metrics",
+    agents: ["Router", "Generator", "Validator", "Executor"],
+    steps,
+    answer: answer + caveat,
+    queryUsed: queriesUsed.join("\n") || null,
+    series: allSeries.length > 0 ? allSeries : null,
+    dashboardLink: null,
+    usedLlm: true,
+    chartType: (firstEntry?.execution as Record<string, unknown> | undefined)?.chart_type as string || "line",
+    sessionId: raw.session_id || null,
+    candidates: firstEntry?.candidates || undefined,
+    alertRule: (firstEntry as any)?.alert_rule || (raw.result as any)?.alert_rule || null,
+    backendResult: raw,
+  };
 }
 
 export function confirmAlert(
