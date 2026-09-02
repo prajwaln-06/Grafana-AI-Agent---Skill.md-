@@ -787,7 +787,9 @@ async def refresh_preview(ir: dict, panel_ids: set[str] | None = None) -> dict:
     async def populate(panel: dict) -> None:
         if panel_ids is not None and str(panel.get("id")) not in panel_ids:
             return
-        datasource_uid = panel.get("datasource", {}).get("uid")
+        ds_info = await resolve_datasource(panel.get("datasource", {}))
+        datasource_uid = ds_info["uid"] if ds_info else panel.get("datasource", {}).get("uid")
+        datasource_type = ds_info["type"].lower() if ds_info else str(panel.get("datasource", {}).get("type", "prometheus")).lower()
         if not panel.get("query") or not datasource_uid:
             panel["queryResult"] = {
                 "status": "error", "type": panel.get("resultType", ""),
@@ -795,7 +797,6 @@ async def refresh_preview(ir: dict, panel_ids: set[str] | None = None) -> dict:
             }
             return
         try:
-            datasource_type = panel.get("datasource", {}).get("type", "prometheus").lower()
             if datasource_type in {"opensearch", "elasticsearch", "grafana-opensearch-datasource"}:
                 raw = _require_mcp_content(
                     await execute_opensearch(panel["query"], datasource_uid, panel.get("index") or "*", f"now-{time_range}", "now", 20),

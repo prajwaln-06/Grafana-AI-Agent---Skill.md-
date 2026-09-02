@@ -10,7 +10,12 @@ from fastapi import APIRouter, HTTPException, Request
 from app import executor
 from app.api.schemas import QueryRequest, QueryResponse
 from app.config import get_settings
-from app.pipeline import PipelineContext, run_pipeline
+from app.pipeline import (
+    PipelineContext,
+    run_dependency_aware_pipeline,
+    run_pipeline,
+    synthesize_executed_contract,
+)
 from app.session_store import get_session_store
 
 logger = logging.getLogger(__name__)
@@ -41,10 +46,19 @@ async def query(request: Request, body: QueryRequest) -> QueryResponse:
             store.delete(body.session_id)
 
     try:
-        contract = await asyncio.wait_for(
-            run_pipeline(body.question, skill_index, settings, context=context),
-            timeout=settings.pipeline_timeout_seconds,
-        )
+        if settings.dependent_query_resolution_enabled:
+            staged_result = await asyncio.wait_for(
+                run_dependency_aware_pipeline(body.question, skill_index, settings, context=context),
+                timeout=settings.pipeline_timeout_seconds,
+            )
+            contract = staged_result.contract
+            already_executed = staged_result.already_executed
+        else:
+            contract = await asyncio.wait_for(
+                run_pipeline(body.question, skill_index, settings, context=context),
+                timeout=settings.pipeline_timeout_seconds,
+            )
+            already_executed = False
     except asyncio.TimeoutError:
         # PIPELINE_TIMEOUT_SECONDS exists in .env for exactly this: a hung
         # Gemini call or an unresponsive Prometheus/OpenSearch backend
@@ -66,7 +80,9 @@ async def query(request: Request, body: QueryRequest) -> QueryResponse:
         new_session_id = store.create(body.question, contract)
         return QueryResponse(result=contract, session_id=new_session_id)
 
-    executed = executor.execute_contract(contract, settings)
+    executed = contract if already_executed else executor.execute_contract(contract, settings)
+    if settings.dependent_query_resolution_enabled:
+        executed = synthesize_executed_contract(executed)
     return QueryResponse(result=executed, session_id=None)
 
 

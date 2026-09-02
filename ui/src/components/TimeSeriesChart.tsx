@@ -98,7 +98,7 @@ function formatValue(v: number | null | undefined, unit?: string): string {
   if (v === null || v === undefined || isNaN(v)) return "—";
   const u = (unit || "").toLowerCase();
   if (u === "percent" || u === "%") return `${v.toFixed(1)}%`;
-  if (u === "bytes" || u === "b") {
+  if (u === "bytes" || u === "b" || (!u && Math.abs(v) >= 1024 ** 3)) {
     const abs = Math.abs(v);
     if (abs >= 1024 ** 4) return `${(v / 1024 ** 4).toFixed(2)} TB`;
     if (abs >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(2)} GB`;
@@ -217,7 +217,7 @@ function SvgGauge({
             {formatValue(value, unit)}
           </div>
           <span style={{ fontSize: "11px", color: theme.mutedDim }}>
-            {min} {unit} → {safeMax} {unit}
+            {formatValue(min, unit)} → {formatValue(safeMax, unit)}
           </span>
         </div>
       </div>

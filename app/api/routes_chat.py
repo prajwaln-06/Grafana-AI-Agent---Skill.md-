@@ -195,7 +195,11 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
     # 3. Intent Classification
     # ------------------------------------------------------------------------
     is_alert_request = bool(re.search(r"\b(alert|alerts|alerting|alarm|rule|rules|notification|notify)\b", text, re.I))
-    is_dashboard_action = bool(re.search(r"\b(dashboard|dashboards|panel|panels)\b", text, re.I)) and not is_alert_request
+    _resolved_mutation = resolve_dashboard_intent(request=text).get("intent")
+    is_dashboard_action = (
+        bool(re.search(r"\b(dashboard|dashboards|panel|panels)\b", text, re.I))
+        or _resolved_mutation in ("CREATE", "UPDATE", "REMOVE")
+    ) and not is_alert_request
 
     # A) Alert Rule Creation / Management
     if is_alert_request:
@@ -307,16 +311,31 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
     if skill_index:
         try:
             from app import executor
-            pipeline_res = await run_pipeline(text, skill_index, settings)
-            if pipeline_res.get("status") not in ("declined", "ambiguous_metric", "unsupported_metric"):
-                pipeline_res = executor.execute_contract(pipeline_res, settings)
+            from app.pipeline import run_dependency_aware_pipeline, synthesize_executed_contract
 
-            first = pipeline_res.get("results", [{}])[0] if pipeline_res.get("mode") == "multi" else pipeline_res
+            if settings.dependent_query_resolution_enabled:
+                staged_res = await run_dependency_aware_pipeline(text, skill_index, settings)
+                pipeline_res = staged_res.contract
+                if not staged_res.already_executed and pipeline_res.get("status") not in ("declined", "ambiguous_metric", "unsupported_metric"):
+                    pipeline_res = executor.execute_contract(pipeline_res, settings)
+                pipeline_res = synthesize_executed_contract(pipeline_res)
+            else:
+                pipeline_res = await run_pipeline(text, skill_index, settings)
+                if pipeline_res.get("status") not in ("declined", "ambiguous_metric", "unsupported_metric"):
+                    pipeline_res = executor.execute_contract(pipeline_res, settings)
+
+            results_list = pipeline_res.get("results") if pipeline_res.get("mode") == "multi" else [pipeline_res]
+            first = results_list[0] if results_list else {}
             status = first.get("status", "ok")
-            query = first.get("query")
-            explanation = first.get("explanation") or pipeline_res.get("synthesis") or "Query executed successfully."
+            query = " ; ".join(r.get("query") for r in results_list if r.get("query")) or first.get("query")
+            explanation = pipeline_res.get("synthesis") or first.get("explanation") or "Query executed successfully."
+            
+            raw_series = []
+            for r in results_list:
+                exec_obj = r.get("execution") or {}
+                raw_series.extend(exec_obj.get("series") or [])
+
             execution = first.get("execution") or {}
-            raw_series = execution.get("series") or []
             data_source = first.get("data_source") or "prometheus"
 
             # Normalize series for UI Recharts rendering
