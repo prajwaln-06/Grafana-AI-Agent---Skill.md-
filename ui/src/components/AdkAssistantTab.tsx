@@ -667,14 +667,29 @@ function AlertProposalCard({
 
 function normalizeResponse(response: AdkChatResponse): AdkChatResponse {
   const firstChart = response.charts?.[0];
+  const resolvedAnswer =
+    response.answer ||
+    response.text ||
+    response.agent_response ||
+    "Done.";
+  const isChat = response.kind === "text" || !response.queryUsed && !firstChart;
+  const resolvedIntent =
+    response.intent ||
+    response.flow?.intent ||
+    (isChat ? "chat" : "metrics");
+  const resolvedAgents =
+    response.agents?.length
+      ? response.agents
+      : isChat
+      ? ["ADK Assistant"]
+      : response.flow?.agents || ["Orchestrator"];
+
   return {
     ...response,
-    intent: response.intent || response.flow?.intent || "metrics",
-    agents: response.agents?.length
-      ? response.agents
-      : response.flow?.agents || ["Orchestrator"],
+    intent: resolvedIntent,
+    agents: resolvedAgents,
     steps: response.steps || [],
-    answer: polishAnswer(response.answer || "Done."),
+    answer: polishAnswer(resolvedAnswer),
     queryUsed: response.queryUsed ?? firstChart?.expr ?? null,
     series: response.series ?? firstChart?.series ?? null,
     dashboardLink:

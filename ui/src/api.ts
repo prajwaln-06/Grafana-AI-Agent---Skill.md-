@@ -281,12 +281,30 @@ export async function adkChat(
       backendResult: raw,
     };
   } catch (err) {
-    return json<AdkChatResponse>("/api/adk/chat", {
+    const fallbackRes = await json<any>("/api/adk/chat", {
       method: "POST",
       body: JSON.stringify({ message }),
     }).catch(() => {
       throw err;
     });
+
+    const isTextChat = fallbackRes.kind === "text" || (!fallbackRes.queryUsed && !fallbackRes.charts?.length);
+    return {
+      status: "ok",
+      framework: "Google ADK + FastMCP",
+      intent: fallbackRes.intent || (isTextChat ? "chat" : "metrics"),
+      agents: fallbackRes.agents?.length ? fallbackRes.agents : (isTextChat ? ["ADK Assistant"] : ["Coordinator", "Metrics", "Summary"]),
+      steps: fallbackRes.steps || [{ step: 1, agent: "ADK Assistant", action: "chat", result: "completed" }],
+      answer: fallbackRes.answer || fallbackRes.text || fallbackRes.agent_response || "Done.",
+      queryUsed: fallbackRes.queryUsed || null,
+      series: fallbackRes.series || null,
+      dashboardLink: fallbackRes.dashboardLink || null,
+      usedLlm: true,
+      sessionId: sessionId || null,
+      proposalId: fallbackRes.proposalId,
+      proposal: fallbackRes.proposal,
+      ...fallbackRes,
+    };
   }
 }
 

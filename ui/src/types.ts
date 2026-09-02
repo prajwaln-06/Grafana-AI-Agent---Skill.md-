@@ -133,7 +133,8 @@ export type AdkChatResponse = {
   intent: string;
   agents: string[];
   steps: AdkStep[];
-  answer: string;
+  answer?: string;
+  text?: string;
   queryUsed: string | null;
   series: Series[] | null;
   dashboardLink: string | null;
