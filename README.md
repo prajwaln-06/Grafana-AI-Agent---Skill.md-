@@ -4,6 +4,9 @@ Standalone FastAPI service that takes a natural-language question, runs it
 through the `observability-query-builder` skill package (Router → Generator
 → deterministic Validator → Executor), executes the resulting query against
 Prometheus and/or OpenSearch, and returns frontend-ready, chart-shaped JSON.
+For ordinary requests this is one Router and one Generator call. An opt-in
+dependency-aware path can execute a root query before constructing a dependent
+query such as "memory available on that node"; see `HANDOFF.md` and `test.md`.
 
 **If you're on the frontend team, or just want the full picture (input/output
 contract, what's implemented vs. pending, how to test, how to update this
@@ -45,6 +48,8 @@ pip install -r requirements-dev.txt   # includes prod requirements + pytest/http
 cp .env.example .env                  # fill in a real GEMINI_API_KEY
 # Confirm PROMETHEUS_URL / OPENSEARCH_URL match your local setup
 # (defaults: http://localhost:9090, http://localhost:9600)
+# Keep DEPENDENT_QUERY_RESOLUTION_ENABLED=false for the legacy flat path.
+# Set it to true, then restart, to enable staged dependent compound queries.
 
 python run_server.py
 ```
@@ -116,8 +121,8 @@ app/
                           never from pipeline.py/executor.py. See SKILL.md
                           §12 and HANDOFF.md's "Alert Rule Creation" section.
   pipeline.py             Router -> Generator -> Validator orchestration,
-                          plus partial-datasource-coverage handling (see
-                          pipeline.py's module docstring).
+                          partial-datasource-coverage handling, and the
+                          opt-in staged dependent-query/synthesis path.
   config.py                Typed settings (env vars, see .env.example).
 skills/                    The observability-query-builder skill package
                             (SKILL.md + references/). Replace this directory
@@ -166,6 +171,11 @@ prior `alert_rule_proposed` result, never a restated rule payload:
 
 `confirm` defaults to `true`. Setting it to `false` discards the proposal
 without creating anything -- the session is consumed either way (single-use).
+The alert feature flag is checked again immediately before every Grafana
+write, and explicit alert-creation wording is deterministically refused when
+the flag is off even if an LLM omits its alert-intent annotation. A proposal
+retained from an earlier enabled session therefore cannot bypass a later
+disabled setting.
 Returns `{"status": "created", "rule_uid": "...", "deeplink": "..."}` on
 success, or a 4xx/5xx with an explanatory `detail` otherwise (expired/
 unknown session → 410; session isn't a pending alert proposal → 409; feature
@@ -174,14 +184,17 @@ disabled → 403; Grafana misconfigured → 500; Grafana unreachable/erroring �
 `HANDOFF.md`'s "Alert Rule Creation" section for the full flow and required
 Grafana-side setup.
 
-### `GET /healthz` / `GET /readyz`
+### `GET /health` / `GET /readyz`
 
 Liveness / readiness. `/readyz` confirms the skill package loaded.
 
 ### `GET /api/v1/capabilities`
 
-Introspection: the currently-loaded skill's routing table, so a frontend
-can know what's covered without learning it from a failed query.
+Introspection: the currently-loaded skill's routing table and the two
+non-secret feature flags actually loaded by this server process, so a
+frontend can know what's covered and whether optional capabilities are on
+without learning it from a failed query. This is the authoritative way to
+verify an `.env` flag after restarting the server.
 
 ### `POST /api/v1/admin/reload-skill`
 
@@ -210,3 +223,9 @@ default (`ALERT_RULE_CREATION_ENABLED=false`) — see `.env.example`'s
 turning it on. This does not extend to silencing, deleting, or modifying an
 existing alert, which remains fully out of scope with no exception,
 unaffected by this flag either way.
+
+Dependency-aware compound resolution is also implemented but disabled by
+default (`DEPENDENT_QUERY_RESOLUTION_ENABLED=false`). When enabled, a query
+whose later scope depends on an earlier result is resolved in stages and may
+receive deterministic, data-grounded multi-result `synthesis`. See
+[`test.md`](./test.md) for the verification procedure.

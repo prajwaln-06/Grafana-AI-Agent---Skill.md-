@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     gemini_api_key: str = Field(..., description="Google Gemini API key.")
-    gemini_model: str = Field(default="gemini-3.7-flash")
+    gemini_model: str = Field(default="gemini-3.5-flash-lite")
 
     # --- Skill package ---
     skills_root: Path = Field(default=Path("skills"),
