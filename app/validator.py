@@ -190,6 +190,9 @@ def _extract_entries(contract: dict) -> list[dict] | ValidationResult:
             "mode:'multi' response is missing the 'synthesis' field (Section 9 "
             "requires the key even when its value is null).",
         )
+    # `synthesis` is deliberately best-effort post-execution enrichment. Its
+    # value may be null even for a staged dependent query: a failed/empty
+    # sibling must never make otherwise valid isolated results fail validation.
     entries = contract["results"]
     if len(entries) < 2:
         return ValidationResult(

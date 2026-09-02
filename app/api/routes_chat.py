@@ -6,6 +6,7 @@ server-side coordinator that maintains persistent multi-turn context.
 """
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 import re
 import secrets
@@ -119,6 +120,13 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
     session = SESSION_STORE.get_or_create(req.sessionId or req.conversationId)
     settings = get_settings()
     skill_index = getattr(request.app.state, "skill_index", None)
+    if not skill_index:
+        from app.skill_index import SkillIndex
+        try:
+            skill_index = SkillIndex.load(settings.skills_root)
+            request.app.state.skill_index = skill_index
+        except Exception as err:
+            logger.error("Could not load skill_index: %s", err)
 
     logger.info("Unified Chat | session=%s | message=%r", session.session_id, text[:100])
 
@@ -330,11 +338,19 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 pts = []
                 for p in s.get("points") or []:
                     raw_ts = p.get("timestamp")
-                    try:
-                        ts = float(raw_ts) if raw_ts is not None else 0.0
-                        t = int(ts / 1000) if ts > 1e12 else int(ts)
-                    except Exception:
-                        t = 0
+                    t = 0
+                    if isinstance(raw_ts, str):
+                        try:
+                            clean_iso = raw_ts.replace("Z", "+00:00")
+                            t = int(datetime.fromisoformat(clean_iso).timestamp())
+                        except Exception:
+                            try:
+                                ts = float(raw_ts)
+                                t = int(ts / 1000) if ts > 1e12 else int(ts)
+                            except Exception:
+                                t = 0
+                    elif isinstance(raw_ts, (int, float)):
+                        t = int(raw_ts / 1000) if raw_ts > 1e12 else int(raw_ts)
                     pts.append({"t": t, "v": p.get("value")})
                 normalized_series.append({"name": name, "labels": labels, "points": pts})
 

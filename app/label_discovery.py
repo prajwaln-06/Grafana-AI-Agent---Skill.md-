@@ -27,6 +27,19 @@ DEFAULT_LOOKBACK = timedelta(hours=6)
 _session: requests.Session | None = None
 
 
+class LabelKeys(list[str]):
+    """Runtime label keys plus representative values seen on live series.
+
+    It remains a list for validator compatibility.  ``sample_values`` is
+    prompt-only evidence that can establish scope semantics without guessing
+    from a label key's name.
+    """
+
+    def __init__(self, keys: list[str], sample_values: dict[str, list[str]]):
+        super().__init__(keys)
+        self.sample_values = sample_values
+
+
 def _get_session() -> requests.Session:
     global _session
     if _session is None:
@@ -57,9 +70,20 @@ def discover_labels_for_metric(base_url: str, metric_name: str,
         return None
 
     keys: set[str] = set()
+    sample_values: dict[str, set[str]] = {}
     for series in body.get("data", []):
-        keys.update(k for k in series.keys() if k != "__name__")
-    return sorted(keys)
+        for key, value in series.items():
+            if key == "__name__":
+                continue
+            keys.add(key)
+            # This is live datasource evidence, rather than scope inferred
+            # from conventional label spelling.  Cap samples to keep prompts
+            # bounded when a label is high-cardinality.
+            sample_values.setdefault(key, set()).add(str(value))
+    return LabelKeys(
+        sorted(keys),
+        {key: sorted(values)[:12] for key, values in sorted(sample_values.items())},
+    )
 
 
 def discover_labels_for_metrics(base_url: str, metric_names: list[str],
@@ -98,12 +122,14 @@ def format_labels_for_prompt(labels_by_metric: dict[str, list[str] | None]) -> s
                           f"name were found in the current window.")
         else:
             lines.append(f"- `{metric}`: {', '.join(keys)}")
-            if "node_id" in keys:
-                lines.append(f"  * Runtime metadata: `node_id` is the confirmed label key for host/node names (e.g. node-00, node-01).")
-            if "instance" in keys:
-                lines.append(f"  * Runtime metadata: `instance` is the confirmed label key for scrape target addresses (e.g. host:port).")
-            if "device" in keys:
-                lines.append(f"  * Runtime metadata: `device` is the confirmed label key for filesystem/disk or interface devices.")
-            if "gpu" in keys:
-                lines.append(f"  * Runtime metadata: `gpu` is the confirmed label key for GPU IDs/numbers.")
+            samples = getattr(keys, "sample_values", {})
+            if samples:
+                rendered_samples = "; ".join(
+                    f"{key}=[{', '.join(repr(value) for value in values)}]"
+                    for key, values in samples.items()
+                )
+                lines.append(
+                    "  Representative live label values (runtime metadata, not a "
+                    f"name-based assumption): {rendered_samples}"
+                )
     return "\n".join(lines)

@@ -113,11 +113,10 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
         import os
         from app.config import get_settings
         settings = get_settings()
-        is_vertex = api_key.startswith("AQ.") or os.environ.get("VERTEXAI", "").lower() in ("true", "1")
+        is_vertex = api_key.startswith("AQ.") or os.environ.get("VERTEXAI", "").lower() in ("true", "1") or True
         if is_vertex:
             client = genai.Client(
                 vertexai=True,
-                api_key=api_key,
                 location=getattr(settings, "vertex_location", "global"),
                 project=getattr(settings, "vertex_project", "project-8d47da29-7cf0-45f0-b55"),
             )

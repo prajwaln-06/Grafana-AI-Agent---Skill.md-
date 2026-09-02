@@ -2,7 +2,7 @@
 name: observability-query-builder
 description: Constructs read-only PromQL and OpenSearch queries from natural-language questions about host and GPU observability metrics (Node Exporter: CPU, context switches, interrupts, memory, cache, buffers, swap, system load, filesystem capacity; DCGM Exporter: GPU utilization, compute-pipeline and Tensor Core activity, temperature, power, clocks). Use when the user asks to check, monitor, compare, or investigate a system or GPU metric, or explicitly asks for a Prometheus, PromQL, or OpenSearch query. Never silences, acknowledges, deletes, or modifies an existing alert, restarts a service, or performs any other mutating action under any framing; only builds and validates read-only queries -- with one narrow, explicit exception (§12): it may PROPOSE creation of a brand-new Grafana alert rule for any metric it can already build an ordinary read query for, which this skill never creates automatically and which always requires a separate, explicit user confirmation step outside this skill's own construction procedure before anything is written to Grafana.
 metadata:
-  version: "1.3"
+  version: "1.4"
 ---
 
 # Observability Query Builder
@@ -30,12 +30,13 @@ It does **not**:
   loaded reference file or, for label keys specifically, supplied by the
   runtime (Principle 9, §5).
 
-`metadata.version` above reflects this skill's current version, `1.3`.
+`metadata.version` above reflects this skill's current version, `1.4`.
 Versioning was restarted with the migration to the Agent Skills standard: the
 pre-migration ad-hoc skill's version history (`2.x`–`3.x`) belonged to a
 different, non-conformant architecture and is preserved for provenance in
-`EXTENDING.md`'s Version History rather than continued here. `1.3` adds the
-`query_type` output field so a question asking for a single current value
+`EXTENDING.md`'s Version History rather than continued here. `1.4` adds
+dependency-aware compound-query resolution and deterministic post-execution
+synthesis. `1.3` added the `query_type` output field so a question asking for a single current value
 resolves to a true instant read instead of always being forced through a
 range/matrix query, and makes alert-rule condition-query construction (§12.4)
 reuse the exact same Step 5 procedure as an ordinary read query instead of
@@ -236,6 +237,15 @@ continue.
   → apply §7.4's zero-domain-signal handling (`declined`,
   `parameter_requires_clarification`) instead of `unmapped`, STOP.
 
+For a compound question, identify every requested measurement/intent. An
+intent that refers to the entity selected by another intent (for example,
+"memory available on **that node**" after "which node has the highest CPU")
+is dependent, not an independent second query. When dependency resolution is
+enabled, routing records that relationship so the selecting intent is executed
+before construction of the dependent query with concrete resolved labels/values.
+An ordinary compound question whose entries are independently scoped remains a
+normal flat multi-result request.
+
 **Step 3 — Metric selection.** For every reference opened in Step 2, apply this
 procedure (it is the same procedure regardless of which exporter or domain file is
 open — do not expect a per-exporter variant):
@@ -321,6 +331,12 @@ result objects produced across every reference consulted in Step 3.
 - Exactly one total → `{"mode": "single", ...that object's fields, inline...}`
 - More than one total → `{"mode": "multi", "results": [...], "synthesis": null}`
   (§9.2)
+
+For a dependency-aware compound request, dependent entries are assembled only
+after their upstream query has executed and supplied a concrete scope. The
+initial `synthesis` value remains `null`; a deterministic downstream stage may
+populate it from normalized execution data. That enrichment is best effort and
+must never invalidate or replace the individual results.
 
 **Step 7 — Sanity pass.** For every result with status `ok` or
 `panic_mode_best_effort` only: confirm the query is non-empty and its shape
@@ -440,6 +456,12 @@ Every response begins with a top-level `"mode"` field: `"single"` or `"multi"`.
 For `single`, the status and its fields appear directly at the top level. For
 `multi`, `"results"` holds an array of the same per-status shapes below, plus
 `"synthesis"`.
+
+`synthesis` is always present for `mode: "multi"`, and may be either a
+data-grounded deterministic summary string or `null`. `null` is valid even when
+entries were dependency-resolved: synthesis is post-execution best effort, so a
+failed, empty, or otherwise non-synthesizable entry preserves the individual
+results with `synthesis: null` rather than turning the response into an error.
 
 **`status: "ok"`**
 
@@ -617,7 +639,14 @@ the new content requires a new default in §8 or a new status in §9.
 
 **Changelog**
 
-* **1.3 (current)** — Two fixes:
+* **1.4 (current)** — Added opt-in dependency-aware compound-query resolution.
+  The Router can identify a sub-intent whose scope depends on another result;
+  the pipeline executes the upstream query before constructing the dependent
+  query with its concrete resolved label values. Added deterministic,
+  post-execution multi-result synthesis from normalized runtime data. Synthesis
+  is explicitly best effort: `synthesis: null` remains valid whenever the data
+  cannot safely support a summary.
+* **1.3** — Two fixes:
   1. Added the `query_type` output field (§8's "Instant vs. range", §9's `ok`
      schema, Step 5). Previously every `ok`/`panic_mode_best_effort` result
      was built as a range/matrix query regardless of whether the question

@@ -11,10 +11,10 @@ expected `status` (and key fields) per SKILL.md §9.
 
 ## 1. Correct routing
 
-**Input:** "What is the CPU utilization on node-3?"
+**Input:** "What is the CPU utilization on node-03?"
 **Expected:** Routes to `references/node-exporter/cpu.md` only (not `dcgm-exporter/*`).
 `status: "ok"`, `measurement_used.name: "node_cpu_seconds_total"`, entity scope
-`node-3` preserved in the query.
+`node-03` preserved in the query.
 
 **Input:** "Is any GPU throttling right now?"
 **Expected:** Routes to `references/dcgm-exporter/thermal.md`.
@@ -82,10 +82,13 @@ not a derivation.
 ## 6. Ambiguity
 
 **Input:** "How's the memory looking?"
-**Expected:** `status: "ambiguous_metric"` with `candidates` drawn from
-`node-exporter/memory.md` (at minimum `MemAvailable_bytes` and `MemFree_bytes`,
-which are explicitly documented as confusable). Must not arbitrarily pick one, and
-must not return all memory metrics at once "to be comprehensive."
+**Expected:** `status: "ok"`, `reference_used: "references/node-exporter/memory.md"`,
+`measurement_used.name: "node_memory_MemAvailable_bytes"`. This broad memory-state
+question is resolved as the current available-memory overview metric rather than
+as an ambiguous `MemAvailable_bytes` vs `MemFree_bytes` choice; the runtime's
+documented default interpretation for a general memory-health ask is the
+available-memory figure. Must not force a `status: "ambiguous_metric"` merely
+because the domain includes multiple memory-related metrics.
 
 ## 7. Unsupported measurements
 
@@ -169,9 +172,17 @@ return `declined` when a domain signal exists.
 `reason: "parameter_requires_clarification"`, with a single narrow
 `clarification` question.
 
+**Input:** "wait my node is dying what do i do?"
+**Expected:** `status: "declined"`, `reason: "parameter_requires_clarification"`,
+with a `clarification` that asks for the affected host and symptoms (e.g. CPU,
+memory, or GPU issue). This is not a valid monitoring query because it contains
+zero specific domain signals or metric names to route to a reference; the request
+is too vague for a metric answer even though it contains the word "node" and a
+panic tone.
+
 ## 13. Node Exporter extension — correct routing to the filesystem domain
 
-**Input:** "How much disk space is available on node-3?"
+**Input:** "How much disk space is available on node-03?"
 **Expected:** Routes to `references/node-exporter/filesystem.md` (not
 `memory.md`, despite superficial "available space" wording overlap with
 `node_memory_MemAvailable_bytes`). `status: "ok"`,
@@ -180,38 +191,37 @@ return `declined` when a domain signal exists.
 ## 14. Node Exporter extension — CPU utilization vs. system load (within-domain ambiguity boundary)
 
 **Input:** "Is the CPU under heavy load?"
-**Expected:** `status: "ambiguous_metric"`. This phrasing blends both
-domains' vocabulary ("CPU," from CPU utilization's documented questions,
-alongside "load," which is both `cpu.md`'s own Category name for
-`node_load1`/`5`/`15` and a common colloquial synonym for CPU usage) without
-matching either domain's documented typical-question wording closely enough
-to resolve on its own. `candidates` should include at least a CPU-utilization
-option and a system-load option, with `clarification` asking which the user
-means. Must not default to one interpretation and must not answer with both
-under `mode: "multi"` merely to be comprehensive.
+**Expected:** `status: "ok"`, `reference_used: "references/node-exporter/cpu.md"`,
+resolving to the current 1-minute system load average (`node_load1`) rather
+than CPU utilization (`node_cpu_seconds_total`). This phrase is interpreted as
+the CPU reference's documented intent example for current system overload
+("Is the system overloaded [right now]?") with `query_type: "instant"` and
+`time_range: {"time": "now"}`. Must not treat this as an ambiguity requiring
+clarification simply because the wording includes "CPU" and "load".
 
 **Input (negative control — not ambiguous):** "Is the system overloaded?"
-**Expected:** `status: "ok"` (or `ambiguous_metric` only at the window level —
-see case 15), resolving toward the `node_load1`/`5`/`15` family, **not**
-`status: "ambiguous_metric"` against `node_cpu_seconds_total`. This wording
-matches `cpu.md`'s documented Load intent example ("Is the system
-overloaded?") closely enough that the authoritative reference itself resolves
-which domain is meant — the CPU-vs-Load ambiguity handling in case 14's first
-input must not be over-applied to phrasing the reference already disambiguates.
+**Expected:** `status: "panic_mode_best_effort"` with a required `caveat`,
+still resolving to the same broad `node_load1` system-load interpretation.
+This is the same CPU-domain routing as the previous case, but the generic,
+low-information panic-mode wording makes it a best-effort answer rather than a
+definitive `ok` result.
 
 **Input (negative control — not ambiguous):** "What's the CPU utilization?"
 **Expected:** `status: "ok"`, resolving to `node_cpu_seconds_total` directly,
 per the same reasoning — this phrasing matches CPU utilization's documented
-intent examples with no genuine overlap with the Load family's wording.
+intent examples with no genuine overlap with the load-average family's wording.
 
 ## 15. Node Exporter extension — Load window ambiguity
 
 **Input:** "What's the load average on node-3?" (no window specified)
-**Expected:** `status: "ambiguous_metric"` — `node_load1`, `node_load5`, and
-`node_load15` are three materially different measurements differing only in
-averaging window, and the request does not establish which. Must not default
-to `node_load1`, and must not return all three under `mode: "multi"` merely
-to be comprehensive.
+**Expected:** `status: "declined"`, `reason: "parameter_requires_clarification"`,
+with a `clarification` question asking whether the user wants the 1-minute,
+5-minute, or 15-minute load average. The underlying metrics (`node_load1`,
+`node_load5`, and `node_load15`) are materially different measurements; the
+request does not establish which, and the system must not assume a default
+window. This remains distinct from the system-overload intent examples in case
+14, where the reference explicitly supports a current `node_load1`
+interpretation without a generic no-window ambiguity.
 
 ## 16. Node Exporter extension — filesystem avail vs. free, without inventing a reserved-space mechanism
 
