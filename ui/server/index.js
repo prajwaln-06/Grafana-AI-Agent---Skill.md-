@@ -35,7 +35,7 @@ const OPENSEARCH_TIMESTAMP_FIELD =
   process.env.OPENSEARCH_TIMESTAMP_FIELD || "@timestamp";
 const GRAFANA_URL = process.env.GRAFANA_URL || "http://localhost:3000";
 const ADK_SERVICE_URL = process.env.ADK_SERVICE_URL || process.env.BACKEND_URL || "http://127.0.0.1:8008";
-const ADK_PROXY_TIMEOUT_MS = readPositiveIntEnv("ADK_PROXY_TIMEOUT_MS", 5000, 60000);
+const ADK_PROXY_TIMEOUT_MS = readPositiveIntEnv("ADK_PROXY_TIMEOUT_MS", 30000, 60000);
 const BACKEND_TIMEOUT_MS = readPositiveIntEnv("BACKEND_TIMEOUT_MS", 12000, 60000);
 const MAX_ADK_PROXY_BYTES = 5 * 1024 * 1024;
 const MAX_BOARD_PANELS = 12;
@@ -634,6 +634,20 @@ app.all("/api/conversations*", async (req, res) => {
   }
 });
 
+app.all("/api/v1/query*", async (req, res) => {
+  try {
+    const remote = await proxyAdk(req.originalUrl, {
+      method: req.method,
+      timeoutMs: 30000,
+      body: ["POST", "PUT", "PATCH"].includes(req.method) ? JSON.stringify(req.body) : undefined,
+    });
+    if (remote) return res.status(remote.statusCode).json(remote.data);
+    res.status(502).json({ error: "Backend query service unreachable" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.all("/api/alert-proposals*", async (req, res) => {
   try {
     const remote = await proxyAdk(req.originalUrl, {
@@ -1079,10 +1093,14 @@ async function proxyAdk(path, init = {}) {
       }
     );
     request.setTimeout(normalizeTimeout(init.timeoutMs, ADK_PROXY_TIMEOUT_MS), () => {
+      console.error("proxyAdk timeout on:", target.href);
       request.destroy();
       resolve(null);
     });
-    request.on("error", () => resolve(null));
+    request.on("error", (err) => {
+      console.error("proxyAdk error on:", target.href, err.message);
+      resolve(null);
+    });
     if (body) request.write(body);
     request.end();
   });
