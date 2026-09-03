@@ -103,7 +103,7 @@ class Settings(BaseSettings):
 
     # --- HTTP API ---
     api_host: str = Field(default="0.0.0.0")
-    api_port: int = Field(default=8000)
+    api_port: int = Field(default=8008)
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
     api_key: str | None = Field(default=None,
                                  description="If set, required as the X-API-Key header on every "

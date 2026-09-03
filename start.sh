@@ -6,9 +6,9 @@ cd "$DIR"
 lsof -t -i :8008 -i :5173 | xargs kill -9 2>/dev/null || true
 
 echo "🚀 Starting Backend (port 8008)..."
-PYTHONUNBUFFERED=1 "$DIR/.venv/bin/python" run_server.py > "$DIR/server.log" 2>&1 &
+PORT=8008 API_PORT=8008 PYTHONUNBUFFERED=1 "$DIR/.venv/bin/python" run_server.py > "$DIR/server.log" 2>&1 &
 
-sleep 1
+sleep 2
 
 echo "✨ Starting Frontend on http://localhost:5173..."
 cd "$DIR/ui" && npm run dev
