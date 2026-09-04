@@ -11,7 +11,6 @@ from .dashboard import (
     get_dashboard_summary_mcp,
 )
 from .discovery import ensure_panel_index
-from .scoring import score_and_select
 from .datasource import resolve_datasource, datasources_summary, _SUPPORTED_DS_TYPES
 from .prometheus import execute_prometheus, format_prometheus_result
 from .opensearch import execute_opensearch, normalize_opensearch_result
@@ -240,10 +239,19 @@ async def _query_prometheus_metric_async(
         keyword = str(metric).strip()
         logger.info(f"  Route: dynamic discovery for '{keyword}'")
 
-        result = await score_and_select(keyword)
+        index = await ensure_panel_index()
+        matched_entry = None
+        lower_kw = keyword.lower()
+        if index:
+            for entry in index:
+                p_title = (entry.get("panel_title") or "").lower()
+                p_desc = (entry.get("panel_description") or "").lower()
+                d_title = (entry.get("dashboard_title") or "").lower()
+                if lower_kw in p_title or lower_kw in p_desc or lower_kw in d_title:
+                    matched_entry = entry
+                    break
 
-        if result is None:
-            index = await ensure_panel_index()
+        if matched_entry is None:
             if index:
                 titles = sorted({e["panel_title"] for e in index if e["panel_title"]})[:20]
                 available = "\n".join(f"- {t}" for t in titles)
@@ -256,14 +264,11 @@ async def _query_prometheus_metric_async(
                 "No dashboards are available in this Grafana instance."
             )
 
-        if isinstance(result, str):
-            return result
-
-        final_expr = result["query"]
-        ds_ref = result.get("datasource")
+        final_expr = matched_entry["query"]
+        ds_ref = matched_entry.get("datasource")
         discovery_context = (
-            f"Discovered from panel '{result['panel_title']}' "
-            f"in dashboard '{result['dashboard_title']}'"
+            f"Discovered from panel '{matched_entry['panel_title']}' "
+            f"in dashboard '{matched_entry['dashboard_title']}'"
         )
         logger.info(f"  Selected query: {final_expr[:120]}")
 

@@ -41,27 +41,6 @@ DATASOURCE_VISUALIZATIONS = {
 }
 TIME_RANGES = {"15m", "1h", "6h", "12h", "24h", "7d"}
 
-OPENSEARCH_REQUESTS = (
-    {
-        "name": "ssh failures", "patterns": ("ssh", "authentication failure", "failed authentication"),
-        "index": "syslog-*", "query": 'Body:("failed authentication" OR "authentication failure")',
-        "title": "SSH Authentication Failures", "visualization": "logs",
-    },
-    {
-        "name": "heartbeat events", "patterns": ("heartbeat",), "index": "heartbeat", "query": "*",
-        "title": "Heartbeat Events", "visualization": "table",
-    },
-    {
-        "name": "application logs", "patterns": ("application log", "console log", "recent logs"),
-        "index": "consolelog-*", "query": "*", "title": "Application Logs", "visualization": "logs",
-    },
-    {
-        "name": "errors", "patterns": ("error", "errors"), "index": "consolelog-*", "query": "Body:error",
-        "title": "Errors", "visualization": "logs",
-    },
-)
-
-
 def _visualization_name(value: str) -> str:
     normalized = value.lower().replace(" ", "")
     return {"bar": "barchart", "pie": "piechart", "log": "logs", "nodegraph": "nodegraph"}.get(normalized, normalized)
@@ -85,35 +64,34 @@ def _requested_opensearch_panels(text: str) -> list[dict[str, Any]]:
     lower = text.lower()
     visualization_pattern = re.compile(r"\b(logs?|table|stat|gauge|bar(?:\s*chart)?|time\s*series|timeseries|pie(?:\s*chart)?|histogram|heatmap|geomap|node\s*graph)\b")
     requested = []
-    occupied = []
-    for definition in OPENSEARCH_REQUESTS:
-        if definition["name"] == "errors" and requested:
-            continue
-        positions = [(lower.find(pattern), pattern) for pattern in definition["patterns"] if lower.find(pattern) >= 0]
-        if not positions:
-            continue
-        position, pattern = min(positions)
-        span = (position, position + len(pattern))
-        if any(span[0] < end and start < span[1] for start, end in occupied):
-            continue
-        clause_start = max(lower.rfind(",", 0, position), lower.rfind(";", 0, position), lower.rfind(" and ", 0, position)) + 1
-        boundaries = [p for p in (lower.find(",", span[1]), lower.find(";", span[1]), lower.find(" and ", span[1])) if p >= 0]
-        clause = lower[clause_start:min(boundaries) if boundaries else len(lower)]
-        viz_match = visualization_pattern.search(clause)
-        visualization = _visualization_name(viz_match.group(1)) if viz_match else definition["visualization"]
-        result_type = _requested_result_type(visualization, "opensearch")
-        requested.append({**definition, "position": position, "visualization": visualization, "resultType": result_type, "request": text})
-        occupied.append(span)
-    if not requested and re.search(r"\b(logs?|documents?|events?|opensearch|index)\b", lower):
+
+    if re.search(r"\b(logs?|documents?|events?|opensearch|elasticsearch|syslog|consolelog|index)\b", lower):
         viz_match = visualization_pattern.search(lower)
         visualization = _visualization_name(viz_match.group(1)) if viz_match else "logs"
         index_match = re.search(r"\bindex\s+['\"]?([A-Za-z0-9_.*-]+)", text, re.I)
+        index_name = index_match.group(1) if index_match else ("syslog-*" if "syslog" in lower else ("consolelog-*" if "console" in lower else "*"))
+        
+        query_match = re.search(r"\bquery\s+['\"]?([^'\";,]+)", text, re.I)
+        query_text = query_match.group(1).strip() if query_match else ("Body:error" if "error" in lower else "*")
+
+        title = "Logs" if visualization == "logs" else "OpenSearch Data"
+        if "error" in lower:
+            title = "Errors"
+        elif "syslog" in lower or "ssh" in lower:
+            title = "System Logs"
+
         requested.append({
-            "name": "OpenSearch data", "patterns": (), "index": index_match.group(1) if index_match else "*",
-            "query": "*", "title": "OpenSearch Data", "visualization": visualization,
-            "resultType": _requested_result_type(visualization, "opensearch"), "position": 0, "request": text,
+            "name": title.lower(),
+            "patterns": (),
+            "index": index_name,
+            "query": query_text,
+            "title": title,
+            "visualization": visualization,
+            "resultType": _requested_result_type(visualization, "opensearch"),
+            "position": 0,
+            "request": text,
         })
-    return sorted(requested, key=lambda item: item["position"])
+    return requested
 
 
 def classify_dashboard_panels(text: str) -> list[dict[str, Any]]:
