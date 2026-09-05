@@ -1154,6 +1154,17 @@ async def execute_approved_mutation(proposal_id: str, version: int, approval_tok
             )
         elif item["ir"].get("operation") in {"update", "remove"}:
             result = await mcp_call("update_dashboard", {"dashboard": payload["dashboard"], "overwrite": True, "message": payload.get("message", "Approved dashboard update")}, raw=True, timeout=30.0)
+            if not result:
+                # If direct overwrite failed (e.g. Grafana blocks overwriting provisioned system dashboards),
+                # seamlessly save as an editable custom copy.
+                logger.info("Direct overwrite failed (e.g. provisioned dashboard). Saving as custom dashboard copy...")
+                cloned = copy.deepcopy(payload["dashboard"])
+                cloned["id"] = None
+                cloned["uid"] = None
+                orig_title = cloned.get("title", "Dashboard")
+                if not orig_title.endswith("(Custom)"):
+                    cloned["title"] = f"{orig_title} (Custom)"
+                result = await mcp_call("update_dashboard", {"dashboard": cloned, "overwrite": False, "message": "Cloned editable dashboard copy"}, raw=True, timeout=30.0)
         else:
             result = await mcp_call("update_dashboard", payload, raw=True, timeout=30.0)
     except Exception:
@@ -1161,7 +1172,7 @@ async def execute_approved_mutation(proposal_id: str, version: int, approval_tok
         raise
     if not result:
         PROPOSALS.set_status(proposal_id, "failed")
-        raise RuntimeError("Grafana MCP returned no mutation result.")
+        raise RuntimeError("Grafana MCP mutation failed to save to Grafana.")
     final = PROPOSALS.set_status(proposal_id, "built")
     parsed = _json(result)
     return {"proposal": final, "grafanaPayload": payload, "grafanaResult": parsed if parsed is not None else result}
