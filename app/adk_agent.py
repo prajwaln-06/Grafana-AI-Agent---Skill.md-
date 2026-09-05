@@ -138,7 +138,7 @@ def get_adk_agent() -> LlmAgent:
                 logger.warning("Failed to initialize LiteLLM (%s); falling back to Gemini", e)
 
         if selected_model is None:
-            model_name = settings.gemini_model or "gemini-3.7-flash"
+            model_name = settings.gemini_model if settings.gemini_model != "gemini-3.7-flash" else "gemini-2.5-flash"
             api_key = settings.gemini_api_key
             location = getattr(settings, "vertex_location", "global")
             project = getattr(settings, "vertex_project", "project-8d47da29-7cf0-45f0-b55")

@@ -282,6 +282,38 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     answer=question,
                 )
 
+        # Check if user is asking to list, search, or find dashboards
+        is_list_search = bool(re.search(r"\b(list|show|find|search|get|display|pick|view|see|available|what)\b", text, re.I))
+        if is_list_search or intent_kind == "READ":
+            from app.grafana_tools.wrapper import list_dashboards, search_dashboards
+            kw_match = re.search(r"\b(fleet|overview|logs|node|gpu|cpu|observability|demo)\b", text, re.I)
+            answer_text = ""
+            if kw_match and kw_match.group(1).lower() not in ("dashboard", "dashboards"):
+                kw = kw_match.group(1)
+                search_res = search_dashboards(kw)
+                if isinstance(search_res, dict) and search_res.get("dashboards"):
+                    dash_list = search_res["dashboards"]
+                    lines = [f"Found {len(dash_list)} dashboard(s) matching '{kw}':\n"]
+                    for idx, d in enumerate(dash_list, 1):
+                        lines.append(f"{idx}. **{d.get('title', 'Dashboard')}** (`{d.get('uid')}`)\n   *URL*: `{d.get('url', '')}`\n   *Description*: {d.get('description', 'No description')}\n")
+                    answer_text = "\n".join(lines)
+            if not answer_text:
+                answer_text = list_dashboards()
+
+            # Store the first dashboard's UID as session.last_target if found
+            first_uid_match = re.search(r"UID:\s*`?([A-Za-z0-9_-]+)`?", answer_text) or re.search(r"\(`([A-Za-z0-9_-]+)`\)", answer_text)
+            if first_uid_match:
+                session.last_target = first_uid_match.group(1)
+
+            return ChatResponse(
+                status="ok",
+                sessionId=session.session_id,
+                intent="dashboard",
+                agents=["ADK Agent", "MCP-Grafana"],
+                steps=[ChatStep(step=1, agent="MCP-Grafana", action="searched Grafana dashboards", result="success")],
+                answer=answer_text,
+            )
+
         # Dashboard reading / inspection / listing -> run ADK agent
         adk_out = run_adk_agent(
             request=text,
