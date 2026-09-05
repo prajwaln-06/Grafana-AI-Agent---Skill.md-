@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from app.dashboard.intent import Intent, IntentResolution, resolve_intent
+from app.dashboard.intent import Intent, resolve_intent
 from app.dashboard.results import (
     CATEGORICAL, DOCUMENTS, GEOGRAPHIC, GRAPH, HEATMAP, HISTOGRAM, SCALAR,
     TIME_SERIES, VISUALIZATION_RESULT_TYPES, compatibility_error, empty_result,
@@ -21,6 +21,7 @@ from app.dashboard.results import (
 
 from .datasource import resolve_datasource
 from .dashboard import fetch_dashboard_detail, fetch_dashboard_list, flatten_panels
+from .promql import build_promql, infer_unit, TARGET_LABEL_CANDIDATES
 from .prometheus import (
     execute_prometheus,
     list_prometheus_label_names,
@@ -39,66 +40,6 @@ DATASOURCE_VISUALIZATIONS = {
     "elasticsearch": set(SUPPORTED_VISUALIZATIONS),
 }
 TIME_RANGES = {"15m", "1h", "6h", "12h", "24h", "7d"}
-TARGET_LABEL_CANDIDATES = ("node_id", "instance", "node", "host", "hostname")
-MEASUREMENTS = {
-    "cpu": {
-        "metrics": ["node_cpu_seconds_total"],
-        "title": "CPU Utilization",
-        "visualization": "gauge",
-        "config": {"unit": "percent", "min": 0, "max": 100},
-    },
-    "memory": {
-        "metrics": ["node_memory_MemAvailable_bytes", "node_memory_MemTotal_bytes"],
-        "title": "Memory Utilization",
-        "visualization": "timeseries",
-        "config": {"unit": "percent", "min": 0, "max": 100},
-    },
-    "disk": {
-        "metrics": ["node_filesystem_avail_bytes", "node_filesystem_size_bytes"],
-        "title": "Disk Utilization",
-        "visualization": "gauge",
-        "config": {"unit": "percent", "min": 0, "max": 100},
-    },
-    "network": {
-        "metrics": ["node_network_receive_bytes_total"],
-        "title": "Network Receive Rate",
-        "visualization": "timeseries",
-        "config": {"unit": "Bps", "min": 0},
-    },
-    "gpu": {
-        "metrics": ["DCGM_FI_DEV_GPU_UTIL"],
-        "title": "GPU Utilization",
-        "visualization": "timeseries",
-        "config": {"unit": "percent", "min": 0, "max": 100},
-    },
-    "gpu temperature": {
-        "metrics": ["DCGM_FI_DEV_GPU_TEMP"],
-        "title": "GPU Temperature",
-        "visualization": "gauge",
-        "config": {"unit": "celsius", "min": 0, "max": 100},
-    },
-}
-
-OPENSEARCH_REQUESTS = (
-    {
-        "name": "ssh failures", "patterns": ("ssh", "authentication failure", "failed authentication"),
-        "index": "syslog-*", "query": 'Body:("failed authentication" OR "authentication failure")',
-        "title": "SSH Authentication Failures", "visualization": "logs",
-    },
-    {
-        "name": "heartbeat events", "patterns": ("heartbeat",), "index": "heartbeat", "query": "*",
-        "title": "Heartbeat Events", "visualization": "table",
-    },
-    {
-        "name": "application logs", "patterns": ("application log", "console log", "recent logs"),
-        "index": "consolelog-*", "query": "*", "title": "Application Logs", "visualization": "logs",
-    },
-    {
-        "name": "errors", "patterns": ("error", "errors"), "index": "consolelog-*", "query": "Body:error",
-        "title": "Errors", "visualization": "logs",
-    },
-)
-
 
 def _visualization_name(value: str) -> str:
     normalized = value.lower().replace(" ", "")
@@ -123,41 +64,44 @@ def _requested_opensearch_panels(text: str) -> list[dict[str, Any]]:
     lower = text.lower()
     visualization_pattern = re.compile(r"\b(logs?|table|stat|gauge|bar(?:\s*chart)?|time\s*series|timeseries|pie(?:\s*chart)?|histogram|heatmap|geomap|node\s*graph)\b")
     requested = []
-    occupied = []
-    for definition in OPENSEARCH_REQUESTS:
-        if definition["name"] == "errors" and requested:
-            continue
-        positions = [(lower.find(pattern), pattern) for pattern in definition["patterns"] if lower.find(pattern) >= 0]
-        if not positions:
-            continue
-        position, pattern = min(positions)
-        span = (position, position + len(pattern))
-        if any(span[0] < end and start < span[1] for start, end in occupied):
-            continue
-        clause_start = max(lower.rfind(",", 0, position), lower.rfind(";", 0, position), lower.rfind(" and ", 0, position)) + 1
-        boundaries = [p for p in (lower.find(",", span[1]), lower.find(";", span[1]), lower.find(" and ", span[1])) if p >= 0]
-        clause = lower[clause_start:min(boundaries) if boundaries else len(lower)]
-        viz_match = visualization_pattern.search(clause)
-        visualization = _visualization_name(viz_match.group(1)) if viz_match else definition["visualization"]
-        result_type = _requested_result_type(visualization, "opensearch")
-        requested.append({**definition, "position": position, "visualization": visualization, "resultType": result_type, "request": text})
-        occupied.append(span)
-    if not requested and re.search(r"\b(logs?|documents?|events?|opensearch|index)\b", lower):
+
+    if re.search(r"\b(logs?|documents?|events?|opensearch|elasticsearch|syslog|consolelog|index)\b", lower):
         viz_match = visualization_pattern.search(lower)
         visualization = _visualization_name(viz_match.group(1)) if viz_match else "logs"
         index_match = re.search(r"\bindex\s+['\"]?([A-Za-z0-9_.*-]+)", text, re.I)
+        index_name = index_match.group(1) if index_match else ("syslog-*" if "syslog" in lower else ("consolelog-*" if "console" in lower else "*"))
+        
+        query_match = re.search(r"\bquery\s+['\"]?([^'\";,]+)", text, re.I)
+        query_text = query_match.group(1).strip() if query_match else ("Body:error" if "error" in lower else "*")
+
+        title = "Logs" if visualization == "logs" else "OpenSearch Data"
+        if "error" in lower:
+            title = "Errors"
+        elif "syslog" in lower or "ssh" in lower:
+            title = "System Logs"
+
         requested.append({
-            "name": "OpenSearch data", "patterns": (), "index": index_match.group(1) if index_match else "*",
-            "query": "*", "title": "OpenSearch Data", "visualization": visualization,
-            "resultType": _requested_result_type(visualization, "opensearch"), "position": 0, "request": text,
+            "name": title.lower(),
+            "patterns": (),
+            "index": index_name,
+            "query": query_text,
+            "title": title,
+            "visualization": visualization,
+            "resultType": _requested_result_type(visualization, "opensearch"),
+            "position": 0,
+            "request": text,
         })
-    return sorted(requested, key=lambda item: item["position"])
+    return requested
 
 
 def classify_dashboard_panels(text: str) -> list[dict[str, Any]]:
-    """Classify requested panels deterministically without an extra model call."""
-    panels = [{**panel, "datasourceType": "prometheus"} for panel in _requested_panels(text)]
-    panels.extend({**panel, "datasourceType": "opensearch"} for panel in _requested_opensearch_panels(text))
+    """Classify requested panels deterministically without an extra model call.
+
+    Only OpenSearch panels are pre-classified from text patterns.
+    Prometheus panels require the live schema (discover_prometheus_schema) and
+    are resolved at build time via _explicit_metric_panels or clarification.
+    """
+    panels = [{**panel, "datasourceType": "opensearch"} for panel in _requested_opensearch_panels(text)]
     return sorted(panels, key=lambda item: item["position"])
 
 
@@ -220,60 +164,25 @@ async def discover_prometheus_schema() -> dict:
     }
 
 
-def _requested_panels(text: str) -> list[dict[str, str]]:
-    lower = text.lower()
-    explicit_list = re.search(r"\bdashboard\b.*?\bwith\b", lower)
-    panel_scope_start = explicit_list.end() if explicit_list else 0
-    excluded_spans = [
-        match.span(1)
-        for match in re.finditer(r"\bdashboard\s+(?:called|named)\s+(.+?)(?=\s+(?:for|with)\b|[.!?]|$)", lower)
-    ]
-    visualization_pattern = re.compile(r"\b(time\s*series|timeseries|stat|gauge|bar\s*chart|barchart|table|pie\s*chart|piechart|histogram|heatmap|geomap|node\s*graph|nodegraph|logs?)\b")
-    candidates = []
-    for measurement, definition in MEASUREMENTS.items():
-        aliases = {measurement, definition["title"].lower()}
-        if measurement == "memory":
-            aliases.add("ram")
-        for alias in sorted(aliases, key=len, reverse=True):
-            for match in re.finditer(rf"\b{re.escape(alias)}\b", lower):
-                start, end = match.span()
-                if start < panel_scope_start:
-                    continue
-                if any(span_start <= start < span_end for span_start, span_end in excluded_spans):
-                    continue
-                clause_start = max(lower.rfind(",", 0, start), lower.rfind(";", 0, start), lower.rfind(" and ", 0, start)) + 1
-                next_boundaries = [pos for pos in (lower.find(",", end), lower.find(";", end), lower.find(" and ", end)) if pos >= 0]
-                clause_end = min(next_boundaries) if next_boundaries else len(lower)
-                clause = lower[clause_start:clause_end]
-                visualizations = list(visualization_pattern.finditer(clause))
-                visualization = ""
-                if visualizations:
-                    visualization = _visualization_name(visualizations[-1].group(1))
-                existing_visualization = ""
-                if len(visualizations) > 1:
-                    existing_visualization = _visualization_name(visualizations[0].group(1))
-                candidates.append({
-                    "measurement": measurement,
-                    "visualization": visualization,
-                    "existingVisualization": existing_visualization,
-                    "allowEquivalent": bool(re.search(r"\b(another|additional|extra|second)\b", clause)),
-                    "position": start,
-                    "end": end,
-                    "specificity": len(alias),
-                    "dimension": next((m.group(1) for m in [re.search(r"\bby\s+([A-Za-z_][A-Za-z0-9_.-]*)", clause)] if m), None),
-                })
 
-    requested = []
-    for candidate in sorted(candidates, key=lambda item: (item["position"], -item["specificity"])):
-        if any(candidate["position"] < other["end"] and other["position"] < candidate["end"] for other in requested):
-            continue
-        requested.append(candidate)
-    return sorted(requested, key=lambda item: item["position"])
+def classify_dashboard_panels(text: str) -> list[dict[str, Any]]:
+    """Classify requested panels deterministically without an extra model call.
+
+    Only OpenSearch panels are pre-classified from text patterns.
+    Prometheus panels require the live schema (discover_prometheus_schema) and
+    are resolved at build time via _explicit_metric_panels or clarification.
+    """
+    panels = [{**panel, "datasourceType": "opensearch"} for panel in _requested_opensearch_panels(text)]
+    return sorted(panels, key=lambda item: item["position"])
 
 
-def _requested_measurements(text: str) -> list[str]:
-    return [panel["measurement"] for panel in _requested_panels(text)]
-
+def _suggest_metrics(term: str, discovered: list[str]) -> list[str]:
+    """Return discovered metrics that contain any significant token from term."""
+    tokens = {t for t in re.split(r'[^a-z0-9]+', term.lower()) if len(t) > 2}
+    return sorted(
+        {m for m in discovered if any(tok in m.lower() for tok in tokens)},
+        key=len,
+    )[:15]
 
 def _explicit_metric_panels(text: str, discovered_metrics: list[str]) -> list[dict[str, Any]]:
     """Recognize only concrete metric names that discovery proved exist."""
@@ -282,27 +191,26 @@ def _explicit_metric_panels(text: str, discovered_metrics: list[str]) -> list[di
         match = re.search(rf"(?<![A-Za-z0-9_:]){re.escape(metric)}(?![A-Za-z0-9_:])", text)
         if match:
             matches.append({"metric": metric, "position": match.start()})
-    if len(matches) > 1:
-        raise ValueError("Multiple concrete metrics were identified; specify the panels and visualizations you want for each metric.")
     if not matches:
         return []
     visualization_match = re.search(r"\b(time\s*series|timeseries|stat|gauge|bar\s*chart|barchart|table|pie\s*chart|piechart|histogram|heatmap|geomap|node\s*graph|nodegraph|logs?)\b", text, re.I)
     visualization = _visualization_name(visualization_match.group(1)) if visualization_match else "timeseries"
-    return [{
-        "measurement": None,
-        "metric": matches[0]["metric"],
-        "visualization": visualization,
-        "existingVisualization": "",
-        "allowEquivalent": bool(re.search(r"\b(another|additional|extra|second)\b", text, re.I)),
-        "position": matches[0]["position"],
-    }]
+    panels = []
+    for m in matches:
+        panels.append({
+            "measurement": None,
+            "metric": m["metric"],
+            "visualization": visualization,
+            "existingVisualization": "",
+            "allowEquivalent": bool(re.search(r"\b(another|additional|extra|second)\b", text, re.I)),
+            "position": m["position"],
+        })
+    return panels
 
 
-def _panel_matches_measurement(panel: dict, measurement: str) -> bool:
-    definition = MEASUREMENTS[measurement]
+def _panel_matches_metric(panel: dict, metric: str) -> bool:
     searchable = " ".join((str(panel.get("title", "")), str(panel.get("metric", "")), str(panel.get("query", "")))).lower()
-    terms = {measurement, definition["title"].lower(), *(str(metric).lower() for metric in definition["metrics"])}
-    return any(term in searchable for term in terms)
+    return metric.lower() in searchable
 
 
 def _metric_identities_from_query(query: str) -> list[str]:
@@ -366,39 +274,14 @@ def _validate_requested_panels(requested: list[dict[str, str]], panels: list[dic
         requested_visualization = specification.get("visualization")
         if requested_visualization and panel.get("visualizationType") != requested_visualization:
             raise ValueError(f"Proposal integrity failure: panel {index} requested {requested_visualization} but generated {panel.get('visualizationType')}.")
-        measurement = specification.get("measurement")
-        if measurement and not _panel_matches_measurement(panel, measurement):
-            raise ValueError(f"Proposal integrity failure: panel {index} does not match requested measurement '{specification['measurement']}'.")
-        if specification.get("metric") and panel.get("metric") != specification["metric"]:
-            raise ValueError(f"Proposal integrity failure: panel {index} does not preserve metric identity '{specification['metric']}'.")
+        if specification.get("metric") and not _panel_matches_metric(panel, specification["metric"]):
+            raise ValueError(f"Proposal integrity failure: panel {index} does not match requested metric '{specification['metric']}'.")
 
 
 def classify_intent(text: str) -> str:
     """Compatibility helper returning normalized uppercase intent names."""
     return resolve_intent(text).intent.value
 
-
-def _query_for(measurement: str, label: str, target: str) -> str:
-    matcher = f'{label}="{target}"'
-    if measurement == "cpu":
-        return f'100 - (avg by ({label}) (rate(node_cpu_seconds_total{{{matcher},mode="idle"}}[5m])) * 100)'
-    if measurement == "memory":
-        return (
-            f'100 * (1 - node_memory_MemAvailable_bytes{{{matcher}}} '
-            f'/ node_memory_MemTotal_bytes{{{matcher}}})'
-        )
-    if measurement == "disk":
-        return (
-            f'100 * (1 - node_filesystem_avail_bytes{{{matcher}}} '
-            f'/ node_filesystem_size_bytes{{{matcher}}})'
-        )
-    if measurement == "network":
-        return f'rate(node_network_receive_bytes_total{{{matcher}}}[5m])'
-    if measurement == "gpu":
-        return f'DCGM_FI_DEV_GPU_UTIL{{{matcher}}}'
-    if measurement == "gpu temperature":
-        return f'DCGM_FI_DEV_GPU_TEMP{{{matcher}}}'
-    raise ValueError(f"Unsupported measurement: {measurement}")
 
 
 def _normalize_query_result(raw: str) -> dict:
@@ -531,16 +414,10 @@ async def _resolve_prometheus_panels(
         raise ValueError(f"Target '{requested_target}' was not discovered. Available: {', '.join(schema['targets'])}.")
 
     async def resolve_one(requested_panel: dict[str, Any]) -> dict:
-        measurement = requested_panel.get("measurement")
-        definition = MEASUREMENTS[measurement] if measurement else {
-            "metrics": [requested_panel["metric"]], "title": requested_panel["metric"].replace("_", " ").title(),
-            "visualization": "timeseries", "config": {"unit": "short"},
-        }
-        missing = [metric for metric in definition["metrics"] if metric not in schema["metrics"]]
-        if missing:
-            raise ValueError(f"Required metric(s) unavailable: {', '.join(missing)}.")
-        metric = definition["metrics"][0]
-        visualization = requested_panel.get("visualization") or definition["visualization"]
+        metric = requested_panel["metric"]
+        if metric not in schema["metrics"]:
+            raise ValueError(f"Metric '{metric}' is not available in this Prometheus instance.")
+        visualization = requested_panel.get("visualization") or "timeseries"
         if visualization == "logs":
             raise ValueError("Prometheus cannot provide document results required by Logs.")
         kind = _requested_result_type(visualization, "prometheus")
@@ -554,7 +431,6 @@ async def _resolve_prometheus_panels(
             bucket_metric = f"{metric}_bucket"
             if bucket_metric in schema["metrics"]:
                 metric = bucket_metric
-                definition = {**definition, "metrics": [bucket_metric]}
             else:
                 raise ValueError("Histogram and Heatmap require a discovered Prometheus histogram _bucket metric.")
         if kind == GEOGRAPHIC and not ({"latitude", "longitude"} <= set(schema["label_names"]) or {"lat", "lon"} <= set(schema["label_names"])):
@@ -563,20 +439,27 @@ async def _resolve_prometheus_panels(
             raise ValueError("Node Graph requires discovered source/target Prometheus labels.")
         metadata_raw = await list_prometheus_metric_metadata(schema["datasource"]["uid"], metric)
         metadata = _json(metadata_raw)
+        metric_type = _metadata_type(metadata, metric)
         matcher = f'{schema["target_label"]}="{requested_target}"'
-        query = _query_for(measurement, schema["target_label"], requested_target) if measurement and kind not in {CATEGORICAL, HISTOGRAM, HEATMAP} else _promql_for_shape(metric, matcher, kind, dimension, _metadata_type(metadata, metric))
+        query = (
+            build_promql(metric, schema["target_label"], requested_target, metric_type=metric_type)
+            if kind not in {CATEGORICAL, HISTOGRAM, HEATMAP}
+            else _promql_for_shape(metric, matcher, kind, dimension, metric_type)
+        )
         result_raw = _require_mcp_content(
             await execute_prometheus(query, schema["datasource"]["uid"], time_range, 60),
             "Prometheus",
         )
         query_result = _normalize_prometheus_shape(result_raw, kind, dimension=dimension, source_metric=metric)
+        title = metric.replace("_", " ").title()
+        config = {"unit": infer_unit(metric)}
         return {
-            "title": definition["title"], "metric": metric, "sourceMetrics": definition["metrics"],
+            "title": title, "metric": metric, "sourceMetrics": [metric],
             "metricMetadata": metadata, "metricSeries": [item["labels"] for item in _normalize_query_result(result_raw)["series"][:5]],
             "datasource": schema["datasource"], "query": query, "queryResult": query_result,
             "target": {"label": schema["target_label"], "value": requested_target},
             "visualizationType": visualization, "resultType": kind,
-            "visualizationConfig": copy.deepcopy(definition["config"]), "variableRefs": [],
+            "visualizationConfig": config, "variableRefs": [],
         }
     return list(await asyncio.gather(*(resolve_one(panel) for panel in requested_panels))), schema
 
@@ -693,7 +576,16 @@ async def build_proposal(request: str, target: str | None = None, time_range: st
         schema = await discover_prometheus_schema()
         prometheus_requested = _explicit_metric_panels(request, schema["metrics"])
         if not prometheus_requested:
-            raise ValueError("No supported metric or log/document request was identified; clarify the datasource and measurement intent.")
+            suggestions = _suggest_metrics(request, schema["metrics"])
+            hint = (
+                f" Metrics matching your request: {', '.join(suggestions)}."
+                if suggestions else ""
+            )
+            raise ValueError(
+                f"Clarification required: no exact Prometheus metric name was found in your request.{hint} "
+                f"Please use the metric name as it appears in your Prometheus instance "
+                f"(e.g. 'node_cpu_seconds_total', 'http_requests_total')."
+            )
     groups = []
     if prometheus_requested:
         groups.append(("prometheus", _resolve_prometheus_panels(prometheus_requested, request, target, time_range)))
@@ -873,7 +765,9 @@ async def refresh_preview(ir: dict, panel_ids: set[str] | None = None) -> dict:
     async def populate(panel: dict) -> None:
         if panel_ids is not None and str(panel.get("id")) not in panel_ids:
             return
-        datasource_uid = panel.get("datasource", {}).get("uid")
+        ds_info = await resolve_datasource(panel.get("datasource", {}))
+        datasource_uid = ds_info["uid"] if ds_info else panel.get("datasource", {}).get("uid")
+        datasource_type = ds_info["type"].lower() if ds_info else str(panel.get("datasource", {}).get("type", "prometheus")).lower()
         if not panel.get("query") or not datasource_uid:
             panel["queryResult"] = {
                 "status": "error", "type": panel.get("resultType", ""),
@@ -881,7 +775,6 @@ async def refresh_preview(ir: dict, panel_ids: set[str] | None = None) -> dict:
             }
             return
         try:
-            datasource_type = panel.get("datasource", {}).get("type", "prometheus").lower()
             if datasource_type in {"opensearch", "elasticsearch", "grafana-opensearch-datasource"}:
                 raw = _require_mcp_content(
                     await execute_opensearch(panel["query"], datasource_uid, panel.get("index") or "*", f"now-{time_range}", "now", 20),
@@ -934,7 +827,11 @@ async def _build_update_proposal(request: str, target: str | None, time_range: s
         for specification in classified_panels:
             visualization = specification.get("visualization")
             if specification["datasourceType"] == "prometheus":
-                matches = [panel for panel in ir["panels"] if _panel_matches_measurement(panel, specification["measurement"])]
+                metric = specification.get("metric") or ""
+                matches = [
+                    panel for panel in ir["panels"]
+                    if metric and _panel_matches_metric(panel, metric)
+                ]
             else:
                 matches = [panel for panel in ir["panels"] if specification["name"] in panel.get("title", "").lower() or specification["index"] == panel.get("index")]
             existing_visualization = specification.get("existingVisualization")
@@ -1009,8 +906,12 @@ async def _build_remove_proposal(request: str) -> dict:
         matches = []
         for specification in specifications:
             if specification["datasourceType"] == "prometheus":
-                candidates = [panel for panel in ir["panels"] if _panel_matches_measurement(panel, specification["measurement"])]
-                label = specification["measurement"]
+                metric = specification.get("metric") or ""
+                candidates = [
+                    panel for panel in ir["panels"]
+                    if metric and _panel_matches_metric(panel, metric)
+                ]
+                label = metric or "prometheus"
             else:
                 candidates = [panel for panel in ir["panels"] if specification["index"] == panel.get("index") or specification["name"] in panel.get("title", "").lower()]
                 label = specification["name"]
