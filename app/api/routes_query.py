@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 import logging
+import os
+import re
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -86,81 +89,94 @@ async def query(request: Request, body: QueryRequest) -> QueryResponse:
     return QueryResponse(result=executed, session_id=None)
 
 
-from app import label_discovery, prometheus_client, time_utils
+from app import label_discovery, opensearch_client, prometheus_client, time_utils
+
+_CATALOG_CACHE: dict | None = None
+
+
+def _load_catalog() -> dict:
+    global _CATALOG_CACHE
+    if _CATALOG_CACHE is None:
+        cat_file = os.path.join(os.path.dirname(__file__), "..", "catalog.json")
+        try:
+            if os.path.exists(cat_file):
+                with open(cat_file, "r", encoding="utf-8") as f:
+                    _CATALOG_CACHE = json.load(f)
+            else:
+                _CATALOG_CACHE = {}
+        except Exception as e:
+            logger.error("Failed to load catalog.json: %s", e)
+            _CATALOG_CACHE = {}
+    return _CATALOG_CACHE
+
+
+def _interpolate_vars(expr_template: str, var_defs: list[dict], var_values: dict | None = None) -> str:
+    values = var_values or {}
+    if expr_template == "__CM_STYLE__":
+        metric = values.get("METRIC", "up")
+        agg = values.get("AGGREGATION", "avg")
+        interval = values.get("INTERVAL", "5m")
+        instance = values.get("INSTANCE")
+        by = values.get("GROUP_BY", "instance")
+        instance_filter = ""
+        if instance and instance != "__all__":
+            if ":" in instance or ".*" in instance or "|" in instance:
+                instance_filter = f',instance="{instance}"' if ":" in instance and not any(c in instance for c in ".*+|?") else f',instance=~"{instance}"'
+            else:
+                instance_filter = f',instance=~"{instance}.*"'
+        selector = f'{{__name__="{metric}"{instance_filter}}}'
+        if agg == "counter":
+            return f"sum by ({by}) (rate({selector}[{interval}]))"
+        elif agg == "median":
+            return f"quantile by ({by}) (0.5, {selector})"
+        else:
+            return f"{agg} by ({by}) ({selector})"
+
+    if not var_defs:
+        return expr_template
+
+    expr = expr_template
+    for v in var_defs:
+        vid = v.get("id", "")
+        val = values.get(vid) if values.get(vid) is not None else v.get("defaultValue", "")
+        vtype = v.get("type", "")
+        label_name = v.get("labelName") or vid.lower()
+        is_all = not val or val == "__all__"
+
+        if vtype == "loki_label":
+            expr = expr.replace(f"${vid}", ".*" if is_all else str(val))
+        elif vtype in ("static", "metric_name", "text", "checkbox"):
+            expr = expr.replace(f"${vid}_bucket", "" if is_all else f"{val}_bucket")
+            expr = expr.replace(f"${vid}", "" if is_all else str(val))
+        elif vid == "INSTANCE" or label_name == "instance":
+            filt = ""
+            if not is_all and val:
+                if ":" in val or ".*" in val or "|" in val:
+                    filt = f',instance="{val}"' if ":" in val and not any(c in val for c in ".*+|?") else f',instance=~"{val}"'
+                else:
+                    filt = f',instance=~"{val}.*"'
+            bare = filt.lstrip(",")
+            expr = expr.replace(f"${vid}_F", "" if is_all else bare)
+            expr = expr.replace(f"${vid}", filt)
+        else:
+            expr = expr.replace(f"${vid}_F", "" if is_all else f'{label_name}="{val}"')
+            expr = expr.replace(f"${vid}", "" if is_all else f',{label_name}="{val}"')
+
+    expr = re.sub(r"\{\s*\}", "", expr)
+    return expr
 
 
 @router.get("/api/catalog")
 async def get_catalog(request: Request) -> dict:
+    cat = _load_catalog()
+    if cat:
+        return cat
     return {
         "prometheus": {
             "id": "prometheus",
             "label": "Prometheus Metrics",
             "description": "Infrastructure and hardware telemetry from Prometheus.",
-            "metrics": [
-                {
-                    "id": "cpu",
-                    "label": "CPU Utilization",
-                    "description": "Host CPU usage, load average, and idle percentages.",
-                    "queries": [
-                        {
-                            "id": "cpu_busy",
-                            "label": "CPU Busy %",
-                            "expr": '100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
-                            "unit": "percent",
-                            "legend": "{{instance}}",
-                        },
-                        {
-                            "id": "node_load1",
-                            "label": "1-Minute Load Average",
-                            "expr": "node_load1",
-                            "unit": "short",
-                            "legend": "{{instance}}",
-                        },
-                    ],
-                },
-                {
-                    "id": "memory",
-                    "label": "Host Memory",
-                    "description": "Available, free, and cached memory.",
-                    "queries": [
-                        {
-                            "id": "mem_avail",
-                            "label": "Available Memory",
-                            "expr": "node_memory_MemAvailable_bytes",
-                            "unit": "bytes",
-                            "legend": "{{instance}}",
-                        },
-                        {
-                            "id": "mem_free",
-                            "label": "Free Memory",
-                            "expr": "node_memory_MemFree_bytes",
-                            "unit": "bytes",
-                            "legend": "{{instance}}",
-                        },
-                    ],
-                },
-                {
-                    "id": "gpu",
-                    "label": "GPU Telemetry (DCGM)",
-                    "description": "NVIDIA GPU temperatures, utilization, and power.",
-                    "queries": [
-                        {
-                            "id": "gpu_temp",
-                            "label": "GPU Temperature",
-                            "expr": "DCGM_FI_DEV_GPU_TEMP",
-                            "unit": "celsius",
-                            "legend": "GPU {{gpu}}",
-                        },
-                        {
-                            "id": "gpu_util",
-                            "label": "GPU Utilization",
-                            "expr": "DCGM_FI_DEV_GPU_UTIL",
-                            "unit": "percent",
-                            "legend": "GPU {{gpu}}",
-                        },
-                    ],
-                },
-            ],
+            "metrics": [],
         }
     }
 
@@ -179,52 +195,74 @@ async def run_catalog_query(request: Request, body: dict) -> dict:
     metric_id = body.get("metricId", "")
     query_id = body.get("queryId", "")
     range_str = body.get("range", "1h")
-    
+    user_vars = body.get("vars", {})
+
     catalog = await get_catalog(request)
     source = catalog.get(source_id, {})
     metrics = source.get("metrics", [])
     found_metric = next((m for m in metrics if m["id"] == metric_id), None)
     if not found_metric and metrics:
         found_metric = metrics[0]
-    
+
     queries = found_metric.get("queries", []) if found_metric else []
     found_query = next((q for q in queries if q["id"] == query_id), None)
     if not found_query and queries:
         found_query = queries[0]
-        
+
     if not found_query:
         raise HTTPException(status_code=404, detail="Query not found in catalog.")
 
-    expr = found_query["expr"]
-    
+    raw_expr = found_query.get("expr", "")
+    var_defs = found_query.get("vars", [])
+    resolved_expr = _interpolate_vars(raw_expr, var_defs, user_vars)
+
     # Parse range
     range_map = {"15m": 900, "1h": 3600, "6h": 21600, "24h": 86400}
     duration_sec = range_map.get(range_str, 3600)
     step_sec = 15 if duration_sec <= 900 else (60 if duration_sec <= 3600 else 300)
-    
+
     end = datetime.now(timezone.utc)
     start = end - timedelta(seconds=duration_sec)
-    
+
     series_list = []
-    try:
-        outcome = prometheus_client.query_range(
-            settings.prometheus_url, expr, start, end, step_seconds=step_sec,
-            timeout=settings.prometheus_timeout_seconds
-        )
-        if outcome.status == "success" and outcome.raw_data:
-            for item in outcome.raw_data.get("result", []):
-                metric_labels = item.get("metric", {})
-                name = metric_labels.get("instance") or metric_labels.get("gpu") or metric_labels.get("cpu") or found_query["label"]
-                pts = []
-                for t, v in item.get("values", []):
-                    try:
-                        val = float(v)
-                        pts.append({"t": int(float(t)), "v": val})
-                    except (ValueError, TypeError):
-                        pass
-                series_list.append({"name": name, "labels": metric_labels, "points": pts})
-    except Exception as e:
-        logger.error("Failed to query prometheus for %s: %s", expr, e)
+    backend = source_id
+
+    if source_id == "opensearch":
+        backend = "opensearch"
+        index_pattern = user_vars.get("INDEX") or "logs-*"
+        query_text = user_vars.get("LOG_FILTER") or "*"
+        try:
+            hits = opensearch_client.search(
+                settings.opensearch_url,
+                index_pattern=index_pattern,
+                query=query_text,
+                size=50,
+                username=settings.opensearch_auth_username,
+                password=settings.opensearch_auth_password,
+            )
+            series_list = [{"name": f"{index_pattern} hits", "labels": {"index": index_pattern}, "points": [{"t": int(end.timestamp()), "v": len(hits)}]}]
+        except Exception as e:
+            logger.error("Failed to query OpenSearch: %s", e)
+    else:
+        try:
+            outcome = prometheus_client.query_range(
+                settings.prometheus_url, resolved_expr, start, end, step_seconds=step_sec,
+                timeout=settings.prometheus_timeout_seconds
+            )
+            if outcome.status == "success" and outcome.raw_data:
+                for item in outcome.raw_data.get("result", []):
+                    metric_labels = item.get("metric", {})
+                    name = metric_labels.get("instance") or metric_labels.get("hostname") or metric_labels.get("node_id") or metric_labels.get("gpu") or metric_labels.get("cpu") or found_query["label"]
+                    pts = []
+                    for t, v in item.get("values", []):
+                        try:
+                            val = float(v)
+                            pts.append({"t": int(float(t)), "v": val})
+                        except (ValueError, TypeError):
+                            pass
+                    series_list.append({"name": name, "labels": metric_labels, "points": pts})
+        except Exception as e:
+            logger.error("Failed to query prometheus for %s: %s", resolved_expr, e)
 
     return {
         "source": {"id": source_id, "label": source.get("label", "Prometheus")},
@@ -232,10 +270,11 @@ async def run_catalog_query(request: Request, body: dict) -> dict:
         "query": {
             "id": found_query["id"],
             "label": found_query["label"],
-            "expr": expr,
+            "expr": raw_expr,
+            "resolvedExpr": resolved_expr,
             "unit": found_query.get("unit", "short"),
         },
-        "backend": "prometheus",
+        "backend": backend,
         "range": {"start": int(start.timestamp()), "end": int(end.timestamp()), "step": step_sec, "label": range_str},
         "series": series_list,
         "usedLlm": False,
@@ -326,12 +365,35 @@ async def get_glance_board(request: Request) -> dict:
 
 @router.get("/api/search")
 async def search_observability(request: Request, q: str = "") -> dict:
+    query_text = q.lower().strip()
+    cat = _load_catalog()
+    matched_metrics = []
+
+    if query_text and cat:
+        for s_id, s_obj in cat.items():
+            for m in s_obj.get("metrics", []):
+                for q_obj in m.get("queries", []):
+                    title = q_obj.get("label", "")
+                    desc = q_obj.get("description", "")
+                    m_label = m.get("label", "")
+                    if query_text in title.lower() or query_text in desc.lower() or query_text in m_label.lower():
+                        matched_metrics.append({
+                            "type": "metric",
+                            "id": q_obj["id"],
+                            "title": title,
+                            "description": desc or m_label,
+                            "sourceId": s_id,
+                            "metricId": m["id"],
+                            "queryId": q_obj["id"],
+                            "score": 10 if query_text in title.lower() else 5,
+                        })
+
     return {
         "query": q,
         "dashboards": [],
         "panels": [],
-        "metrics": [],
-        "best": None,
+        "metrics": matched_metrics[:15],
+        "best": matched_metrics[0] if matched_metrics else None,
     }
 
 
