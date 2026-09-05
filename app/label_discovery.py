@@ -27,6 +27,19 @@ DEFAULT_LOOKBACK = timedelta(hours=6)
 _session: requests.Session | None = None
 
 
+class LabelKeys(list[str]):
+    """Runtime label keys plus representative values seen on live series.
+
+    It remains a list for validator compatibility.  ``sample_values`` is
+    prompt-only evidence that can establish scope semantics without guessing
+    from a label key's name.
+    """
+
+    def __init__(self, keys: list[str], sample_values: dict[str, list[str]]):
+        super().__init__(keys)
+        self.sample_values = sample_values
+
+
 def _get_session() -> requests.Session:
     global _session
     if _session is None:
@@ -57,9 +70,20 @@ def discover_labels_for_metric(base_url: str, metric_name: str,
         return None
 
     keys: set[str] = set()
+    sample_values: dict[str, set[str]] = {}
     for series in body.get("data", []):
-        keys.update(k for k in series.keys() if k != "__name__")
-    return sorted(keys)
+        for key, value in series.items():
+            if key == "__name__":
+                continue
+            keys.add(key)
+            # This is live datasource evidence, rather than scope inferred
+            # from conventional label spelling.  Cap samples to keep prompts
+            # bounded when a label is high-cardinality.
+            sample_values.setdefault(key, set()).add(str(value))
+    return LabelKeys(
+        sorted(keys),
+        {key: sorted(values)[:12] for key, values in sorted(sample_values.items())},
+    )
 
 
 def discover_labels_for_metrics(base_url: str, metric_names: list[str],
@@ -98,4 +122,48 @@ def format_labels_for_prompt(labels_by_metric: dict[str, list[str] | None]) -> s
                           f"name were found in the current window.")
         else:
             lines.append(f"- `{metric}`: {', '.join(keys)}")
+            samples = getattr(keys, "sample_values", {})
+            if samples:
+                rendered_samples = "; ".join(
+                    f"{key}=[{', '.join(repr(value) for value in values)}]"
+                    for key, values in samples.items()
+                )
+                lines.append(
+                    "  Representative live label values (runtime metadata, not a "
+                    f"name-based assumption): {rendered_samples}"
+                )
     return "\n".join(lines)
+
+
+def discover_label_values(
+    base_url: str,
+    label_name: str,
+    metric: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> list[str]:
+    """Queries Prometheus for values of a specific label key.
+    If metric is provided, scopes discovery with match[]={metric}.
+    If the scoped lookup returns empty and label_name != '__name__', falls back
+    to global values for that label so variable pickers are never empty.
+    """
+    url = f"{base_url.rstrip('/')}/api/v1/label/{label_name}/values"
+    params = {}
+    if metric:
+        params["match[]"] = metric
+
+    try:
+        resp = _get_session().get(url, params=params, timeout=timeout)
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("status") == "success":
+            vals = body.get("data", [])
+            if not vals and metric and label_name != "__name__":
+                fallback_resp = _get_session().get(url, timeout=timeout)
+                if fallback_resp.status_code == 200:
+                    fb_body = fallback_resp.json()
+                    vals = fb_body.get("data", [])
+            return sorted(list(set(str(v) for v in vals if v)))
+    except Exception:
+        pass
+    return []
+
