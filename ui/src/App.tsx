@@ -458,17 +458,28 @@ export default function App() {
             </div>
           }
         >
-          {searchMode === "classic" ? (
+          <div
+            style={{
+              display: searchMode === "classic" ? "block" : "none",
+              height: "100%",
+            }}
+          >
             <QueryExplorerTab
               initialTarget={explorerTarget}
               onInitialTargetConsumed={() => setExplorerTarget(null)}
             />
-          ) : (
+          </div>
+          <div
+            style={{
+              display: searchMode === "ai" ? "block" : "none",
+              height: "100%",
+            }}
+          >
             <AdkAssistantTab
               externalPrompt={aiPrompt}
               onExternalPromptConsumed={() => setAiPrompt(null)}
             />
-          )}
+          </div>
         </Suspense>
       </main>
     </div>

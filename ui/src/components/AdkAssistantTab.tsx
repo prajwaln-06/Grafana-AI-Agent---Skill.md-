@@ -20,6 +20,33 @@ type Props = {
   onExternalPromptConsumed?: () => void;
 };
 
+const WELCOME_MESSAGE: ChatMessage = {
+  id: "welcome",
+  role: "assistant",
+  content: "Ask about metrics, logs, or dashboards.",
+};
+
+function loadStoredMessages(): ChatMessage[] {
+  try {
+    const raw = sessionStorage.getItem("grafana_ai_chat_messages");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {
+    // fallback
+  }
+  return [WELCOME_MESSAGE];
+}
+
+function loadStoredSessionId(): string | null {
+  try {
+    return sessionStorage.getItem("grafana_ai_session_id") || null;
+  } catch {
+    return null;
+  }
+}
+
 export default function AdkAssistantTab({
   externalPrompt = null,
   onExternalPromptConsumed,
@@ -30,15 +57,40 @@ export default function AdkAssistantTab({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "Ask about metrics, logs, or dashboards.",
-    },
-  ]);
+  const [sessionId, setSessionId] = useState<string | null>(loadStoredSessionId);
+  const [messages, setMessages] = useState<ChatMessage[]>(loadStoredMessages);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("grafana_ai_chat_messages", JSON.stringify(messages));
+    } catch {
+      // ignore
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    try {
+      if (sessionId) {
+        sessionStorage.setItem("grafana_ai_session_id", sessionId);
+      } else {
+        sessionStorage.removeItem("grafana_ai_session_id");
+      }
+    } catch {
+      // ignore
+    }
+  }, [sessionId]);
+
+  function clearChat() {
+    setMessages([WELCOME_MESSAGE]);
+    setSessionId(null);
+    try {
+      sessionStorage.removeItem("grafana_ai_chat_messages");
+      sessionStorage.removeItem("grafana_ai_session_id");
+    } catch {
+      // ignore
+    }
+  }
 
   useEffect(() => {
     void loadBoard();
@@ -231,7 +283,20 @@ export default function AdkAssistantTab({
                 <p className="glance-sub rail">Ask anything about your system</p>
               </div>
             </div>
-            {loading && <span className="chat-status-live">Working…</span>}
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              {messages.length > 1 && (
+                <button
+                  type="button"
+                  className="btn quiet"
+                  onClick={clearChat}
+                  title="Start a new chat session"
+                  style={{ fontSize: "11px", padding: "4px 8px" }}
+                >
+                  + New Chat
+                </button>
+              )}
+              {loading && <span className="chat-status-live">Working…</span>}
+            </div>
           </header>
 
           <div className="chat-log">
