@@ -133,3 +133,37 @@ def format_labels_for_prompt(labels_by_metric: dict[str, list[str] | None]) -> s
                     f"name-based assumption): {rendered_samples}"
                 )
     return "\n".join(lines)
+
+
+def discover_label_values(
+    base_url: str,
+    label_name: str,
+    metric: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> list[str]:
+    """Queries Prometheus for values of a specific label key.
+    If metric is provided, scopes discovery with match[]={metric}.
+    If the scoped lookup returns empty and label_name != '__name__', falls back
+    to global values for that label so variable pickers are never empty.
+    """
+    url = f"{base_url.rstrip('/')}/api/v1/label/{label_name}/values"
+    params = {}
+    if metric:
+        params["match[]"] = metric
+
+    try:
+        resp = _get_session().get(url, params=params, timeout=timeout)
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("status") == "success":
+            vals = body.get("data", [])
+            if not vals and metric and label_name != "__name__":
+                fallback_resp = _get_session().get(url, timeout=timeout)
+                if fallback_resp.status_code == 200:
+                    fb_body = fallback_resp.json()
+                    vals = fb_body.get("data", [])
+            return sorted(list(set(str(v) for v in vals if v)))
+    except Exception:
+        pass
+    return []
+

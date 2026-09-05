@@ -92,45 +92,87 @@ async def query(request: Request, body: QueryRequest) -> QueryResponse:
 from app import label_discovery, opensearch_client, prometheus_client, time_utils
 
 _CATALOG_CACHE: dict | None = None
+_CATALOG_MTIME: float = 0.0
 
 
 def _load_catalog() -> dict:
-    global _CATALOG_CACHE
-    if _CATALOG_CACHE is None:
-        cat_file = os.path.join(os.path.dirname(__file__), "..", "catalog.json")
-        try:
-            if os.path.exists(cat_file):
+    global _CATALOG_CACHE, _CATALOG_MTIME
+    cat_file = os.path.join(os.path.dirname(__file__), "..", "catalog.json")
+    try:
+        if os.path.exists(cat_file):
+            mtime = os.path.getmtime(cat_file)
+            if _CATALOG_CACHE is None or mtime > _CATALOG_MTIME:
                 with open(cat_file, "r", encoding="utf-8") as f:
                     _CATALOG_CACHE = json.load(f)
-            else:
-                _CATALOG_CACHE = {}
-        except Exception as e:
-            logger.error("Failed to load catalog.json: %s", e)
+                _CATALOG_MTIME = mtime
+        else:
+            _CATALOG_CACHE = {}
+    except Exception as e:
+        logger.error("Failed to load catalog.json: %s", e)
+        if _CATALOG_CACHE is None:
             _CATALOG_CACHE = {}
     return _CATALOG_CACHE
 
 
+def _prom_group_by_clause(cm_group_by: str | None) -> str:
+    if not cm_group_by:
+        return "instance"
+    mapped = []
+    for p in cm_group_by.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if p in ("location_type", "hostname"):
+            mapped.append("instance")
+        elif p in ("index", "parentalindex"):
+            mapped.append("job")
+        else:
+            mapped.append(p)
+    unique = list(dict.fromkeys(mapped))
+    return ", ".join(unique) if unique else "instance"
+
+
+def _instance_matcher(instance: str | None) -> str:
+    if not instance or instance == "__all__":
+        return ""
+    if ":" in instance or ".*" in instance or "|" in instance:
+        if ":" in instance and not any(c in instance for c in ".*+|?"):
+            return f',instance="{instance}"'
+        return f',instance=~"{instance}"'
+    return f',instance=~"{instance}.*"'
+
+
 def _interpolate_vars(expr_template: str, var_defs: list[dict], var_values: dict | None = None) -> str:
-    values = var_values or {}
+    values = {}
+    if var_defs:
+        for v in var_defs:
+            vid = v.get("id")
+            if vid and v.get("defaultValue") is not None:
+                values[vid] = v.get("defaultValue")
+    if var_values:
+        for k, v in var_values.items():
+            if v is not None and v != "":
+                values[k] = v
+
     if expr_template == "__CM_STYLE__":
-        metric = values.get("METRIC", "up")
-        agg = values.get("AGGREGATION", "avg")
-        interval = values.get("INTERVAL", "5m")
+        metric = values.get("METRIC") or "up"
+        agg = values.get("AGGREGATION") or "avg"
+        interval = values.get("INTERVAL") or "5m"
         instance = values.get("INSTANCE")
-        by = values.get("GROUP_BY", "instance")
-        instance_filter = ""
-        if instance and instance != "__all__":
-            if ":" in instance or ".*" in instance or "|" in instance:
-                instance_filter = f',instance="{instance}"' if ":" in instance and not any(c in instance for c in ".*+|?") else f',instance=~"{instance}"'
-            else:
-                instance_filter = f',instance=~"{instance}.*"'
+        by = _prom_group_by_clause(values.get("GROUP_BY", "instance"))
+        instance_filter = _instance_matcher(instance)
         selector = f'{{__name__="{metric}"{instance_filter}}}'
+
         if agg == "counter":
             return f"sum by ({by}) (rate({selector}[{interval}]))"
         elif agg == "median":
             return f"quantile by ({by}) (0.5, {selector})"
-        else:
+        elif agg in ("first", "last"):
+            return f"sum by ({by}) ({selector})"
+        elif agg in ("avg", "sum", "min", "max", "count"):
             return f"{agg} by ({by}) ({selector})"
+        else:
+            return f"sum by ({by}) ({selector})"
 
     if not var_defs:
         return expr_template
@@ -138,7 +180,7 @@ def _interpolate_vars(expr_template: str, var_defs: list[dict], var_values: dict
     expr = expr_template
     for v in var_defs:
         vid = v.get("id", "")
-        val = values.get(vid) if values.get(vid) is not None else v.get("defaultValue", "")
+        val = values.get(vid, "")
         vtype = v.get("type", "")
         label_name = v.get("labelName") or vid.lower()
         is_all = not val or val == "__all__"
@@ -149,12 +191,7 @@ def _interpolate_vars(expr_template: str, var_defs: list[dict], var_values: dict
             expr = expr.replace(f"${vid}_bucket", "" if is_all else f"{val}_bucket")
             expr = expr.replace(f"${vid}", "" if is_all else str(val))
         elif vid == "INSTANCE" or label_name == "instance":
-            filt = ""
-            if not is_all and val:
-                if ":" in val or ".*" in val or "|" in val:
-                    filt = f',instance="{val}"' if ":" in val and not any(c in val for c in ".*+|?") else f',instance=~"{val}"'
-                else:
-                    filt = f',instance=~"{val}.*"'
+            filt = _instance_matcher("__all__" if is_all else str(val))
             bare = filt.lstrip(",")
             expr = expr.replace(f"${vid}_F", "" if is_all else bare)
             expr = expr.replace(f"${vid}", filt)
@@ -182,7 +219,12 @@ async def get_catalog(request: Request) -> dict:
 
 
 @router.get("/api/labels")
-async def get_labels(request: Request, labelName: str, metric: str | None = None) -> dict:
+async def get_labels(
+    request: Request,
+    labelName: str,
+    metric: str | None = None,
+    source: str = "prometheus",
+) -> dict:
     settings = get_settings()
     values = label_discovery.discover_label_values(settings.prometheus_url, labelName, metric=metric)
     return {"values": list(values)}
