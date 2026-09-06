@@ -35,10 +35,20 @@ _PATTERNS: dict[str, str] = {
     "node_network_receive_bytes_total": (
         "rate(node_network_receive_bytes_total{{{matcher},device!~\"lo\"}}[5m])"
     ),
+    # node_exporter network: rate of bytes transmitted, exclude loopback
+    "node_network_transmit_bytes_total": (
+        "rate(node_network_transmit_bytes_total{{{matcher},device!~\"lo\"}}[5m])"
+    ),
+    # node_exporter load average
+    "node_load1": "node_load1{{{matcher}}}",
+    # node_exporter uptime: time() - boot time
+    "node_boot_time_seconds": "time() - node_boot_time_seconds{{{matcher}}}",
     # DCGM GPU utilisation — raw gauge, no transformation needed
     "DCGM_FI_DEV_GPU_UTIL": "DCGM_FI_DEV_GPU_UTIL{{{matcher}}}",
     # DCGM GPU temperature — raw gauge
     "DCGM_FI_DEV_GPU_TEMP": "DCGM_FI_DEV_GPU_TEMP{{{matcher}}}",
+    # DCGM GPU framebuffer memory used
+    "DCGM_FI_DEV_FB_USED": "DCGM_FI_DEV_FB_USED{{{matcher}}}",
 }
 
 # ---------------------------------------------------------------------------

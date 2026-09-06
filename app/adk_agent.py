@@ -1,5 +1,6 @@
 import logging
 import os
+import secrets
 import time
 from typing import Any, Optional
 
@@ -107,6 +108,8 @@ RULES
 - For greetings or casual conversation: respond naturally without using any tools.
 - Never fabricate dashboard names, UIDs, or metric values.
 - Never expose raw JSON. Summarize naturally.
+- CONTEXT RESOLUTION: When the user refers to "this dashboard", "the dashboard", or "it", inspect the prior conversation turns in this session to identify which dashboard name or UID was previously discussed. Do not ask for the dashboard name or UID again if it was already identified earlier in this chat.
+- If the user asks to "update this dashboard" without specifying changes, explicitly confirm the dashboard you will be modifying (by name and UID) and ask what specific changes, metrics, or panels they want to apply.
 """
 
 from google.adk.models.google_llm import Gemini
@@ -135,7 +138,7 @@ def get_adk_agent() -> LlmAgent:
                 logger.warning("Failed to initialize LiteLLM (%s); falling back to Gemini", e)
 
         if selected_model is None:
-            model_name = settings.gemini_model or "gemini-3.7-flash"
+            model_name = settings.gemini_model if settings.gemini_model != "gemini-3.7-flash" else "gemini-2.5-flash"
             api_key = settings.gemini_api_key
             location = getattr(settings, "vertex_location", "global")
             project = getattr(settings, "vertex_project", "project-8d47da29-7cf0-45f0-b55")
@@ -207,8 +210,8 @@ def run_adk_agent(
         user_text += f"\nTime range: {time_range}"
 
     runner = get_adk_runner()
-    user_id = f"user-{conversation_id}"
-    session_id = conversation_id
+    user_id = f"user-{conversation_id or 'default'}"
+    session_id = conversation_id or f"sess_{secrets.token_hex(8)}"
 
     message = genai_types.Content(
         role="user",
@@ -270,7 +273,7 @@ def run_adk_agent(
 
     raw_jsons = get_raw_json()
 
-    if not proposal_id and any(w in request.lower() for w in ["dashboard", "create", "make", "propose"]):
+    if not proposal_id and any(w in request.lower() for w in ["dashboard", "panel", "create", "make", "propose", "add", "update", "modify"]):
         try:
             tool_outcome = propose_dashboard(request=request, target=target or "", time_range=time_range or "1h")
             if tool_outcome and tool_outcome.get("proposalId"):
@@ -289,6 +292,8 @@ def run_adk_agent(
             "proposal": PROPOSALS.get(proposal_id),
             "errors": (tool_outcome or {}).get("errors", []),
             "timings": timings,
+            "sessionId": session_id,
+            "conversationId": session_id,
         }
 
     if final_text:
@@ -298,6 +303,8 @@ def run_adk_agent(
             "agent_response": final_text,
             "raw_json": raw_jsons,
             "timings": timings,
+            "sessionId": session_id,
+            "conversationId": session_id,
         }
 
     if tool_outcome:
@@ -317,6 +324,8 @@ def run_adk_agent(
             "raw_json": raw_jsons,
             "errors": tool_outcome.get("errors", []),
             "timings": timings,
+            "sessionId": session_id,
+            "conversationId": session_id,
         }
 
     return {
@@ -325,4 +334,6 @@ def run_adk_agent(
         "agent_response": "Agent completed the turn with no output.",
         "raw_json": raw_jsons,
         "timings": timings,
+        "sessionId": session_id,
+        "conversationId": session_id,
     }
