@@ -71,14 +71,12 @@ def test_resolve_gpu_temp():
     assert p["visualization"] == "gauge"
 
 
-def test_resolve_dcgm_temp():
-    """'I want to create a dcgm temp panel on observability dashboard' directly resolves to DCGM_FI_DEV_GPU_TEMP."""
-    panels = resolve_concept_panels("I want to create a dcgm temp panel on observability dashboard", MOCK_LIVE_METRICS)
-    assert len(panels) == 1
-    p = panels[0]
-    assert p["metric"] == "DCGM_FI_DEV_GPU_TEMP"
-    assert p["title"] == "GPU Temperature"
-    assert p["visualization"] == "gauge"
+def test_dcgm_query_triggers_disambiguation():
+    """Asking for a generic DCGM panel presents disambiguation choices without defaulting."""
+    explanation = explain_disambiguation("create a dcgm panel", sorted(MOCK_LIVE_METRICS))
+    assert "I found" in explanation
+    assert "DCGM_FI_DEV_GPU_UTIL" in explanation
+    assert "DCGM_FI_DEV_GPU_TEMP" in explanation
 
 
 def test_resolve_multiple_concepts():

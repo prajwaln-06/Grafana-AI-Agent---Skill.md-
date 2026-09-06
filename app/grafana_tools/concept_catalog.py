@@ -82,8 +82,7 @@ CONCEPTS: list[dict[str, Any]] = [
         "title": "GPU Temperature",
         "synonyms": [
             "gpu temp", "gpu temperature", "gpu thermal", "nvidia temp",
-            "gpu heat", "gpu temperatures", "dcgm temp", "dcgm temperature",
-            "dcgm thermal",
+            "gpu heat", "gpu temperatures",
         ],
         "candidates": [
             "DCGM_FI_DEV_GPU_TEMP",
@@ -97,8 +96,7 @@ CONCEPTS: list[dict[str, Any]] = [
         "title": "GPU Utilization",
         "synonyms": [
             "gpu util", "gpu utilization", "gpu usage", "gpu compute",
-            "nvidia util", "nvidia usage", "gpu core", "dcgm util",
-            "dcgm utilization", "dcgm usage",
+            "nvidia util", "nvidia usage", "gpu core",
         ],
         "candidates": [
             "DCGM_FI_DEV_GPU_UTIL",
@@ -112,8 +110,7 @@ CONCEPTS: list[dict[str, Any]] = [
         "title": "GPU Framebuffer Memory",
         "synonyms": [
             "gpu memory", "gpu ram", "vram", "gpu vram", "gpu fb",
-            "framebuffer", "gpu memory usage", "dcgm memory", "dcgm vram",
-            "dcgm fb",
+            "framebuffer", "gpu memory usage",
         ],
         "candidates": [
             "DCGM_FI_DEV_FB_USED",
@@ -121,23 +118,6 @@ CONCEPTS: list[dict[str, Any]] = [
         "default_viz": "timeseries",
         "unit": "bytes",
         "description": "NVIDIA GPU VRAM framebuffer memory used.",
-    },
-    {
-        "id": "gpu",
-        "title": "GPU Utilization",
-        "synonyms": [
-            "gpu", "dcgm", "nvidia", "graphics", "video card", "accelerator",
-        ],
-        "candidates": [
-            "DCGM_FI_DEV_GPU_UTIL",
-            "DCGM_FI_DEV_GPU_TEMP",
-            "DCGM_FI_DEV_FB_USED",
-            "DCGM_FI_DEV_POWER_USAGE",
-            "DCGM_FI_DEV_FB_FREE",
-        ],
-        "default_viz": "timeseries",
-        "unit": "percent",
-        "description": "NVIDIA GPU compute core utilization percentage.",
     },
     {
         "id": "load",
@@ -271,218 +251,8 @@ def resolve_concept_panels(text: str, live_metrics: set[str]) -> list[dict[str, 
 
 
 # ---------------------------------------------------------------------------
-# Metric Metadata Catalog (Authoritative Titles and SRE Explanations)
+# Primary Metric Ordering & Title Formatting
 # ---------------------------------------------------------------------------
-
-METRIC_METADATA: dict[str, tuple[str, str]] = {
-    # DCGM Exporter (NVIDIA GPU Metrics)
-    "DCGM_FI_DEV_GPU_UTIL": (
-        "GPU Utilization",
-        "NVIDIA GPU compute core utilization percentage.",
-    ),
-    "DCGM_FI_DEV_GPU_TEMP": (
-        "GPU Temperature",
-        "NVIDIA GPU core temperature in Celsius (°C).",
-    ),
-    "DCGM_FI_DEV_FB_USED": (
-        "GPU VRAM Used",
-        "NVIDIA GPU framebuffer memory currently used in bytes.",
-    ),
-    "DCGM_FI_DEV_FB_FREE": (
-        "GPU VRAM Free",
-        "NVIDIA GPU framebuffer memory currently free in bytes.",
-    ),
-    "DCGM_FI_DEV_POWER_USAGE": (
-        "GPU Power Usage",
-        "Instantaneous NVIDIA GPU power consumption in Watts.",
-    ),
-    "DCGM_FI_DEV_POWER_VIOLATION": (
-        "Power Throttling",
-        "Time spent throttled due to GPU power limit violation.",
-    ),
-    "DCGM_FI_DEV_SM_CLOCK": (
-        "GPU SM Clock",
-        "Current NVIDIA GPU streaming multiprocessor clock frequency in MHz.",
-    ),
-    "DCGM_FI_DEV_MEM_CLOCK": (
-        "GPU Memory Clock",
-        "Current NVIDIA GPU memory clock frequency in MHz.",
-    ),
-    "DCGM_FI_DEV_MEM_COPY_UTIL": (
-        "Memory Controller Utilization",
-        "Percent of time the GPU memory controller is reading or writing.",
-    ),
-    "DCGM_FI_PROF_DRAM_ACTIVE": (
-        "DRAM Bandwidth Utilization",
-        "Fraction of cycles where GPU device memory (DRAM/HBM) interface was active.",
-    ),
-    "DCGM_FI_DEV_ECC_SBE_VOL_TOTAL": (
-        "Single-Bit ECC Errors",
-        "Cumulative single-bit volatile ECC memory errors count.",
-    ),
-    "DCGM_FI_DEV_ECC_DBE_VOL_TOTAL": (
-        "Double-Bit ECC Errors",
-        "Cumulative double-bit uncorrectable volatile ECC memory errors count.",
-    ),
-    "DCGM_FI_DEV_RETIRED_SBE": (
-        "Retired Pages (Single-Bit)",
-        "Count of memory pages retired due to single-bit ECC errors.",
-    ),
-    "DCGM_FI_DEV_RETIRED_DBE": (
-        "Retired Pages (Double-Bit)",
-        "Count of memory pages retired due to double-bit ECC errors.",
-    ),
-    "DCGM_FI_DEV_RETIRED_PENDING": (
-        "Pending Page Retirements",
-        "Count of GPU memory pages currently awaiting retirement.",
-    ),
-    "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL": (
-        "NVLink CRC Errors",
-        "Cumulative NVLink CRC (flit) transmission errors count.",
-    ),
-    "DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL": (
-        "NVLink Recovery Events",
-        "Count of NVLink hardware recovery and handshake events.",
-    ),
-    "DCGM_FI_PROF_PCIE_TX_BYTES": (
-        "PCIe Transmit Bandwidth",
-        "Rate of PCIe transmission bytes from GPU to host.",
-    ),
-    "DCGM_FI_PROF_PCIE_RX_BYTES": (
-        "PCIe Receive Bandwidth",
-        "Rate of PCIe reception bytes from host to GPU.",
-    ),
-    "DCGM_FI_PROF_NVLINK_TX_BYTES": (
-        "NVLink Transmit Bandwidth",
-        "Rate of bytes transmitted over GPU NVLink interconnect.",
-    ),
-    "DCGM_FI_PROF_NVLINK_RX_BYTES": (
-        "NVLink Receive Bandwidth",
-        "Rate of bytes received over GPU NVLink interconnect.",
-    ),
-    "DCGM_FI_PROF_GR_ENGINE_ACTIVE": (
-        "Graphics/SM Engine Active",
-        "Fraction of time graphics or compute Streaming Multiprocessors are active.",
-    ),
-    "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE": (
-        "Tensor Core Activity",
-        "Fraction of time Tensor Cores are active executing matrix operations.",
-    ),
-    "DCGM_FI_PROF_PIPE_FP64_ACTIVE": (
-        "FP64 Pipeline Utilization",
-        "Fraction of time double-precision FP64 pipelines are active.",
-    ),
-    "DCGM_FI_PROF_PIPE_FP32_ACTIVE": (
-        "FP32 Pipeline Utilization",
-        "Fraction of time single-precision FP32 pipelines are active.",
-    ),
-    "DCGM_FI_PROF_PIPE_FP16_ACTIVE": (
-        "FP16 Pipeline Utilization",
-        "Fraction of time half-precision FP16 pipelines are active.",
-    ),
-
-    # Node Exporter (Host System Metrics)
-    "node_cpu_seconds_total": (
-        "CPU Seconds Total",
-        "Total CPU time spent in seconds across execution modes.",
-    ),
-    "node_context_switches_total": (
-        "Context Switches",
-        "Total number of CPU context switches across all cores.",
-    ),
-    "node_intr_total": (
-        "System Interrupts",
-        "Total number of hardware and software interrupts serviced.",
-    ),
-    "node_load1": (
-        "1-Minute Load Average",
-        "1-minute system load average representing CPU and IO demand.",
-    ),
-    "node_load5": (
-        "5-Minute Load Average",
-        "5-minute system load average representing CPU and IO demand.",
-    ),
-    "node_load15": (
-        "15-Minute Load Average",
-        "15-minute system load average representing CPU and IO demand.",
-    ),
-    "node_memory_MemTotal_bytes": (
-        "Total System Memory",
-        "Total physical RAM available on the host.",
-    ),
-    "node_memory_MemAvailable_bytes": (
-        "Available Memory",
-        "Estimated RAM available for new workloads without swapping.",
-    ),
-    "node_memory_MemFree_bytes": (
-        "Free Memory",
-        "Completely unallocated physical RAM.",
-    ),
-    "node_memory_Cached_bytes": (
-        "Page Cache Memory",
-        "Physical memory used for Linux page caching.",
-    ),
-    "node_memory_Buffers_bytes": (
-        "Buffer Memory",
-        "Physical memory used for file system buffers.",
-    ),
-    "node_memory_SwapTotal_bytes": (
-        "Total Swap Space",
-        "Total configured swap memory capacity.",
-    ),
-    "node_memory_SwapFree_bytes": (
-        "Free Swap Space",
-        "Unused swap space capacity.",
-    ),
-    "node_filesystem_size_bytes": (
-        "Filesystem Capacity",
-        "Total storage capacity of the filesystem.",
-    ),
-    "node_filesystem_avail_bytes": (
-        "Available Disk Space",
-        "Filesystem space available to non-root users.",
-    ),
-    "node_filesystem_free_bytes": (
-        "Free Disk Space",
-        "Total unallocated disk space in the filesystem.",
-    ),
-    "node_disk_read_bytes_total": (
-        "Disk Read Throughput",
-        "Cumulative bytes read from disk storage.",
-    ),
-    "node_disk_written_bytes_total": (
-        "Disk Write Throughput",
-        "Cumulative bytes written to disk storage.",
-    ),
-    "node_network_receive_bytes_total": (
-        "Network Ingress",
-        "Total bytes received over network interfaces.",
-    ),
-    "node_network_transmit_bytes_total": (
-        "Network Egress",
-        "Total bytes transmitted over network interfaces.",
-    ),
-    "node_boot_time_seconds": (
-        "System Boot Time",
-        "Host node boot timestamp in seconds since epoch.",
-    ),
-    "up": (
-        "Target Health Status",
-        "Whether Prometheus scrape target is operational (1 = healthy).",
-    ),
-    "process_resident_memory_bytes": (
-        "Process Resident Memory (RSS)",
-        "Non-swapped physical memory dedicated to the process.",
-    ),
-    "container_cpu_usage_seconds_total": (
-        "Container CPU Usage",
-        "Total CPU time consumed by the container.",
-    ),
-    "container_memory_working_set_bytes": (
-        "Container Working Set Memory",
-        "Current working set memory consumed by the container.",
-    ),
-}
 
 # Preferred order of primary metrics when multiple metrics match a generic query
 PRIORITY_METRIC_ORDER = [
@@ -507,25 +277,39 @@ PRIORITY_METRIC_ORDER = [
 ]
 
 
-def get_metric_info(metric: str) -> tuple[str, str]:
-    """Return (human_title, description) for a Prometheus metric."""
-    if metric in METRIC_METADATA:
-        return METRIC_METADATA[metric]
+TITLE_OVERRIDES: dict[str, str] = {
+    "DCGM_FI_DEV_GPU_UTIL": "GPU Utilization",
+    "DCGM_FI_DEV_GPU_TEMP": "GPU Temperature",
+    "DCGM_FI_DEV_FB_USED": "GPU VRAM Used",
+    "DCGM_FI_DEV_FB_FREE": "GPU VRAM Free",
+    "DCGM_FI_DEV_POWER_USAGE": "GPU Power Usage",
+    "DCGM_FI_DEV_ECC_DBE_VOL_TOTAL": "Double-Bit ECC Errors",
+    "DCGM_FI_DEV_ECC_SBE_VOL_TOTAL": "Single-Bit ECC Errors",
+    "node_cpu_seconds_total": "CPU Seconds Total",
+    "node_memory_MemAvailable_bytes": "Memory Available",
+    "node_memory_MemTotal_bytes": "Total Memory",
+    "node_filesystem_avail_bytes": "Filesystem Available",
+}
+
+
+def get_metric_title(metric: str) -> str:
+    """Return a clean human-readable title for a metric."""
+    if metric in TITLE_OVERRIDES:
+        return TITLE_OVERRIDES[metric]
     matching_concept = next((c for c in CONCEPTS if metric in c["candidates"]), None)
     if matching_concept:
-        return matching_concept["title"], matching_concept["description"]
-    clean_title = metric.replace("_", " ").title()
-    if metric.startswith("DCGM_"):
-        return clean_title, "NVIDIA GPU telemetry metric."
-    if metric.startswith("node_"):
-        return clean_title, "Host system telemetry metric."
-    if metric.startswith("container_") or metric.startswith("kube_"):
-        return clean_title, "Container telemetry metric."
-    return clean_title, "Prometheus telemetry metric."
+        return matching_concept["title"]
+    raw = metric.replace("DCGM_FI_DEV_", "").replace("DCGM_FI_PROF_", "")
+    return " ".join(p.capitalize() for p in raw.split("_") if p)
+
+
+def get_metric_info(metric: str) -> tuple[str, str]:
+    """Compatibility helper returning (title, description)."""
+    return get_metric_title(metric), ""
 
 
 # ---------------------------------------------------------------------------
-# Scenario 2: Human-Friendly Disambiguation
+# Scenario 2: Human-Friendly Disambiguation (Clean, Consistent, No Bloat)
 # ---------------------------------------------------------------------------
 
 def get_disambiguation_candidates(text: str, live_metrics: list[str]) -> list[str]:
@@ -555,13 +339,11 @@ def get_disambiguation_candidates(text: str, live_metrics: list[str]) -> list[st
     elif not candidates:
         candidates = [m for m in live_metrics[:10]]
 
-    # Prioritize primary metrics over obscure hardware counters
+    # Prioritize primary operational metrics over obscure hardware counters
     def candidate_sort_key(metric: str) -> tuple[int, int, str]:
         if metric in PRIORITY_METRIC_ORDER:
             return (0, PRIORITY_METRIC_ORDER.index(metric), metric)
-        if metric in METRIC_METADATA:
-            return (1, 0, metric)
-        return (2, 0, metric)
+        return (1, 0, metric)
 
     candidates.sort(key=candidate_sort_key)
 
@@ -570,9 +352,9 @@ def get_disambiguation_candidates(text: str, live_metrics: list[str]) -> list[st
 
 
 def explain_disambiguation(text: str, live_metrics: list[str]) -> str:
-    """Build a helpful explanation with choices when multiple metrics match.
+    """Build a clean, consistent, unbloated choice list when multiple metrics match.
 
-    Used when a query is ambiguous so the user gets context instead of a raw error.
+    Each option is a single clean line: [Number]. [Title] ([metric_name]).
     """
     candidates = get_disambiguation_candidates(text, live_metrics)
     if not candidates:
@@ -582,8 +364,7 @@ def explain_disambiguation(text: str, live_metrics: list[str]) -> str:
         f"Clarification required: I found {len(candidates)} metrics matching your request. Which one would you like to add?\n"
     ]
     for idx, metric in enumerate(candidates, 1):
-        title, desc = get_metric_info(metric)
-        lines.append(f"{idx}. **{title}** (`{metric}`)\n   {desc}")
+        lines.append(f"{idx}. **{get_metric_title(metric)}** (`{metric}`)")
 
     lines.append("\n*Tip: You can reply with the number, metric name, or refine your request.*")
     return "\n".join(lines)
