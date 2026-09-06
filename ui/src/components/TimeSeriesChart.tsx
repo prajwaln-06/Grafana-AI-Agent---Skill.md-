@@ -34,6 +34,7 @@ type Props = {
   height?: number;
   /** Dense sparkline-style chart for cards */
   compact?: boolean;
+  hideLegend?: boolean;
 };
 
 type ChartTheme = {
@@ -231,6 +232,7 @@ export default function TimeSeriesChart({
   chartType: initialChartType = "line",
   height = 240,
   compact = false,
+  hideLegend = false,
 }: Props) {
   const theme = useChartTheme();
   const normalizedInitial = (initialChartType || "line").toLowerCase();
@@ -436,7 +438,9 @@ export default function TimeSeriesChart({
               <XAxis hide={compact} dataKey="t" tickFormatter={formatTick} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} minTickGap={48} />
               <YAxis hide={compact} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} tickFormatter={(v) => formatValue(Number(v), unit)} width={compact ? 0 : 56} />
               <Tooltip contentStyle={tooltipStyle} labelFormatter={(ts) => formatTooltipTime(Number(ts))} formatter={(val: number, name: string) => [formatValue(val, unit), name]} />
-              {!compact && <Legend align="left" verticalAlign="top" height={24} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 11, color: theme.muted }} />}
+              {!compact && !hideLegend && visibleKeys.length <= 4 && visibleKeys.length > 1 && (
+                <Legend align="left" verticalAlign="top" height={24} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 11, color: theme.muted }} />
+              )}
               {visibleKeys.map((key, i) => (
                 <Area key={key} type="monotone" dataKey={key} stroke={COLORS[i % COLORS.length]} strokeWidth={compact ? 1.6 : 2} fill={`url(#area-grad-${i})`} connectNulls />
               ))}
@@ -451,7 +455,9 @@ export default function TimeSeriesChart({
               <XAxis hide={compact} dataKey="t" tickFormatter={formatTick} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} minTickGap={48} />
               <YAxis hide={compact} axisLine={false} tickLine={false} tick={{ fill: theme.mutedDim, fontSize: 11, fontFamily: "monospace" }} tickFormatter={(v) => formatValue(Number(v), unit)} width={compact ? 0 : 56} />
               <Tooltip cursor={{ stroke: theme.cursor, strokeWidth: 1 }} contentStyle={tooltipStyle} labelFormatter={(ts) => formatTooltipTime(Number(ts))} formatter={(val: number, name: string) => [formatValue(val, unit), name]} />
-              {!compact && <Legend align="left" verticalAlign="top" height={24} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 11, color: theme.muted }} />}
+              {!compact && !hideLegend && visibleKeys.length <= 4 && visibleKeys.length > 1 && (
+                <Legend align="left" verticalAlign="top" height={24} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: 11, color: theme.muted }} />
+              )}
               {visibleKeys.map((key, i) => (
                 <Line key={key} type="monotone" dataKey={key} stroke={COLORS[i % COLORS.length]} strokeWidth={compact ? 1.6 : 2.1} dot={false} activeDot={{ r: 3.5 }} connectNulls />
               ))}

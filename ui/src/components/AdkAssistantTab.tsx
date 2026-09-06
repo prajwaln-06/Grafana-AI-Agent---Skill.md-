@@ -464,6 +464,7 @@ function GlanceCard({
               unit={panel.unit}
               height={chartHeight}
               compact={!expanded}
+              hideLegend={true}
             />
           )
         ) : (
