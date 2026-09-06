@@ -355,22 +355,89 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     candidates=[{"name": m, "purpose": m} for m in candidates] if candidates else None,
                 ))
 
+        # Check if user is asking to inspect panels inside a dashboard
+        is_panel_inspection = (
+            bool(re.search(r"\b(panel|panels)\b", text, re.I))
+            and not bool(re.search(r"\b(add|create|insert|append|remove|delete|drop)\b", text, re.I))
+        )
+        if is_panel_inspection:
+            from app.grafana_tools.dashboard_writing import _dashboard_identity, _find_dashboards
+            from app.grafana_tools.wrapper import get_dashboard_panels, list_dashboards
+            from app.mcp.session import run_sync
+            from app.dashboard.intent import Intent
+
+            target_uid = None
+            target_name = None
+
+            # 1. Referential or explicit target
+            if has_referential_noun and session.last_target:
+                target_uid = session.last_target
+            elif resolved_target:
+                target_uid = resolved_target
+
+            # 2. Extract from request text
+            if not target_uid:
+                try:
+                    target_name = _dashboard_identity(text, Intent.READ)
+                except Exception:
+                    m = re.search(r"\b(?:in|on|for)\s+(?:the\s+)?([A-Za-z0-9 _.-]+?)(?:\s+dashboard|\s+board|[.!?]|$)", text, re.I)
+                    if m:
+                        cand = m.group(1).strip()
+                        if cand.lower() not in ("this", "that", "the", "a", "an", "all", "my"):
+                            target_name = cand
+
+            if target_name and not target_uid:
+                dashes = run_sync(_find_dashboards(target_name))
+                if dashes:
+                    target_uid = dashes[0].get("uid")
+                    target_name = dashes[0].get("title", target_name)
+                else:
+                    target_uid = target_name
+
+            if target_uid:
+                panels_text = get_dashboard_panels(target_uid)
+                session.last_target = target_uid
+                return respond(ChatResponse(
+                    status="ok",
+                    sessionId=session.session_id,
+                    intent="dashboard",
+                    agents=["ADK Agent", "MCP-Grafana"],
+                    steps=[ChatStep(step=1, agent="MCP-Grafana", action=f"inspected panels for {target_name or target_uid}", result="success")],
+                    answer=panels_text,
+                ))
+            else:
+                dash_list_text = list_dashboards()
+                return respond(ChatResponse(
+                    status="ok",
+                    sessionId=session.session_id,
+                    intent="dashboard",
+                    agents=["ADK Agent", "MCP-Grafana"],
+                    steps=[ChatStep(step=1, agent="MCP-Grafana", action="listed dashboards for panel inspection", result="success")],
+                    answer=f"Please specify which dashboard you would like to inspect panels for:\n\n{dash_list_text}",
+                ))
+
         # Check if user is asking to list, search, or find dashboards
-        is_list_search = bool(re.search(r"\b(list|show|find|search|get|display|pick|view|see|available|what)\b", text, re.I))
+        is_list_search = (
+            bool(re.search(r"\b(list|show|find|search|get|display|pick|view|see|available)\b", text, re.I))
+            or intent_kind == "READ"
+        ) and not is_panel_inspection
         if is_list_search or intent_kind == "READ":
             from app.grafana_tools.wrapper import list_dashboards, search_dashboards
-            kw_match = re.search(r"\b(fleet|overview|logs|node|gpu|cpu|observability|demo)\b", text, re.I)
+            search_kw = None
+            kw_match = re.search(r"\b(?:search|find)\s+(?:dashboards?\s+)?(?:for|matching|about|with)?\s*['\"]?([A-Za-z0-9_-]+)['\"]?", text, re.I)
+            if kw_match:
+                cand = kw_match.group(1)
+                if cand.lower() not in ("dashboard", "dashboards", "all", "the", "for", "me"):
+                    search_kw = cand
+            if not search_kw:
+                named_kw = re.search(r"\b(fleet|overview|logs|node|gpu|cpu|observability|demo|kubernetes|linux)\b", text, re.I)
+                if named_kw and named_kw.group(1).lower() not in ("dashboard", "dashboards") and bool(re.search(r"\b(search|find)\b", text, re.I)):
+                    search_kw = named_kw.group(1)
+
             answer_text = ""
-            if kw_match and kw_match.group(1).lower() not in ("dashboard", "dashboards"):
-                kw = kw_match.group(1)
-                search_res = search_dashboards(kw)
-                if isinstance(search_res, dict) and search_res.get("dashboards"):
-                    dash_list = search_res["dashboards"]
-                    lines = [f"Found {len(dash_list)} dashboard(s) matching '{kw}':\n"]
-                    for idx, d in enumerate(dash_list, 1):
-                        lines.append(f"{idx}. **{d.get('title', 'Dashboard')}** (`{d.get('uid')}`)\n   *URL*: `{d.get('url', '')}`\n   *Description*: {d.get('description', 'No description')}\n")
-                    answer_text = "\n".join(lines)
-            if not answer_text:
+            if search_kw:
+                answer_text = search_dashboards(search_kw)
+            if not answer_text or answer_text.startswith("Error"):
                 answer_text = list_dashboards()
 
             # Store the first dashboard's UID as session.last_target if found
@@ -383,7 +450,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 sessionId=session.session_id,
                 intent="dashboard",
                 agents=["ADK Agent", "MCP-Grafana"],
-                steps=[ChatStep(step=1, agent="MCP-Grafana", action="searched Grafana dashboards", result="success")],
+                steps=[ChatStep(step=1, agent="MCP-Grafana", action="searched Grafana dashboards" if search_kw else "listed Grafana dashboards", result="success")],
                 answer=answer_text,
             ))
 
