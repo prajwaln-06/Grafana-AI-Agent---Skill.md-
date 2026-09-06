@@ -817,9 +817,9 @@ function formatMarkdownLite(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-  // Transform numbered options into sleek, compact interactive rows:
+  // Transform numbered options into sleek, compact interactive rows (only for metrics with _ or :):
   formatted = formatted.replace(
-    /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)/g,
+    /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]*(?:_|\:)[A-Za-z0-9_:]*)(?:`|&quot;)?\s*\)/g,
     '\n<div class="disambiguation-item" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code></div>'
   );
 

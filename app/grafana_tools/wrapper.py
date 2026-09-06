@@ -85,10 +85,29 @@ async def _search_dashboards_async(query: str) -> str:
     if result_str.startswith("Error"):
         return result_str
 
-    normalized = normalize_to_text(result_str)
-    elapsed = time.perf_counter() - start
-    logger.info(f"Wrapper search_dashboards done in {elapsed:.3f}s")
-    return cap(normalized)
+    try:
+        data = json.loads(result_str)
+        dashboards = data.get("dashboards", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        if not dashboards:
+            return f"No dashboards found matching '{query}'."
+        lines = [f"Found {len(dashboards)} dashboard(s) matching '{query}':\n"]
+        for i, dash in enumerate(dashboards, 1):
+            title = dash.get("title") or "(untitled)"
+            uid   = dash.get("uid", "")
+            tags  = dash.get("tags", [])
+            lines.append(f"{i}. {title}")
+            lines.append(f"   UID: {uid}")
+            if tags:
+                lines.append(f"   Tags: {', '.join(tags)}")
+            lines.append("")
+        elapsed = time.perf_counter() - start
+        logger.info(f"Wrapper search_dashboards done in {elapsed:.3f}s — {len(dashboards)} dashboard(s)")
+        return cap("\n".join(lines).strip())
+    except Exception:
+        normalized = normalize_to_text(result_str)
+        elapsed = time.perf_counter() - start
+        logger.info(f"Wrapper search_dashboards done in {elapsed:.3f}s")
+        return cap(normalized)
 
 
 def get_dashboard_panels(uid: str) -> str:

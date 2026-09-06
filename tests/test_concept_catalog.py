@@ -234,3 +234,37 @@ def test_delete_dashboard_proposal():
     assert ir.get("removeDashboard") is True
     assert ir.get("operation") == "remove"
 
+
+def test_panel_inspection_query():
+    """Verify that asking for panels in a dashboard returns panel details."""
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/chat",
+        json={"message": "What panels are in the Observability Overview dashboard?", "sessionId": "test_panel_session"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "Panels (" in data["answer"]
+    assert "CPU Busy" in data["answer"]
+    assert "observability-overview" in data["answer"]
+
+
+def test_dashboard_search_query():
+    """Verify that searching for dashboards returns clean matches with UIDs."""
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/chat",
+        json={"message": "Search dashboards for overview", "sessionId": "test_search_session"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "Found" in data["answer"]
+    assert "UID:" in data["answer"]
+
+
