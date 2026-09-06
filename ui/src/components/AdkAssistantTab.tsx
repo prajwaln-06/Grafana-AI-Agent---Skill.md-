@@ -581,6 +581,21 @@ function MessageBubble({
             }
           }
         }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            const target = (e.target as HTMLElement).closest("[data-metric], [data-number]");
+            if (target) {
+              e.preventDefault();
+              const metric = target.getAttribute("data-metric");
+              const number = target.getAttribute("data-number");
+              if (metric) {
+                onSelectCandidate?.(metric);
+              } else if (number) {
+                onSelectCandidate?.(number);
+              }
+            }
+          }
+        }}
         dangerouslySetInnerHTML={{
           __html: formatMarkdownLite(message.content),
         }}
@@ -825,12 +840,17 @@ function formatMarkdownLite(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-  // Transform numbered option lines into interactive clickable rows:
-  // e.g. "5. **Dcgm Fi Dev Gpu Temp** (`DCGM_FI_DEV_GPU_TEMP`)"
-  // or "5. Dcgm Fi Dev Gpu Temp ( DCGM_FI_DEV_GPU_TEMP )"
+  // Transform numbered options with description into unified interactive cards:
+  // e.g. "1. **GPU Utilization** (`DCGM_FI_DEV_GPU_UTIL`)\n   NVIDIA GPU compute core utilization percentage."
   formatted = formatted.replace(
-    /(?:^|\n)(\d+)\.\s+([^\n(]+?)\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)/g,
-    '\n<div class="clickable-option" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to add $3"><span class="opt-num">$1.</span> <span class="opt-name">$2</span> <code class="opt-metric">$3</code></div>'
+    /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)\s*\n\s+([^\n]+)/g,
+    '\n<div class="disambiguation-card" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><div class="card-header"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code></div><div class="card-desc">$4</div></div>'
+  );
+
+  // Fallback for numbered options without a following description line:
+  formatted = formatted.replace(
+    /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)/g,
+    '\n<div class="disambiguation-card" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><div class="card-header"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code></div></div>'
   );
 
   formatted = formatted
@@ -841,9 +861,11 @@ function formatMarkdownLite(text: string): string {
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(
       /`([A-Za-z0-9_:]*(?:_|\:)[A-Za-z0-9_:]*)`/g,
-      '<code class="clickable-code" data-metric="$1" role="button" tabindex="0" title="Click to add $1">$1</code>'
+      '<code class="clickable-code" data-metric="$1" role="button" tabindex="0" title="Click to select $1">$1</code>'
     )
     .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/<\/div>\n/g, "</div>")
+    .replace(/\n<div/g, "<div")
     .replace(/\n/g, "<br/>");
 
   return formatted;

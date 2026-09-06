@@ -98,20 +98,41 @@ def test_no_hallucination_when_no_candidates_in_cluster():
 
 
 def test_explain_disambiguation_multiple_options():
-    """Scenario 2: When multiple metrics match, present numbered options with descriptions."""
+    """Scenario 2: When multiple metrics match, present numbered options with rich SRE descriptions."""
     explanation = explain_disambiguation("disk", sorted(MOCK_LIVE_METRICS))
     assert "I found" in explanation
     assert "node_filesystem_avail_bytes" in explanation
     assert "Tip: You can reply with the number" in explanation
+    # Must use rich descriptions rather than lazy fallback
+    assert "Prometheus metric:" not in explanation
 
 
 def test_get_disambiguation_candidates():
-    """Verify that get_disambiguation_candidates returns live metrics for ambiguous queries."""
+    """Verify that get_disambiguation_candidates returns live metrics prioritized by relevance."""
     from app.grafana_tools.concept_catalog import get_disambiguation_candidates
     candidates = get_disambiguation_candidates("gpu", sorted(MOCK_LIVE_METRICS))
     assert len(candidates) >= 2
-    assert "DCGM_FI_DEV_GPU_TEMP" in candidates
-    assert "DCGM_FI_DEV_GPU_UTIL" in candidates
+    # Primary operational metrics should come first
+    assert candidates[0] == "DCGM_FI_DEV_GPU_UTIL"
+    assert candidates[1] == "DCGM_FI_DEV_GPU_TEMP"
+
+
+def test_explain_disambiguation_dcgm_metrics_rich_explanation():
+    """Verify DCGM metric disambiguation provides human-readable titles and proper SRE explanations."""
+    dcgm_metrics = [
+        "DCGM_FI_DEV_ECC_DBE_VOL_TOTAL",
+        "DCGM_FI_DEV_FB_FREE",
+        "DCGM_FI_DEV_GPU_TEMP",
+        "DCGM_FI_DEV_GPU_UTIL",
+    ]
+    explanation = explain_disambiguation("dcgm", dcgm_metrics)
+    assert "GPU Utilization" in explanation
+    assert "GPU Temperature" in explanation
+    assert "GPU VRAM Free" in explanation
+    assert "Double-Bit ECC Errors" in explanation
+    assert "Prometheus metric:" not in explanation
+    # Core utilization/temp should be ordered before ECC hardware counters
+    assert explanation.find("GPU Utilization") < explanation.find("Double-Bit ECC Errors")
 
 
 def test_explain_not_found_unmonitored_service():
