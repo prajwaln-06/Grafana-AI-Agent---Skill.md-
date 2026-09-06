@@ -1234,6 +1234,18 @@ code {
   flex-shrink: 0;
 }
 
+/* Disambiguation tip on a clean separate line below the options */
+.disambiguation-tip {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.disambiguation-tip em {
+  font-style: italic;
+}
+
 /* Fallback inline clickable option */
 .clickable-option {
   display: inline-flex;

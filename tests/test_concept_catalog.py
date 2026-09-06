@@ -110,7 +110,7 @@ def test_explain_disambiguation_multiple_options():
     explanation = explain_disambiguation("disk", sorted(MOCK_LIVE_METRICS))
     assert "I found" in explanation
     assert "node_filesystem_avail_bytes" in explanation
-    assert "Tip: You can reply with the number" in explanation
+    assert "Tip: You can click an option directly" in explanation
     # Must use rich descriptions rather than lazy fallback
     assert "Prometheus metric:" not in explanation
 

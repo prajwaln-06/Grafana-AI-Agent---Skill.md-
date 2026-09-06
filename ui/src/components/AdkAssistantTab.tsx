@@ -840,14 +840,7 @@ function formatMarkdownLite(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-  // Transform numbered options with description into sleek, compact interactive rows:
-  // e.g. "1. **GPU Utilization** (`DCGM_FI_DEV_GPU_UTIL`)\n   NVIDIA GPU compute core utilization percentage."
-  formatted = formatted.replace(
-    /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)\s*\n\s+([^\n]+)/g,
-    '\n<div class="disambiguation-item" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code><span class="card-desc">— $4</span></div>'
-  );
-
-  // Fallback for numbered options without a following description line:
+  // Transform numbered options into sleek, compact interactive rows:
   formatted = formatted.replace(
     /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)/g,
     '\n<div class="disambiguation-item" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code></div>'
@@ -855,8 +848,14 @@ function formatMarkdownLite(text: string): string {
 
   // Wrap contiguous disambiguation items in a sleek container
   formatted = formatted.replace(
-    /(?:<div class="disambiguation-item"[^>]*>[\s\S]*?<\/div>\s*)+/g,
+    /<div class="disambiguation-item"[^>]*>[\s\S]*?<\/div>(?:\s*<div class="disambiguation-item"[^>]*>[\s\S]*?<\/div>)*/g,
     (match) => `<div class="disambiguation-list">${match.trim()}</div>`
+  );
+
+  // Put tip on a separate line with dedicated styling
+  formatted = formatted.replace(
+    /(?:^|\n)\*?Tip:\s*([^*\n]+)\*?/gi,
+    '\n<div class="disambiguation-tip"><em>Tip: $1</em></div>'
   );
 
   formatted = formatted
@@ -865,13 +864,14 @@ function formatMarkdownLite(text: string): string {
       '<a href="$2" target="_blank" rel="noreferrer">$1 ↗</a>'
     )
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "<em>$1</em>")
     .replace(
       /`([A-Za-z0-9_:]*(?:_|\:)[A-Za-z0-9_:]*)`/g,
       '<code class="clickable-code" data-metric="$1" role="button" tabindex="0" title="Click to select $1">$1</code>'
     )
     .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/<\/div>\n/g, "</div>")
-    .replace(/\n<div/g, "<div")
+    .replace(/<\/div>\n+/g, "</div>")
+    .replace(/\n+<div/g, "<div")
     .replace(/\n/g, "<br/>");
 
   return formatted;

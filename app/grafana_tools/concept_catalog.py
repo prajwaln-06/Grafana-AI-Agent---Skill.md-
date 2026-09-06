@@ -283,6 +283,7 @@ TITLE_OVERRIDES: dict[str, str] = {
     "DCGM_FI_DEV_FB_USED": "GPU VRAM Used",
     "DCGM_FI_DEV_FB_FREE": "GPU VRAM Free",
     "DCGM_FI_DEV_POWER_USAGE": "GPU Power Usage",
+    "DCGM_FI_DEV_MEM_COPY_UTIL": "Memory Controller Utilization",
     "DCGM_FI_DEV_ECC_DBE_VOL_TOTAL": "Double-Bit ECC Errors",
     "DCGM_FI_DEV_ECC_SBE_VOL_TOTAL": "Single-Bit ECC Errors",
     "node_cpu_seconds_total": "CPU Seconds Total",
@@ -366,7 +367,7 @@ def explain_disambiguation(text: str, live_metrics: list[str]) -> str:
     for idx, metric in enumerate(candidates, 1):
         lines.append(f"{idx}. **{get_metric_title(metric)}** (`{metric}`)")
 
-    lines.append("\n*Tip: You can reply with the number, metric name, or refine your request.*")
+    lines.append("\n*Tip: You can click an option directly, reply with the number or metric name, or refine your request.*")
     return "\n".join(lines)
 
 
