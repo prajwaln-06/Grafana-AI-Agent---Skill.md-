@@ -229,11 +229,8 @@ def resolve_concept_panels(text: str, live_metrics: set[str]) -> list[dict[str, 
 # Scenario 2: Human-Friendly Disambiguation
 # ---------------------------------------------------------------------------
 
-def explain_disambiguation(text: str, live_metrics: list[str]) -> str:
-    """Build a helpful explanation with choices when multiple metrics match.
-
-    Used when a query is ambiguous so the user gets context instead of a raw error.
-    """
+def get_disambiguation_candidates(text: str, live_metrics: list[str]) -> list[str]:
+    """Retrieve candidate metrics that match user text for disambiguation."""
     lower_text = text.lower()
     live_set = set(live_metrics)
     candidates: list[str] = []
@@ -257,16 +254,23 @@ def explain_disambiguation(text: str, live_metrics: list[str]) -> str:
             if pattern.search(m) and m not in candidates:
                 candidates.append(m)
     elif not candidates:
-        candidates = live_metrics[:10]
+        candidates = [m for m in live_metrics[:10]]
 
     # Limit to top 6 relevant candidates to keep the output readable
-    candidates = candidates[:6]
+    return candidates[:6]
 
+
+def explain_disambiguation(text: str, live_metrics: list[str]) -> str:
+    """Build a helpful explanation with choices when multiple metrics match.
+
+    Used when a query is ambiguous so the user gets context instead of a raw error.
+    """
+    candidates = get_disambiguation_candidates(text, live_metrics)
     if not candidates:
         return explain_not_found(text, live_metrics)
 
     lines = [
-        f"I found {len(candidates)} metrics matching your request. Which one would you like to add?\n"
+        f"Clarification required: I found {len(candidates)} metrics matching your request. Which one would you like to add?\n"
     ]
     for idx, metric in enumerate(candidates, 1):
         friendly_label = metric.replace("_", " ").title()

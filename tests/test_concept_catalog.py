@@ -105,6 +105,15 @@ def test_explain_disambiguation_multiple_options():
     assert "Tip: You can reply with the number" in explanation
 
 
+def test_get_disambiguation_candidates():
+    """Verify that get_disambiguation_candidates returns live metrics for ambiguous queries."""
+    from app.grafana_tools.concept_catalog import get_disambiguation_candidates
+    candidates = get_disambiguation_candidates("gpu", sorted(MOCK_LIVE_METRICS))
+    assert len(candidates) >= 2
+    assert "DCGM_FI_DEV_GPU_TEMP" in candidates
+    assert "DCGM_FI_DEV_GPU_UTIL" in candidates
+
+
 def test_explain_not_found_unmonitored_service():
     """Scenario 3: When an unmonitored service is requested, show discovered services."""
     explanation = explain_not_found("redis cache queries", sorted(MOCK_LIVE_METRICS))
@@ -138,3 +147,36 @@ def test_promql_formulas_for_catalog_metrics():
     # Uptime
     uptime_q = build_promql("node_boot_time_seconds", "instance", "node-01")
     assert "time() - node_boot_time_seconds" in uptime_q
+
+
+def test_numeric_selection_from_clarification():
+    """Verify that replying with '5' resolves candidate 5 from pending clarification."""
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+    from app.api.routes_chat import SESSION_STORE
+
+    client = TestClient(app)
+    session_id = "test_num_selection_session"
+    session = SESSION_STORE.get_or_create(session_id)
+    session.pending_action = "awaiting_metric_for_dashboard"
+    session.pending_payload = {
+        "dashboard_request": "add gpu metric to fleet overview",
+        "target": "node-01",
+        "time_range": "1h",
+        "candidates": [
+            "DCGM_FI_DEV_FB_FREE",
+            "DCGM_FI_DEV_FB_USED",
+            "DCGM_FI_DEV_SM_CLOCK",
+            "DCGM_FI_DEV_POWER_USAGE",
+            "DCGM_FI_DEV_GPU_TEMP",
+            "DCGM_FI_DEV_GPU_UTIL",
+        ],
+    }
+    # User sends "5"
+    resp = client.post("/api/chat", json={"message": "5", "sessionId": session_id})
+    assert resp.status_code == 200
+    data = resp.json()
+    # It must not say "no discernible observability intent"
+    assert "no discernible observability intent" not in data["answer"].lower()
+    # It should have resolved to option 5: DCGM_FI_DEV_GPU_TEMP
+    assert "DCGM_FI_DEV_GPU_TEMP" in data["answer"] or data.get("proposalId") is not None

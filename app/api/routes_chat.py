@@ -130,6 +130,10 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
 
     logger.info("Unified Chat | session=%s | message=%r", session.session_id, text[:100])
 
+    def respond(res: ChatResponse) -> ChatResponse:
+        session.history.append({"role": "assistant", "text": res.answer})
+        return res
+
     # Record user turn
     session.history.append({"role": "user", "text": text})
 
@@ -137,50 +141,94 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
     # 0. Friendly Greeting & Help
     # ------------------------------------------------------------------------
     if re.match(r"^(hi|hello|hey|greetings|help|what\s+can\s+you\s+do)\b", text, re.I):
-        return ChatResponse(
+        return respond(ChatResponse(
             status="ok",
             sessionId=session.session_id,
             intent="general",
             agents=["Assistant"],
             steps=[ChatStep(step=1, agent="Assistant", action="greeting", result="ready")],
             answer="Hello! I am your Grafana Observability Assistant. I can help you query live metrics (CPU, Memory, GPU), author and update dashboards, create alert rules, and inspect logs. How can I help you today?",
-        )
+        ))
 
     # ------------------------------------------------------------------------
     # 1. Check for Pending Clarifications (Context Continuity)
     # ------------------------------------------------------------------------
-    if session.pending_action == "awaiting_metric_for_dashboard" and session.pending_payload:
-        dash_req = session.pending_payload.get("dashboard_request", "")
-        target = session.pending_payload.get("target")
-        time_range = session.pending_payload.get("time_range", "1h")
+    is_numeric_choice = bool(re.match(r"^#?(\d+)[\.\)]?$", text.strip()))
 
-        # Resume dashboard creation with the specified metric
-        composite_req = f"{dash_req} using metric {text}"
-        logger.info("Resuming pending dashboard proposal: %r", composite_req)
+    if (session.pending_action == "awaiting_metric_for_dashboard" and session.pending_payload) or (
+        is_numeric_choice and session.history
+    ):
+        dash_req = (session.pending_payload or {}).get("dashboard_request", "")
+        target = (session.pending_payload or {}).get("target") or session.last_target or ""
+        time_range = (session.pending_payload or {}).get("time_range", "1h")
+        candidates = list((session.pending_payload or {}).get("candidates") or [])
+
+        # If candidates not in pending_payload, extract from recent assistant history
+        if not candidates and session.history:
+            last_assistant_msg = next((h["text"] for h in reversed(session.history) if h.get("role") == "assistant"), "")
+            candidates = re.findall(r"\(`([A-Za-z0-9_:]+)`\)", last_assistant_msg)
+            if not dash_req:
+                dash_req = next((h["text"] for h in reversed(session.history[:-1]) if h.get("role") == "user" and h.get("text") != text), "add panel to dashboard")
+
+        chosen_metric = text.strip()
+        if is_numeric_choice and candidates:
+            num_val = int(re.match(r"^#?(\d+)", text.strip()).group(1))
+            idx = num_val - 1
+            if 0 <= idx < len(candidates):
+                chosen_metric = candidates[idx]
+                logger.info("Resolved numeric choice %s to metric: %s", num_val, chosen_metric)
+        elif candidates:
+            matched = next((c for c in candidates if text.lower() in c.lower() or c.lower() in text.lower()), None)
+            if matched:
+                chosen_metric = matched
+                logger.info("Resolved textual choice %r to metric: %s", text, chosen_metric)
 
         session.pending_action = None
         session.pending_payload = None
 
-        prop_res = propose_dashboard(request=composite_req, target=target or "", time_range=time_range)
-        pid = prop_res.get("proposalId")
-        if pid:
-            proposal_obj = PROPOSALS.get(pid)
-            if proposal_obj and proposal_obj.get("ir"):
-                session.last_target = proposal_obj["ir"].get("name") or pid
+        if chosen_metric:
+            composite_req = f"{dash_req} using metric {chosen_metric}"
+            logger.info("Resuming pending dashboard proposal: %r", composite_req)
 
-            return ChatResponse(
-                status="ok",
-                sessionId=session.session_id,
-                intent="dashboard_proposal",
-                agents=["ADK Agent", "Proposal Engine", "MCP-Grafana"],
-                steps=[
-                    ChatStep(step=1, agent="Coordinator", action="resolved clarification", result=text),
-                    ChatStep(step=2, agent="Proposal Engine", action="generated Dashboard IR", result=proposal_obj.get("ir", {}).get("name", "Dashboard")),
-                ],
-                answer="Here is your updated dashboard proposal with the requested metrics.",
-                proposalId=pid,
-                proposal=proposal_obj,
-            )
+            prop_res = propose_dashboard(request=composite_req, target=target or "", time_range=time_range)
+            pid = prop_res.get("proposalId")
+            if pid:
+                proposal_obj = PROPOSALS.get(pid)
+                if proposal_obj and proposal_obj.get("ir"):
+                    session.last_target = proposal_obj["ir"].get("name") or pid
+
+                return respond(ChatResponse(
+                    status="ok",
+                    sessionId=session.session_id,
+                    intent="dashboard_proposal",
+                    agents=["ADK Agent", "Proposal Engine", "MCP-Grafana"],
+                    steps=[
+                        ChatStep(step=1, agent="Coordinator", action="resolved clarification", result=chosen_metric),
+                        ChatStep(step=2, agent="Proposal Engine", action="generated Dashboard IR", result=proposal_obj.get("ir", {}).get("name", "Dashboard")),
+                    ],
+                    answer=f"Added panel with `{chosen_metric}` to the dashboard. Review and modify it before applying.",
+                    proposalId=pid,
+                    proposal=proposal_obj,
+                ))
+
+            if prop_res.get("status") == "clarification":
+                new_candidates = prop_res.get("candidates") or re.findall(r"\(`([A-Za-z0-9_:]+)`\)", prop_res.get("question", ""))
+                session.pending_action = "awaiting_metric_for_dashboard"
+                session.pending_payload = {
+                    "dashboard_request": dash_req,
+                    "target": target,
+                    "time_range": time_range,
+                    "candidates": new_candidates,
+                }
+                return respond(ChatResponse(
+                    status="clarification",
+                    sessionId=session.session_id,
+                    intent="dashboard",
+                    agents=["ADK Agent", "Proposal Engine"],
+                    steps=[ChatStep(step=1, agent="Proposal Engine", action="requested clarification", result="missing_metric")],
+                    answer=prop_res.get("question", "Please clarify which metric to use."),
+                    candidates=[{"name": m, "purpose": m} for m in new_candidates] if new_candidates else None,
+                ))
 
     # ------------------------------------------------------------------------
     # 2. Referential Target Resolution ("this dashboard", "it", "the dashboard")
@@ -204,14 +252,14 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
     # A) Alert Rule Creation / Management
     if is_alert_request:
         if not settings.alert_rule_creation_enabled:
-            return ChatResponse(
+            return respond(ChatResponse(
                 status="out_of_scope_action",
                 sessionId=session.session_id,
                 intent="alert_rule",
                 agents=["Router"],
                 steps=[ChatStep(step=1, agent="Router", action="checked feature gate", result="disabled")],
                 answer="Alert-rule creation is currently disabled on this deployment; this skill only constructs/runs read-only queries.",
-            )
+            ))
 
         # Route alert rule creation through pipeline
         if skill_index:
@@ -226,7 +274,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     session.pending_payload = {"alert_rule": alert_rule}
                     session.last_alert_rule = alert_rule
 
-                return ChatResponse(
+                return respond(ChatResponse(
                     status=status,
                     sessionId=session.session_id,
                     intent="alert_rule",
@@ -234,7 +282,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     steps=[ChatStep(step=1, agent="Alert Engine", action="proposed alert rule", result=status)],
                     answer=explanation,
                     alertRule=alert_rule,
-                )
+                ))
             except Exception as e:
                 logger.error("Alert proposal error: %s", e)
 
@@ -254,7 +302,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 if proposal_obj and proposal_obj.get("ir"):
                     session.last_target = proposal_obj["ir"].get("name") or pid
 
-                return ChatResponse(
+                return respond(ChatResponse(
                     status="ok",
                     sessionId=session.session_id,
                     intent="dashboard_proposal",
@@ -266,21 +314,28 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     answer="Here is the proposed dashboard. Review and modify it before applying.",
                     proposalId=pid,
                     proposal=proposal_obj,
-                )
+                ))
 
             if status == "clarification":
-                session.pending_action = "awaiting_metric_for_dashboard"
-                session.pending_payload = {"dashboard_request": text, "target": resolved_target, "time_range": req.timeRange}
                 question = prop_res.get("question", "Please specify which Prometheus metric to use.")
+                candidates = prop_res.get("candidates") or re.findall(r"\(`([A-Za-z0-9_:]+)`\)", question)
+                session.pending_action = "awaiting_metric_for_dashboard"
+                session.pending_payload = {
+                    "dashboard_request": text,
+                    "target": resolved_target,
+                    "time_range": req.timeRange,
+                    "candidates": candidates,
+                }
 
-                return ChatResponse(
+                return respond(ChatResponse(
                     status="clarification",
                     sessionId=session.session_id,
                     intent="dashboard",
                     agents=["ADK Agent", "Proposal Engine"],
                     steps=[ChatStep(step=1, agent="Proposal Engine", action="requested clarification", result="missing_metric")],
                     answer=question,
-                )
+                    candidates=[{"name": m, "purpose": m} for m in candidates] if candidates else None,
+                ))
 
         # Check if user is asking to list, search, or find dashboards
         is_list_search = bool(re.search(r"\b(list|show|find|search|get|display|pick|view|see|available|what)\b", text, re.I))
@@ -305,14 +360,14 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
             if first_uid_match:
                 session.last_target = first_uid_match.group(1)
 
-            return ChatResponse(
+            return respond(ChatResponse(
                 status="ok",
                 sessionId=session.session_id,
                 intent="dashboard",
                 agents=["ADK Agent", "MCP-Grafana"],
                 steps=[ChatStep(step=1, agent="MCP-Grafana", action="searched Grafana dashboards", result="success")],
                 answer=answer_text,
-            )
+            ))
 
         # Dashboard reading / inspection / listing -> run ADK agent
         adk_out = run_adk_agent(
@@ -328,16 +383,28 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
             session.last_target = uid_match.group(1)
             logger.info("Updated session last_target to %s", session.last_target)
 
-        return ChatResponse(
+        adk_answer = adk_out.get("text") or adk_out.get("agent_response") or "Completed."
+        candidates = re.findall(r"\(`([A-Za-z0-9_:]+)`\)", adk_answer)
+        if candidates and ("which one would you like" in adk_answer.lower() or "reply with the number" in adk_answer.lower() or "clarification" in adk_answer.lower()):
+            session.pending_action = "awaiting_metric_for_dashboard"
+            session.pending_payload = {
+                "dashboard_request": text,
+                "target": resolved_target,
+                "time_range": req.timeRange,
+                "candidates": candidates,
+            }
+
+        return respond(ChatResponse(
             status="ok",
             sessionId=session.session_id,
             intent="dashboard",
             agents=["ADK Agent", "MCP-Grafana"],
             steps=[ChatStep(step=1, agent="ADK Agent", action="queried Grafana MCP", result="completed")],
-            answer=adk_out.get("text") or adk_out.get("agent_response") or "Completed.",
+            answer=adk_answer,
             proposalId=adk_out.get("proposalId"),
             proposal=adk_out.get("proposal"),
-        )
+            candidates=[{"name": m, "purpose": m} for m in candidates] if candidates else None,
+        ))
 
     # C) Telemetry Metric Query (SKILL.md PromQL Engine)
     if skill_index:
@@ -412,7 +479,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
             if not chart_type:
                 chart_type = "line"
 
-            return ChatResponse(
+            return respond(ChatResponse(
                 status=status,
                 sessionId=session.session_id,
                 intent=data_source,
@@ -428,20 +495,20 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 chartType=chart_type,
                 series=normalized_series if normalized_series else None,
                 candidates=first.get("candidates"),
-            )
+            ))
         except Exception as e:
             logger.warning("SKILL.md pipeline error: %s; falling back to ADK agent", e)
 
     # D) General Conversational Fallback
     adk_out = run_adk_agent(request=text, conversation_id=session.session_id)
-    return ChatResponse(
+    return respond(ChatResponse(
         status="ok",
         sessionId=session.session_id,
         intent="general",
         agents=["ADK Agent"],
         steps=[ChatStep(step=1, agent="ADK Agent", action="conversational turn", result="completed")],
         answer=adk_out.get("text") or adk_out.get("agent_response") or "How can I help you with your Grafana observability today?",
-    )
+    ))
 
 
 # ============================================================================
