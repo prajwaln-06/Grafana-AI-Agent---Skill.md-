@@ -840,17 +840,23 @@ function formatMarkdownLite(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-  // Transform numbered options with description into unified interactive cards:
+  // Transform numbered options with description into sleek, compact interactive rows:
   // e.g. "1. **GPU Utilization** (`DCGM_FI_DEV_GPU_UTIL`)\n   NVIDIA GPU compute core utilization percentage."
   formatted = formatted.replace(
     /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)\s*\n\s+([^\n]+)/g,
-    '\n<div class="disambiguation-card" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><div class="card-header"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code></div><div class="card-desc">$4</div></div>'
+    '\n<div class="disambiguation-item" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code><span class="card-desc">— $4</span></div>'
   );
 
   // Fallback for numbered options without a following description line:
   formatted = formatted.replace(
     /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)/g,
-    '\n<div class="disambiguation-card" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><div class="card-header"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code></div></div>'
+    '\n<div class="disambiguation-item" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code></div>'
+  );
+
+  // Wrap contiguous disambiguation items in a sleek container
+  formatted = formatted.replace(
+    /(?:<div class="disambiguation-item"[^>]*>[\s\S]*?<\/div>\s*)+/g,
+    (match) => `<div class="disambiguation-list">${match.trim()}</div>`
   );
 
   formatted = formatted

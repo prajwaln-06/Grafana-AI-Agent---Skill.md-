@@ -82,7 +82,8 @@ CONCEPTS: list[dict[str, Any]] = [
         "title": "GPU Temperature",
         "synonyms": [
             "gpu temp", "gpu temperature", "gpu thermal", "nvidia temp",
-            "gpu heat", "gpu temperatures",
+            "gpu heat", "gpu temperatures", "dcgm temp", "dcgm temperature",
+            "dcgm thermal",
         ],
         "candidates": [
             "DCGM_FI_DEV_GPU_TEMP",
@@ -96,7 +97,8 @@ CONCEPTS: list[dict[str, Any]] = [
         "title": "GPU Utilization",
         "synonyms": [
             "gpu util", "gpu utilization", "gpu usage", "gpu compute",
-            "nvidia util", "nvidia usage", "gpu core",
+            "nvidia util", "nvidia usage", "gpu core", "dcgm util",
+            "dcgm utilization", "dcgm usage",
         ],
         "candidates": [
             "DCGM_FI_DEV_GPU_UTIL",
@@ -110,7 +112,8 @@ CONCEPTS: list[dict[str, Any]] = [
         "title": "GPU Framebuffer Memory",
         "synonyms": [
             "gpu memory", "gpu ram", "vram", "gpu vram", "gpu fb",
-            "framebuffer", "gpu memory usage",
+            "framebuffer", "gpu memory usage", "dcgm memory", "dcgm vram",
+            "dcgm fb",
         ],
         "candidates": [
             "DCGM_FI_DEV_FB_USED",
@@ -123,7 +126,7 @@ CONCEPTS: list[dict[str, Any]] = [
         "id": "gpu",
         "title": "GPU Utilization",
         "synonyms": [
-            "gpu", "nvidia", "graphics", "video card", "accelerator",
+            "gpu", "dcgm", "nvidia", "graphics", "video card", "accelerator",
         ],
         "candidates": [
             "DCGM_FI_DEV_GPU_UTIL",
