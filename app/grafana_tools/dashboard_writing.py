@@ -623,7 +623,8 @@ async def build_proposal(request: str, target: str | None = None, time_range: st
 
 
 def _clean_dashboard_name(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip(" \t\r\n.?!'\"")).strip()
+    cleaned = re.sub(r"\s+(?:using|with)\s+(?:the\s+)?(?:metric|panel)\s+[A-Za-z0-9_:]+.*$", "", value, flags=re.I)
+    return re.sub(r"\s+", " ", cleaned.strip(" \t\r\n.?!'\"")).strip()
 
 
 def _create_dashboard_name(request: str) -> str:

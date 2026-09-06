@@ -26,25 +26,17 @@ const WELCOME_MESSAGE: ChatMessage = {
   content: "Ask about metrics, logs, or dashboards.",
 };
 
-function loadStoredMessages(): ChatMessage[] {
-  try {
-    const raw = sessionStorage.getItem("grafana_ai_chat_messages");
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {
-    // fallback
-  }
-  return [WELCOME_MESSAGE];
-}
+// In-memory chat state that lives for the active page runtime (survives AI toggle),
+// but resets cleanly whenever the website is restarted/reloaded.
+let memoryMessages: ChatMessage[] = [WELCOME_MESSAGE];
+let memorySessionId: string | null = null;
 
-function loadStoredSessionId(): string | null {
-  try {
-    return sessionStorage.getItem("grafana_ai_session_id") || null;
-  } catch {
-    return null;
-  }
+// Purge any legacy sessionStorage entries from prior runs
+try {
+  sessionStorage.removeItem("grafana_ai_chat_messages");
+  sessionStorage.removeItem("grafana_ai_session_id");
+} catch {
+  // ignore
 }
 
 export default function AdkAssistantTab({
@@ -57,39 +49,24 @@ export default function AdkAssistantTab({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(loadStoredSessionId);
-  const [messages, setMessages] = useState<ChatMessage[]>(loadStoredMessages);
+  const [sessionId, setSessionId] = useState<string | null>(() => memorySessionId);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => memoryMessages);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  // Sync to module-level memory so toggling AI on/off preserves the conversation
   useEffect(() => {
-    try {
-      sessionStorage.setItem("grafana_ai_chat_messages", JSON.stringify(messages));
-    } catch {
-      // ignore
-    }
+    memoryMessages = messages;
   }, [messages]);
 
   useEffect(() => {
-    try {
-      if (sessionId) {
-        sessionStorage.setItem("grafana_ai_session_id", sessionId);
-      } else {
-        sessionStorage.removeItem("grafana_ai_session_id");
-      }
-    } catch {
-      // ignore
-    }
+    memorySessionId = sessionId;
   }, [sessionId]);
 
   function clearChat() {
+    memoryMessages = [WELCOME_MESSAGE];
+    memorySessionId = null;
     setMessages([WELCOME_MESSAGE]);
     setSessionId(null);
-    try {
-      sessionStorage.removeItem("grafana_ai_chat_messages");
-      sessionStorage.removeItem("grafana_ai_session_id");
-    } catch {
-      // ignore
-    }
   }
 
   useEffect(() => {

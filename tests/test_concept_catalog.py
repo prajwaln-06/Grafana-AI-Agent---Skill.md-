@@ -189,7 +189,7 @@ def test_numeric_selection_from_clarification():
     session = SESSION_STORE.get_or_create(session_id)
     session.pending_action = "awaiting_metric_for_dashboard"
     session.pending_payload = {
-        "dashboard_request": "add gpu metric to fleet overview",
+        "dashboard_request": "add gpu metric to observability overview",
         "target": "node-01",
         "time_range": "1h",
         "candidates": [
