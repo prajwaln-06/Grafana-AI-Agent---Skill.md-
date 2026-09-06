@@ -9,9 +9,6 @@ request.
 """
 from __future__ import annotations
 
-from dotenv import load_dotenv
-load_dotenv(override=True)
-
 from pathlib import Path
 
 from pydantic import Field
@@ -23,9 +20,7 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     gemini_api_key: str = Field(..., description="Google Gemini API key.")
-    gemini_model: str = Field(default="gemini-3.7-flash")
-    vertex_location: str = Field(default="global")
-    vertex_project: str = Field(default="project-8d47da29-7cf0-45f0-b55")
+    gemini_model: str = Field(default="gemini-3.5-flash-lite")
 
     # --- Skill package ---
     skills_root: Path = Field(default=Path("skills"),
@@ -53,6 +48,14 @@ class Settings(BaseSettings):
                     "anything to end users beyond a PROPOSAL that still requires a separate, "
                     "explicit confirmation call (see app/api/routes_alerts.py); it only "
                     "controls whether that proposal step is reachable at all.",
+    )
+    dependent_query_resolution_enabled: bool = Field(
+        default=False,
+        description="Feature flag for staged resolution of compound queries whose later "
+                    "intent depends on an entity selected by an earlier query. Defaults "
+                    "to OFF so ordinary Router/Generator prompts and the legacy flat "
+                    "execution path remain byte-for-byte unchanged until a deployment "
+                    "has explicitly opted in.",
     )
     grafana_url: str = Field(
         default="http://localhost:3000",
@@ -100,7 +103,7 @@ class Settings(BaseSettings):
 
     # --- HTTP API ---
     api_host: str = Field(default="0.0.0.0")
-    api_port: int = Field(default=8000)
+    api_port: int = Field(default=8008)
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
     api_key: str | None = Field(default=None,
                                  description="If set, required as the X-API-Key header on every "

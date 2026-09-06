@@ -1239,9 +1239,10 @@ def propose_dashboard(
     except Exception as exc:
         message = str(exc) or "Dashboard operation failed without an error message."
         lower = message.lower()
-        if "clarification" in lower or "clarify" in lower or "identify exactly one" in lower:
+        if "clarification" in lower or "clarify" in lower or "identify exactly one" in lower or "which one would you like" in lower:
             status = "clarification"
-            outcome = {"status": status, "question": message, "errors": []}
+            candidates = re.findall(r"\(`([A-Za-z0-9_:]+)`\)", message)
+            outcome = {"status": status, "question": message, "candidates": candidates, "errors": []}
         elif "unsupported" in lower or "cannot provide" in lower or "requires a discovered" in lower:
             status = "unsupported"
             outcome = {"status": status, "reason": message, "errors": []}
