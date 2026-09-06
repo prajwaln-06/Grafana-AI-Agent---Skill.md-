@@ -273,7 +273,7 @@ def run_adk_agent(
 
     raw_jsons = get_raw_json()
 
-    if not proposal_id and any(w in request.lower() for w in ["dashboard", "create", "make", "propose"]):
+    if not proposal_id and any(w in request.lower() for w in ["dashboard", "panel", "create", "make", "propose", "add", "update", "modify"]):
         try:
             tool_outcome = propose_dashboard(request=request, target=target or "", time_range=time_range or "1h")
             if tool_outcome and tool_outcome.get("proposalId"):

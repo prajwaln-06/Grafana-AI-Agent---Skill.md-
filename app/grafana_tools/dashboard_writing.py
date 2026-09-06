@@ -22,6 +22,11 @@ from app.dashboard.results import (
 from .datasource import resolve_datasource
 from .dashboard import fetch_dashboard_detail, fetch_dashboard_list, flatten_panels
 from .promql import build_promql, infer_unit, TARGET_LABEL_CANDIDATES
+from .concept_catalog import (
+    resolve_concept_panels,
+    explain_disambiguation,
+    explain_not_found,
+)
 from .prometheus import (
     execute_prometheus,
     list_prometheus_label_names,
@@ -451,7 +456,7 @@ async def _resolve_prometheus_panels(
             "Prometheus",
         )
         query_result = _normalize_prometheus_shape(result_raw, kind, dimension=dimension, source_metric=metric)
-        title = metric.replace("_", " ").title()
+        title = requested_panel.get("title") or metric.replace("_", " ").title()
         config = {"unit": infer_unit(metric)}
         return {
             "title": title, "metric": metric, "sourceMetrics": [metric],
@@ -576,16 +581,10 @@ async def build_proposal(request: str, target: str | None = None, time_range: st
         schema = await discover_prometheus_schema()
         prometheus_requested = _explicit_metric_panels(request, schema["metrics"])
         if not prometheus_requested:
-            suggestions = _suggest_metrics(request, schema["metrics"])
-            hint = (
-                f" Metrics matching your request: {', '.join(suggestions)}."
-                if suggestions else ""
-            )
-            raise ValueError(
-                f"Clarification required: no exact Prometheus metric name was found in your request.{hint} "
-                f"Please use the metric name as it appears in your Prometheus instance "
-                f"(e.g. 'node_cpu_seconds_total', 'http_requests_total')."
-            )
+            prometheus_requested = resolve_concept_panels(request, set(schema["metrics"]))
+        if not prometheus_requested:
+            clarification = explain_disambiguation(request, schema["metrics"])
+            raise ValueError(clarification)
     groups = []
     if prometheus_requested:
         groups.append(("prometheus", _resolve_prometheus_panels(prometheus_requested, request, target, time_range)))
@@ -862,9 +861,12 @@ async def _build_update_proposal(request: str, target: str | None, time_range: s
     if not classified_panels:
         schema = await discover_prometheus_schema()
         requested_panels = _explicit_metric_panels(request, schema["metrics"])
+        if not requested_panels:
+            requested_panels = resolve_concept_panels(request, set(schema["metrics"]))
         classified_panels = [{**panel, "datasourceType": "prometheus"} for panel in requested_panels]
     if not classified_panels:
-        raise ValueError("UPDATE requires a supported measurement, OpenSearch request, or explicit discovered metric.")
+        clarification = explain_disambiguation(request, schema["metrics"])
+        raise ValueError(clarification)
     groups = []
     if requested_panels:
         groups.append(("prometheus", _resolve_prometheus_panels(requested_panels, request, target, time_range)))
