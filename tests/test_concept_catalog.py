@@ -71,6 +71,14 @@ def test_resolve_gpu_temp():
     assert p["visualization"] == "gauge"
 
 
+def test_dcgm_query_triggers_disambiguation():
+    """Asking for a generic DCGM panel presents disambiguation choices without defaulting."""
+    explanation = explain_disambiguation("create a dcgm panel", sorted(MOCK_LIVE_METRICS))
+    assert "I found" in explanation
+    assert "DCGM_FI_DEV_GPU_UTIL" in explanation
+    assert "DCGM_FI_DEV_GPU_TEMP" in explanation
+
+
 def test_resolve_multiple_concepts():
     """'create dashboard for cpu and memory' resolves both concepts in prompt order."""
     panels = resolve_concept_panels("create dashboard for cpu and memory", MOCK_LIVE_METRICS)
@@ -102,7 +110,7 @@ def test_explain_disambiguation_multiple_options():
     explanation = explain_disambiguation("disk", sorted(MOCK_LIVE_METRICS))
     assert "I found" in explanation
     assert "node_filesystem_avail_bytes" in explanation
-    assert "Tip: You can reply with the number" in explanation
+    assert "Tip: You can click an option directly" in explanation
     # Must use rich descriptions rather than lazy fallback
     assert "Prometheus metric:" not in explanation
 
