@@ -568,6 +568,18 @@ function MessageBubble({
       </div>
       <div
         className={isError ? "bubble-body error-copy" : "bubble-body"}
+        onClick={(e) => {
+          const target = (e.target as HTMLElement).closest("[data-metric], [data-number]");
+          if (target) {
+            const metric = target.getAttribute("data-metric");
+            const number = target.getAttribute("data-number");
+            if (metric) {
+              onSelectCandidate?.(metric);
+            } else if (number) {
+              onSelectCandidate?.(number);
+            }
+          }
+        }}
         dangerouslySetInnerHTML={{
           __html: formatMarkdownLite(message.content),
         }}
@@ -584,34 +596,6 @@ function MessageBubble({
               </span>
             )}
           </div>
-
-          {response.candidates && response.candidates.length > 0 && (
-            <div
-              className="candidate-options"
-              style={{
-                marginTop: "10px",
-                display: "flex",
-                gap: "8px",
-                flexWrap: "wrap",
-              }}
-            >
-              {response.candidates.map((c) => (
-                <button
-                  key={c.name}
-                  type="button"
-                  className="btn quiet"
-                  style={{
-                    fontSize: "12px",
-                    padding: "4px 10px",
-                    cursor: "pointer",
-                  }}
-                  onClick={() => onSelectCandidate?.(c.name)}
-                >
-                  👉 {c.name} {c.purpose ? `— ${c.purpose}` : ""}
-                </button>
-              ))}
-            </div>
-          )}
 
           {response.steps?.length > 0 && (
             <details className="trace">
@@ -835,15 +819,31 @@ function formatStepResult(result: unknown): string {
 }
 
 function formatMarkdownLite(text: string): string {
-  return text
+  let formatted = text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
+    .replace(/>/g, "&gt;");
+
+  // Transform numbered option lines into interactive clickable rows:
+  // e.g. "5. **Dcgm Fi Dev Gpu Temp** (`DCGM_FI_DEV_GPU_TEMP`)"
+  // or "5. Dcgm Fi Dev Gpu Temp ( DCGM_FI_DEV_GPU_TEMP )"
+  formatted = formatted.replace(
+    /(?:^|\n)(\d+)\.\s+([^\n(]+?)\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]+)(?:`|&quot;)?\s*\)/g,
+    '\n<div class="clickable-option" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to add $3"><span class="opt-num">$1.</span> <span class="opt-name">$2</span> <code class="opt-metric">$3</code></div>'
+  );
+
+  formatted = formatted
     .replace(
       /\[([^\]]+)\]\(((?:https?:\/\/)[^)\s]+)\)/g,
       '<a href="$2" target="_blank" rel="noreferrer">$1 ↗</a>'
     )
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(
+      /`([A-Za-z0-9_:]*(?:_|\:)[A-Za-z0-9_:]*)`/g,
+      '<code class="clickable-code" data-metric="$1" role="button" tabindex="0" title="Click to add $1">$1</code>'
+    )
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\n/g, "<br/>");
+
+  return formatted;
 }
