@@ -2561,4 +2561,106 @@ code {
   justify-content: flex-end;
 }
 
+/* Delete Dashboard Proposal (HITL) */
+.proposal-card-delete {
+  border-left-color: #ef4444 !important;
+  border-color: rgba(239, 68, 68, 0.3) !important;
+  background: color-mix(in srgb, #ef4444 4%, var(--bg-elev)) !important;
+}
+
+.proposal-delete-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.proposal-delete-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal-delete-title {
+  margin: 4px 0 0 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-bright, #ffffff);
+}
+
+.proposal-delete-uid {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.proposal-delete-uid code {
+  font-family: var(--font-mono, monospace);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.proposal-delete-warning {
+  display: flex;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.proposal-delete-warning-icon {
+  font-size: 1.4rem;
+  flex-shrink: 0;
+}
+
+.proposal-delete-warning p {
+  margin: 4px 0 0 0;
+  color: var(--text-muted);
+}
+
+.proposal-delete-panels-list {
+  margin-top: 8px;
+}
+
+.proposal-delete-panels-label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.proposal-delete-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.proposal-delete-pill {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.badge-red {
+  background: rgba(239, 68, 68, 0.15) !important;
+  color: #ef4444 !important;
+  border: 1px solid rgba(239, 68, 68, 0.3) !important;
+}
+
+.badge-amber {
+  background: rgba(245, 158, 11, 0.15) !important;
+  color: #f59e0b !important;
+  border: 1px solid rgba(245, 158, 11, 0.3) !important;
+}
+
+
 

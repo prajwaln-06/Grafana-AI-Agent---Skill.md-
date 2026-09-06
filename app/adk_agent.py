@@ -77,7 +77,13 @@ READ calls use query_prometheus_metric and never create a proposal.
 CREATE, UPDATE, and REMOVE call propose_dashboard and present the proposal; this agent never executes mutation.
 UNSPECIFIED requests receive clarification and no mutation tool call.
 
-For a request to create, update, or remove a dashboard:
+For a request to DELETE or REMOVE an entire dashboard:
+-> Call propose_dashboard(request="<the user's exact request>").
+-> If removeDashboard is true or operation is remove, state clearly that a deletion proposal has been created to delete the dashboard (mention its title and UID if available).
+-> Direct the user to review and confirm the deletion in the proposal card below.
+-> Do NOT say "Here is the proposed dashboard" and do NOT mention adding or modifying panels.
+
+For a request to CREATE or UPDATE a dashboard:
 -> Call propose_dashboard(request="<the user's exact request>").
 -> Present its structured proposal for review.
 -> Explain that modifications and explicit application approval happen in the proposal UI.
