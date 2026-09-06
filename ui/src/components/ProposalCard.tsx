@@ -241,9 +241,15 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
             : `http://localhost:3000${rawUrl}`
           : null;
         setDashboardUrl(fullUrl);
-        setSuccessMessage(
-          `Dashboard "${ir.name}" successfully created in Grafana!`
-        );
+        if (isDeleteDashboard) {
+          setSuccessMessage(
+            `Dashboard "${ir.name}" successfully deleted from Grafana!`
+          );
+        } else {
+          setSuccessMessage(
+            `Dashboard "${ir.name}" successfully created in Grafana!`
+          );
+        }
       } else {
         setError(res.error || "Execution failed. Check Grafana MCP connection.");
       }
@@ -253,6 +259,145 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
       setLoading(false);
     }
   };
+
+  const isDeleteDashboard = Boolean(
+    ir?.removeDashboard || (ir?.operation === "remove" && ir?.removeDashboard)
+  );
+
+  if (isDeleteDashboard) {
+    return (
+      <section
+        className="proposal-card proposal-card-delete"
+        data-proposal={proposal.proposalId}
+      >
+        {/* Delete Header */}
+        <div className="proposal-delete-header">
+          <div className="proposal-delete-badge-row">
+            <span className="badge badge-red">Delete Dashboard</span>
+            <span
+              className={`badge ${
+                proposal.status === "executed"
+                  ? "badge-green"
+                  : proposal.status === "rejected"
+                  ? ""
+                  : "badge-amber"
+              }`}
+              style={{ marginLeft: "auto" }}
+            >
+              {proposal.status === "executed"
+                ? "Deleted"
+                : proposal.status === "rejected"
+                ? "Cancelled"
+                : proposal.status === "approved"
+                ? "Approved"
+                : "Pending Confirmation"} · v{proposal.version}
+            </span>
+          </div>
+
+          <h3 className="proposal-delete-title">{ir.name}</h3>
+          {ir.dashboardUid && (
+            <p className="proposal-delete-uid">
+              Dashboard UID: <code>{ir.dashboardUid}</code>
+            </p>
+          )}
+        </div>
+
+        {/* Warning Body */}
+        {proposal.status !== "executed" && proposal.status !== "rejected" && (
+          <div className="proposal-delete-warning">
+            <div className="proposal-delete-warning-icon">⚠️</div>
+            <div>
+              <strong>Permanent Action</strong>
+              <p>
+                This will permanently delete the dashboard <strong>{ir.name}</strong>
+                {panels.length > 0 ? ` and its ${panels.length} panel${panels.length > 1 ? "s" : ""}` : ""} from your Grafana instance. This cannot be undone.
+              </p>
+              {panels.length > 0 && (
+                <div className="proposal-delete-panels-list">
+                  <span className="proposal-delete-panels-label">Panels to be removed:</span>
+                  <div className="proposal-delete-pills">
+                    {panels.map((p, idx) => (
+                      <span key={p.id || idx} className="proposal-delete-pill">
+                        {p.title}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Feedback Messages */}
+        {error && <div className="alert error">{error}</div>}
+        {successMessage && (
+          <div className="alert success">{successMessage}</div>
+        )}
+        {proposal.status === "rejected" && (
+          <div className="alert muted" style={{ background: "rgba(255,255,255,0.04)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+            Deletion request cancelled.
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="proposal-actions">
+          {proposal.status === "proposed" && (
+            <>
+              <button
+                type="button"
+                className="btn danger"
+                disabled={loading}
+                onClick={handleApprove}
+                style={{
+                  background: "rgba(239, 68, 68, 0.15)",
+                  color: "#ef4444",
+                  borderColor: "rgba(239, 68, 68, 0.4)",
+                  fontWeight: 600,
+                }}
+              >
+                {loading ? "Approving…" : "Approve Deletion"}
+              </button>
+              <button
+                type="button"
+                className="btn quiet"
+                disabled={loading}
+                onClick={handleReject}
+              >
+                Cancel
+              </button>
+            </>
+          )}
+
+          {proposal.status === "approved" && (
+            <>
+              <button
+                type="button"
+                className="btn danger"
+                disabled={loading}
+                onClick={handleExecute}
+                style={{
+                  background: "#ef4444",
+                  color: "#ffffff",
+                  borderColor: "#dc2626",
+                  fontWeight: 700,
+                }}
+              >
+                {loading ? "Deleting from Grafana…" : "Confirm & Delete from Grafana"}
+              </button>
+              <button
+                type="button"
+                className="btn quiet"
+                disabled={loading}
+                onClick={handleReject}
+              >
+                Cancel
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section

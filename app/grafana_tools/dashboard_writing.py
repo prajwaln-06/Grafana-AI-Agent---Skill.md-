@@ -648,15 +648,17 @@ def _dashboard_identity(request: str, intent: Intent) -> str:
     possessive = re.search(r"\b(?:my|the)\s+(.+?)\s+dashboard\b", request, re.I)
     if possessive:
         return _clean_dashboard_name(possessive.group(1))
-    dashboard_reference = re.search(
-        r"\bdashboard\s+['\"]?(.+?)['\"]?(?=\s+to\s+(?:a|an|the)?\s*(?:gauge|stat|time\s*series|timeseries|bar\s*chart|table)\b|[.!?]|$)",
-        request,
-        re.I,
-    )
-    if dashboard_reference:
-        name = _clean_dashboard_name(dashboard_reference.group(1))
-        if name and name.lower() not in {"this", "the", "my", "existing"}:
-            return name
+    before_dashboard = re.search(r"\b([A-Za-z0-9 _.-]+?)\s+dashboard\b", request, re.I)
+    if before_dashboard:
+        cand = _clean_dashboard_name(before_dashboard.group(1))
+        cand = re.sub(r"^(?:delete|remove|update|edit|modify|show|view|open)\s+(?:the\s+|my\s+)?", "", cand, flags=re.I).strip()
+        if cand and cand.lower() not in {"this", "the", "my", "a", "an", "existing", "new", "delete", "remove", "update", "edit", "modify"}:
+            return cand
+    after_dashboard = re.search(r"\bdashboard\s+['\"]?(.+?)['\"]?(?=\s+(?:to|for|with)\b|[.!?]|$)", request, re.I)
+    if after_dashboard:
+        cand = _clean_dashboard_name(after_dashboard.group(1))
+        if cand and cand.lower() not in {"this", "the", "my", "existing"}:
+            return cand
     destination = re.search(
         r"\b(?:to|in|on)\s+(?:my|the)?\s*['\"]?(.+?)['\"]?(?=\s+to\s+(?:a|an|the)?\s*(?:gauge|stat|time\s*series|timeseries|bar\s*chart|table)\b|[.!?]|$)",
         request,
@@ -664,6 +666,12 @@ def _dashboard_identity(request: str, intent: Intent) -> str:
     )
     if destination:
         return _clean_dashboard_name(destination.group(1))
+    if intent == Intent.REMOVE:
+        direct_del = re.search(r"\b(?:delete|remove)\s+(?:dashboard\s+)?['\"]?([A-Za-z0-9 _.-]+?)['\"]?(?:[.!?]|$)", request, re.I)
+        if direct_del:
+            cand = _clean_dashboard_name(direct_del.group(1))
+            if cand and cand.lower() not in {"this", "the", "my", "dashboard", "panel"}:
+                return cand
     raise ValueError("Identify the dashboard by name or UID before continuing.")
 
 
@@ -900,7 +908,10 @@ async def _build_update_proposal(request: str, target: str | None, time_range: s
 async def _build_remove_proposal(request: str) -> dict:
     uid, raw = await _resolve_dashboard(request, "remove")
     ir = _hydrate_dashboard(uid, raw)
-    if re.search(r"\b(delete|remove)\s+(?:this|the|my)?\s*dashboard\b", request, re.I):
+    is_delete_dash = not re.search(r"\b(panel|panels)\b", request, re.I) or bool(
+        re.search(r"\b(delete|remove)\s+(?:this|the|my)?\s*dashboard\b", request, re.I)
+    )
+    if is_delete_dash:
         ir["operation"] = "remove"
         ir["removeDashboard"] = True
         return PROPOSALS.create(ir)
@@ -1221,7 +1232,9 @@ def propose_dashboard(
             "status": status,
             "proposalId": proposal.get("proposalId"),
             "dashboardName": ir.get("name"),
+            "dashboardUid": ir.get("dashboardUid"),
             "operation": ir.get("operation"),
+            "removeDashboard": bool(ir.get("removeDashboard")),
             "panelCount": len(panels),
             "panels": panels,
             "errors": errors,

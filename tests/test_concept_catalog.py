@@ -209,3 +209,28 @@ def test_numeric_selection_from_clarification():
     assert "no discernible observability intent" not in data["answer"].lower()
     # It should have resolved to option 5: DCGM_FI_DEV_GPU_TEMP
     assert "DCGM_FI_DEV_GPU_TEMP" in data["answer"] or data.get("proposalId") is not None
+
+
+def test_delete_dashboard_proposal():
+    """Verify that 'delete dashboard Observability Overview' generates a proper delete proposal."""
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/chat",
+        json={"message": "Delete dashboard Observability Overview", "sessionId": "test_del_session"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "proposalId" in data
+    assert data["proposalId"] is not None
+    assert "proposal to delete" in data["answer"].lower()
+    assert "Observability Overview" in data["answer"]
+    # Ensure it didn't default to generic create wording
+    assert "here is the proposed dashboard" not in data["answer"].lower()
+    prop = data.get("proposal", {})
+    ir = prop.get("ir", {})
+    assert ir.get("removeDashboard") is True
+    assert ir.get("operation") == "remove"
+

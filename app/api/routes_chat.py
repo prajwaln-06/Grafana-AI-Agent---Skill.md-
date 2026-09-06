@@ -302,16 +302,34 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 if proposal_obj and proposal_obj.get("ir"):
                     session.last_target = proposal_obj["ir"].get("name") or pid
 
+                ir_data = (proposal_obj or {}).get("ir", {})
+                is_delete = bool(ir_data.get("removeDashboard") or (ir_data.get("operation") == "remove" and ir_data.get("removeDashboard")))
+                dash_name = ir_data.get("name", "Dashboard")
+                dash_uid = ir_data.get("dashboardUid", "")
+
+                if is_delete:
+                    answer_text = f"I have prepared a proposal to delete the dashboard **{dash_name}**" + (f" (UID: `{dash_uid}`)" if dash_uid else "") + ". Please review and confirm the deletion below."
+                    action_result = f"deletion proposal for {dash_name}"
+                elif ir_data.get("operation") == "remove":
+                    answer_text = f"I have prepared a proposal to remove panel(s) from **{dash_name}**. Review and modify it before applying."
+                    action_result = f"panel removal for {dash_name}"
+                elif ir_data.get("operation") == "update":
+                    answer_text = f"I have prepared an update for the dashboard **{dash_name}**. Review and modify it before applying."
+                    action_result = f"update proposal for {dash_name}"
+                else:
+                    answer_text = f"Here is the proposed dashboard **{dash_name}**. Review and modify it before applying."
+                    action_result = f"created proposal for {dash_name}"
+
                 return respond(ChatResponse(
                     status="ok",
                     sessionId=session.session_id,
                     intent="dashboard_proposal",
                     agents=["ADK Agent", "Proposal Engine", "MCP-Grafana"],
                     steps=[
-                        ChatStep(step=1, agent="Coordinator", action="classified intent", result=intent_kind),
-                        ChatStep(step=2, agent="Proposal Engine", action="generated Dashboard IR", result=proposal_obj.get("ir", {}).get("name", "Dashboard")),
+                        ChatStep(step=1, agent="Coordinator", action="classified intent", result="delete_dashboard" if is_delete else intent_kind),
+                        ChatStep(step=2, agent="Proposal Engine", action="generated Dashboard IR", result=action_result),
                     ],
-                    answer="Here is the proposed dashboard. Review and modify it before applying.",
+                    answer=answer_text,
                     proposalId=pid,
                     proposal=proposal_obj,
                 ))
