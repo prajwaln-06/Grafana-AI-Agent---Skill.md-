@@ -355,6 +355,21 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     candidates=[{"name": m, "purpose": m} for m in candidates] if candidates else None,
                 ))
 
+            if status in ("error", "unsupported"):
+                err_msg = ""
+                if prop_res.get("errors"):
+                    err_msg = prop_res["errors"][0].get("message", "")
+                if not err_msg:
+                    err_msg = prop_res.get("reason") or "Failed to process dashboard request."
+                return respond(ChatResponse(
+                    status=status,
+                    sessionId=session.session_id,
+                    intent="dashboard",
+                    agents=["Proposal Engine"],
+                    steps=[ChatStep(step=1, agent="Proposal Engine", action="validated dashboard request", result=status)],
+                    answer=err_msg,
+                ))
+
         # Check if user is asking to inspect panels inside a dashboard
         is_panel_inspection = (
             bool(re.search(r"\b(panel|panels)\b", text, re.I))

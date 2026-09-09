@@ -47,9 +47,15 @@ def resolve_intent(text: str) -> IntentResolution:
         return IntentResolution(Intent.UNSPECIFIED, "medium", "The request combines retrieval language with a dashboard change; clarify the desired operation.")
     if _CREATE.search(value):
         return IntentResolution(Intent.CREATE, "high", "Explicit dashboard creation language.", "create")
-    if _REMOVE.search(value) and (has_dashboard or _MUTATION_CONTEXT.search(value)):
-        operation = "delete_dashboard" if re.search(r"\b(delete|remove)\b.*\bdashboard\b", value, re.I) else "remove_panel"
-        return IntentResolution(Intent.REMOVE, "high", "Explicit dashboard or panel removal language.", operation)
+    if _REMOVE.search(value):
+        if has_dashboard or _MUTATION_CONTEXT.search(value):
+            operation = "delete_dashboard" if re.search(r"\b(delete|remove)\b.*\bdashboard\b", value, re.I) else "remove_panel"
+            return IntentResolution(Intent.REMOVE, "high", "Explicit dashboard or panel removal language.", operation)
+        direct_del = re.search(r"\b(?:delete|remove|drop)\s+(?:the\s+|my\s+)?['\"]?([A-Za-z0-9 _.-]+?)['\"]?(?:[.!?]|$)", value, re.I)
+        if direct_del:
+            cand = direct_del.group(1).strip()
+            if cand.lower() not in {"this", "the", "my", "it", "all", "rule", "alert", "notification", "silence", "alerting"}:
+                return IntentResolution(Intent.REMOVE, "high", f"Explicit dashboard deletion language for {cand}.", "delete_dashboard")
     if _UPDATE.search(value) and (has_dashboard or _MUTATION_CONTEXT.search(value) or _NAMED_UPDATE_DESTINATION.search(value)):
         return IntentResolution(Intent.UPDATE, "high", "Explicit dashboard or panel modification language.", "update")
     if has_read and not has_mutation:
