@@ -568,7 +568,7 @@ async def build_proposal(request: str, target: str | None = None, time_range: st
     if resolution.intent == Intent.UPDATE:
         return await _build_update_proposal(request, target, time_range)
     if resolution.intent == Intent.REMOVE:
-        return await _build_remove_proposal(request)
+        return await _build_remove_proposal(request, target=target)
     if resolution.intent != Intent.CREATE:
         raise ValueError(f"Unsupported dashboard intent: {resolution.intent.value}")
     if time_range not in TIME_RANGES:
@@ -694,17 +694,28 @@ async def _find_dashboards(name: str) -> list[dict]:
     ]
 
 
-async def _resolve_dashboard(request: str, operation: str = "update") -> tuple[str, dict]:
+async def _resolve_dashboard(request: str, operation: str = "update", target: str | None = None) -> tuple[str, dict]:
     uid_match = re.search(r"\buid\s+['\"]?([A-Za-z0-9_.:-]+)['\"]?", request, re.I)
     if uid_match:
-        uid = uid_match.group(1)
+        uid = uid_match.group(1).rstrip(" \t\r\n.?!,;:'\"")
     else:
-        name = _dashboard_identity(request, Intent.UPDATE)
-        candidates = await _find_dashboards(name)
+        intent_type = Intent.REMOVE if operation == "remove" else Intent.UPDATE
+        try:
+            name = _dashboard_identity(request, intent_type)
+        except ValueError:
+            name = ""
+        candidates = await _find_dashboards(name) if name else []
+        if not candidates and target and target.strip():
+            target_cleaned = target.strip().rstrip(" \t\r\n.?!,;:'\"")
+            target_candidates = await _find_dashboards(target_cleaned)
+            if target_candidates:
+                candidates = target_candidates
         if not candidates:
-            raise ValueError(f"Dashboard '{name}' was not found. Identify an existing dashboard before {operation}.")
+            ident = name or target or "the dashboard"
+            raise ValueError(f"Dashboard '{ident}' was not found. Identify an existing dashboard before {operation}.")
         if len(candidates) > 1:
-            raise ValueError(f"Multiple dashboards match '{name}'. Identify the intended dashboard by UID or exact title.")
+            uids_str = ", ".join(f"`{c.get('uid')}`" for c in candidates)
+            raise ValueError(f"Multiple dashboards match '{name}' ({uids_str}). Identify the intended dashboard by UID.")
         uid = str(candidates[0]["uid"])
     detail = await fetch_dashboard_detail(uid, refresh=True)
     if not detail:
@@ -821,7 +832,7 @@ async def _populate_query_results(ir: dict, time_range: str) -> None:
 
 
 async def _build_update_proposal(request: str, target: str | None, time_range: str) -> dict:
-    uid, raw = await _resolve_dashboard(request, "update")
+    uid, raw = await _resolve_dashboard(request, "update", target=target)
     ir = _hydrate_dashboard(uid, raw)
     await _populate_query_results(ir, time_range)
     classified_panels = classify_dashboard_panels(request)
@@ -905,8 +916,8 @@ async def _build_update_proposal(request: str, target: str | None, time_range: s
     return PROPOSALS.create(ir)
 
 
-async def _build_remove_proposal(request: str) -> dict:
-    uid, raw = await _resolve_dashboard(request, "remove")
+async def _build_remove_proposal(request: str, target: str | None = None) -> dict:
+    uid, raw = await _resolve_dashboard(request, "remove", target=target)
     ir = _hydrate_dashboard(uid, raw)
     is_delete_dash = not re.search(r"\b(panel|panels)\b", request, re.I) or bool(
         re.search(r"\b(delete|remove)\s+(?:this|the|my)?\s*dashboard\b", request, re.I)
