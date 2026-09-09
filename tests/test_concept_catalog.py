@@ -305,4 +305,32 @@ def test_awaiting_dashboard_uid_resolution():
     assert data2.get("proposalId") is not None
 
 
+def test_pending_clarification_abandoned_on_new_command():
+    """Verify that entering a new command like 'List the panels...' abandons pending metric clarification."""
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+    from app.api.routes_chat import SESSION_STORE
+
+    client = TestClient(app)
+    session_id = "test_abandon_clarification_session"
+    session = SESSION_STORE.get_or_create(session_id)
+    session.pending_action = "awaiting_metric_for_dashboard"
+    session.pending_payload = {
+        "dashboard_request": "Add GPU metric to Observability Overview",
+        "target": "observability-overview",
+        "time_range": "1h",
+        "candidates": ["DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_DEV_GPU_TEMP"],
+    }
+    resp = client.post(
+        "/api/chat",
+        json={"message": "List the panels in Observability Overview.", "sessionId": session_id},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert session.pending_action is None
+    assert "Panels (" in data["answer"]
+    assert "CPU Busy" in data["answer"]
+
+
+
 

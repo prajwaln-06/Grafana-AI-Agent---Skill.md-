@@ -158,18 +158,28 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
     if session.pending_action == "awaiting_dashboard_uid" and session.pending_payload:
         dash_req = session.pending_payload.get("dashboard_request", "")
         candidates = list(session.pending_payload.get("candidates") or [])
-        chosen_uid = text.strip().rstrip(" \t\r\n.?!,;:'\"")
-        chosen_uid = re.sub(r"^uid\s+", "", chosen_uid, flags=re.I).strip()
+        chosen_uid = None
+        cleaned_text = text.strip().rstrip(" \t\r\n.?!,;:'\"")
+        cleaned_text = re.sub(r"^uid\s+", "", cleaned_text, flags=re.I).strip()
         if is_numeric_choice and candidates:
             idx = int(re.match(r"^#?(\d+)", text.strip()).group(1)) - 1
             if 0 <= idx < len(candidates):
                 chosen_uid = candidates[idx]
+        elif candidates:
+            matched = next((c for c in candidates if cleaned_text.lower() == c.lower()), None)
+            if matched:
+                chosen_uid = matched
+        elif re.match(r"^[A-Za-z0-9_-]+$", cleaned_text) and not re.search(r"\b(list|show|get|delete|add|create|search|what|how)\b", cleaned_text, re.I):
+            chosen_uid = cleaned_text
+
         session.pending_action = None
         session.pending_payload = None
         is_numeric_choice = False
-        text = f"{dash_req} UID {chosen_uid}"
-        if session.history and session.history[-1].get("role") == "user":
-            session.history[-1]["text"] = text
+
+        if chosen_uid:
+            text = f"{dash_req} UID {chosen_uid}"
+            if session.history and session.history[-1].get("role") == "user":
+                session.history[-1]["text"] = text
 
     if (session.pending_action == "awaiting_metric_for_dashboard" and session.pending_payload) or (
         is_numeric_choice and session.history
@@ -186,7 +196,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
             if not dash_req:
                 dash_req = next((h["text"] for h in reversed(session.history[:-1]) if h.get("role") == "user" and h.get("text") != text), "add panel to dashboard")
 
-        chosen_metric = text.strip()
+        chosen_metric = None
         if is_numeric_choice and candidates:
             num_val = int(re.match(r"^#?(\d+)", text.strip()).group(1))
             idx = num_val - 1
@@ -194,10 +204,13 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 chosen_metric = candidates[idx]
                 logger.info("Resolved numeric choice %s to metric: %s", num_val, chosen_metric)
         elif candidates:
-            matched = next((c for c in candidates if text.lower() in c.lower() or c.lower() in text.lower()), None)
+            cleaned_text = text.strip().rstrip(" \t\r\n.?!,;:'\"")
+            matched = next((c for c in candidates if cleaned_text.lower() == c.lower() or cleaned_text.lower() in c.lower() or c.lower() in cleaned_text.lower()), None)
             if matched:
                 chosen_metric = matched
                 logger.info("Resolved textual choice %r to metric: %s", text, chosen_metric)
+        elif re.match(r"^[A-Za-z0-9_:]+$", text.strip()) and not re.search(r"\b(list|show|get|delete|add|create|search|what|how)\b", text, re.I):
+            chosen_metric = text.strip()
 
         session.pending_action = None
         session.pending_payload = None
