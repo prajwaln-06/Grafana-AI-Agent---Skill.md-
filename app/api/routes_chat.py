@@ -155,6 +155,22 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
     # ------------------------------------------------------------------------
     is_numeric_choice = bool(re.match(r"^#?(\d+)[\.\)]?$", text.strip()))
 
+    if session.pending_action == "awaiting_dashboard_uid" and session.pending_payload:
+        dash_req = session.pending_payload.get("dashboard_request", "")
+        candidates = list(session.pending_payload.get("candidates") or [])
+        chosen_uid = text.strip().rstrip(" \t\r\n.?!,;:'\"")
+        chosen_uid = re.sub(r"^uid\s+", "", chosen_uid, flags=re.I).strip()
+        if is_numeric_choice and candidates:
+            idx = int(re.match(r"^#?(\d+)", text.strip()).group(1)) - 1
+            if 0 <= idx < len(candidates):
+                chosen_uid = candidates[idx]
+        session.pending_action = None
+        session.pending_payload = None
+        is_numeric_choice = False
+        text = f"{dash_req} UID {chosen_uid}"
+        if session.history and session.history[-1].get("role") == "user":
+            session.history[-1]["text"] = text
+
     if (session.pending_action == "awaiting_metric_for_dashboard" and session.pending_payload) or (
         is_numeric_choice and session.history
     ):
@@ -337,13 +353,21 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
             if status == "clarification":
                 question = prop_res.get("question", "Please specify which Prometheus metric to use.")
                 candidates = prop_res.get("candidates") or re.findall(r"\(`([A-Za-z0-9_:]+)`\)", question)
-                session.pending_action = "awaiting_metric_for_dashboard"
-                session.pending_payload = {
-                    "dashboard_request": text,
-                    "target": resolved_target,
-                    "time_range": req.timeRange,
-                    "candidates": candidates,
-                }
+                if "multiple dashboards match" in question.lower():
+                    session.pending_action = "awaiting_dashboard_uid"
+                    session.pending_payload = {
+                        "dashboard_request": text,
+                        "candidates": re.findall(r"`([A-Za-z0-9_.:-]+)`", question),
+                        "time_range": req.timeRange,
+                    }
+                else:
+                    session.pending_action = "awaiting_metric_for_dashboard"
+                    session.pending_payload = {
+                        "dashboard_request": text,
+                        "target": resolved_target,
+                        "time_range": req.timeRange,
+                        "candidates": candidates,
+                    }
 
                 return respond(ChatResponse(
                     status="clarification",
@@ -361,6 +385,13 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     err_msg = prop_res["errors"][0].get("message", "")
                 if not err_msg:
                     err_msg = prop_res.get("reason") or "Failed to process dashboard request."
+                if "multiple dashboards match" in err_msg.lower():
+                    session.pending_action = "awaiting_dashboard_uid"
+                    session.pending_payload = {
+                        "dashboard_request": text,
+                        "candidates": re.findall(r"`([A-Za-z0-9_.:-]+)`", err_msg),
+                        "time_range": req.timeRange,
+                    }
                 return respond(ChatResponse(
                     status=status,
                     sessionId=session.session_id,

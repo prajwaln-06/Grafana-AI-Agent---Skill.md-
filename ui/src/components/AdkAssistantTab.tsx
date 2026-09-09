@@ -817,9 +817,9 @@ function formatMarkdownLite(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-  // Transform numbered options into sleek, compact interactive rows (only for metrics with _ or :):
+  // Transform numbered options into sleek, compact interactive rows (only for metrics or UIDs with _, :, or -):
   formatted = formatted.replace(
-    /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:]*(?:_|\:)[A-Za-z0-9_:]*)(?:`|&quot;)?\s*\)/g,
+    /(?:^|\n)(\d+)\.\s+(?:\*\*)?([^\n(*]+?)(?:\*\*)?\s*\(\s*(?:`|&quot;)?([A-Za-z0-9_:-]*(?:_|\:|-)[A-Za-z0-9_:-]*)(?:`|&quot;)?\s*\)/g,
     '\n<div class="disambiguation-item" data-metric="$3" data-number="$1" role="button" tabindex="0" title="Click to select $3"><span class="opt-num">$1</span><span class="opt-name">$2</span><code class="opt-metric">$3</code></div>'
   );
 
@@ -843,7 +843,7 @@ function formatMarkdownLite(text: string): string {
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "<em>$1</em>")
     .replace(
-      /`([A-Za-z0-9_:]*(?:_|\:)[A-Za-z0-9_:]*)`/g,
+      /`([A-Za-z0-9_:-]*(?:_|\:|-)[A-Za-z0-9_:-]*)`/g,
       '<code class="clickable-code" data-metric="$1" role="button" tabindex="0" title="Click to select $1">$1</code>'
     )
     .replace(/`([^`]+)`/g, "<code>$1</code>")
