@@ -699,23 +699,40 @@ async def _resolve_dashboard(request: str, operation: str = "update", target: st
     if uid_match:
         uid = uid_match.group(1).rstrip(" \t\r\n.?!,;:'\"")
     else:
-        intent_type = Intent.REMOVE if operation == "remove" else Intent.UPDATE
-        try:
-            name = _dashboard_identity(request, intent_type)
-        except ValueError:
-            name = ""
-        candidates = await _find_dashboards(name) if name else []
-        if not candidates and target and target.strip():
-            target_cleaned = target.strip().rstrip(" \t\r\n.?!,;:'\"")
-            target_candidates = await _find_dashboards(target_cleaned)
-            if target_candidates:
-                candidates = target_candidates
+        dashboards = await fetch_dashboard_list(refresh=True)
+        candidates = []
+
+        # YAGNI 1: Match against target parameter if provided
+        if target and target.strip():
+            t_norm = _normalized_dashboard_name(target.strip().rstrip(" \t\r\n.?!,;:'\""))
+            candidates = [d for d in dashboards if _normalized_dashboard_name(d.get("title", "")) == t_norm or d.get("uid") == target.strip()]
+
+        # YAGNI 2: Check if any real dashboard title or UID exists directly in the user request
         if not candidates:
-            ident = name or target or "the dashboard"
-            raise ValueError(f"Dashboard '{ident}' was not found. Identify an existing dashboard before {operation}.")
+            req_norm = _normalized_dashboard_name(request)
+            sorted_dashboards = sorted(dashboards, key=lambda d: len(d.get("title", "")), reverse=True)
+            for d in sorted_dashboards:
+                d_title_norm = _normalized_dashboard_name(d.get("title", ""))
+                d_uid_norm = _normalized_dashboard_name(d.get("uid", ""))
+                if (d_title_norm and d_title_norm in req_norm) or (d_uid_norm and d_uid_norm in req_norm):
+                    candidates = [d]
+                    break
+
+        # YAGNI 3: Fallback to name heuristic parser if still not found
+        if not candidates:
+            intent_type = Intent.REMOVE if operation == "remove" else Intent.UPDATE
+            try:
+                name = _dashboard_identity(request, intent_type)
+                candidates = await _find_dashboards(name) if name else []
+            except ValueError:
+                candidates = []
+
+        if not candidates:
+            ident = target or "the dashboard"
+            raise ValueError(f"Dashboard not found in request. Identify an existing dashboard before {operation}.")
         if len(candidates) > 1:
             uids_str = ", ".join(f"`{c.get('uid')}`" for c in candidates)
-            raise ValueError(f"Multiple dashboards match '{name}' ({uids_str}). Identify the intended dashboard by UID.")
+            raise ValueError(f"Multiple dashboards match ({uids_str}). Identify the intended dashboard by UID.")
         uid = str(candidates[0]["uid"])
     detail = await fetch_dashboard_detail(uid, refresh=True)
     if not detail:
