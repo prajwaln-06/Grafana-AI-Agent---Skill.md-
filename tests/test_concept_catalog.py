@@ -268,3 +268,41 @@ def test_dashboard_search_query():
     assert "UID:" in data["answer"]
 
 
+def test_awaiting_dashboard_uid_resolution():
+    """Verify that clicking/sending a dashboard UID resolves pending dashboard action."""
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+    from app.api.routes_chat import SESSION_STORE
+
+    client = TestClient(app)
+    session_id = "test_uid_disambiguation_session"
+    session = SESSION_STORE.get_or_create(session_id)
+    session.pending_action = "awaiting_dashboard_uid"
+    session.pending_payload = {
+        "dashboard_request": "Delete dashboard Observability Overview",
+        "candidates": ["observability-overview", "5035c52c-70ea-4e24-9c41-19e54282b501"],
+        "time_range": "1h",
+    }
+    resp = client.post("/api/chat", json={"message": "observability-overview", "sessionId": session_id})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert session.pending_action is None
+    assert "proposal to delete" in data["answer"].lower()
+    assert data.get("proposalId") is not None
+
+    # Also verify numeric selection works (e.g. user types "1" to pick candidates[0])
+    session.pending_action = "awaiting_dashboard_uid"
+    session.pending_payload = {
+        "dashboard_request": "Delete dashboard Observability Overview",
+        "candidates": ["observability-overview", "5035c52c-70ea-4e24-9c41-19e54282b501"],
+        "time_range": "1h",
+    }
+    resp2 = client.post("/api/chat", json={"message": "1", "sessionId": session_id})
+    assert resp2.status_code == 200
+    data2 = resp2.json()
+    assert session.pending_action is None
+    assert "proposal to delete" in data2["answer"].lower()
+    assert data2.get("proposalId") is not None
+
+
+
