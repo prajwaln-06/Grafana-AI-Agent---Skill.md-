@@ -283,6 +283,12 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
             if session.history and session.history[-1].get("role") == "user":
                 session.history[-1]["text"] = text
             # Fall through — let the normal Section A / C handle the rewritten text
+        elif pending_kind == "awaiting_metric_for_alert":
+            # Multi-word answer (e.g. "available physical memory") — keep alert context
+            text = f"{orig_req}. {text}"
+            if session.history and session.history[-1].get("role") == "user":
+                session.history[-1]["text"] = text
+
 
     # ------------------------------------------------------------------------
     # 2. Referential Target Resolution ("this dashboard", "it", "the dashboard")
@@ -344,6 +350,10 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 if alert_rule:
                     session.pending_payload = {"alert_rule": alert_rule}
                     session.last_alert_rule = alert_rule
+                else:
+                    # Pipeline still needs more info (e.g. duration, threshold) — keep alert context for next turn
+                    session.pending_action = "awaiting_metric_for_alert"
+                    session.pending_payload = {"original_request": text, "candidates": []}
 
                 return respond(ChatResponse(
                     status=status,
@@ -354,6 +364,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     answer=explanation,
                     alertRule=alert_rule,
                 ))
+
             except Exception as e:
                 logger.error("Alert proposal error: %s", e)
 
