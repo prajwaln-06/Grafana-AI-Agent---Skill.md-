@@ -333,3 +333,47 @@ def test_pending_clarification_abandoned_on_new_command():
 
 
 
+def test_awaiting_metric_for_alert_resolution():
+    """Verify that picking a metric from pending alert clarification re-runs the alert pipeline."""
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+    from app.api.routes_chat import SESSION_STORE
+
+    client = TestClient(app)
+    session_id = "test_alert_clarification_session"
+    session = SESSION_STORE.get_or_create(session_id)
+    session.pending_action = "awaiting_metric_for_alert"
+    session.pending_payload = {
+        "original_request": "Create a GPU alert",
+        "candidates": ["DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_DEV_GPU_TEMP"],
+    }
+    # User clicks/sends the metric name
+    resp = client.post("/api/chat", json={"message": "DCGM_FI_DEV_GPU_UTIL", "sessionId": session_id})
+    assert resp.status_code == 200
+    data = resp.json()
+    # pending_action must be cleared
+    assert session.pending_action is None
+    # The rewritten request should have gone through the alert or query pipeline
+    assert data["intent"] in ("alert_rule", "prometheus", "clarification", "ok")
+
+
+def test_awaiting_metric_for_query_resolution():
+    """Verify that picking a metric from pending PromQL clarification re-runs the query pipeline."""
+    from fastapi.testclient import TestClient
+    from app.api.main import app
+    from app.api.routes_chat import SESSION_STORE
+
+    client = TestClient(app)
+    session_id = "test_query_clarification_session"
+    session = SESSION_STORE.get_or_create(session_id)
+    session.pending_action = "awaiting_metric_for_query"
+    session.pending_payload = {
+        "original_request": "Show me CPU usage",
+        "candidates": ["node_cpu_seconds_total", "node_load1"],
+    }
+    # Numeric choice "1" picks first candidate
+    resp = client.post("/api/chat", json={"message": "1", "sessionId": session_id})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert session.pending_action is None
+    assert data["intent"] in ("prometheus", "clarification", "ok", "general")

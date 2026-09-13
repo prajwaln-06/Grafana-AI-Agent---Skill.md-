@@ -259,6 +259,31 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     candidates=[{"name": m, "purpose": m} for m in new_candidates] if new_candidates else None,
                 ))
 
+    if session.pending_action in ("awaiting_metric_for_alert", "awaiting_metric_for_query") and session.pending_payload:
+        orig_req = session.pending_payload.get("original_request", "")
+        candidates = list(session.pending_payload.get("candidates") or [])
+        chosen_metric = None
+        if is_numeric_choice and candidates:
+            idx = int(re.match(r"^#?(\d+)", text.strip()).group(1)) - 1
+            if 0 <= idx < len(candidates):
+                chosen_metric = candidates[idx]
+        elif candidates:
+            cleaned_text = text.strip().rstrip(" \t\r\n.?!,;:'\"")
+            chosen_metric = next((c for c in candidates if cleaned_text.lower() == c.lower() or c.lower() in cleaned_text.lower()), None)
+        elif re.match(r"^[A-Za-z0-9_:]+$", text.strip()) and not re.search(r"\b(list|show|get|delete|add|create|search|what|how)\b", text, re.I):
+            chosen_metric = text.strip()
+
+        pending_kind = session.pending_action
+        session.pending_action = None
+        session.pending_payload = None
+
+        if chosen_metric:
+            text = f"{orig_req} metric {chosen_metric}"
+            logger.info("Resuming %s with metric %s -> %r", pending_kind, chosen_metric, text)
+            if session.history and session.history[-1].get("role") == "user":
+                session.history[-1]["text"] = text
+            # Fall through — let the normal Section A / C handle the rewritten text
+
     # ------------------------------------------------------------------------
     # 2. Referential Target Resolution ("this dashboard", "it", "the dashboard")
     # ------------------------------------------------------------------------
@@ -298,6 +323,23 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 status = first.get("status", "ok")
                 alert_rule = first.get("alert_rule") or pipeline_res.get("alert_rule")
                 explanation = first.get("explanation") or pipeline_res.get("explanation") or "Alert rule proposal generated."
+
+                if status == "ambiguous_metric":
+                    raw_candidates = first.get("candidates") or []
+                    cand_names = [c["name"] for c in raw_candidates if c.get("name")]
+                    if cand_names:
+                        session.pending_action = "awaiting_metric_for_alert"
+                        session.pending_payload = {"original_request": text, "candidates": cand_names}
+                        clarification_q = first.get("clarification") or explanation or "Which metric do you want to alert on?"
+                        return respond(ChatResponse(
+                            status="clarification",
+                            sessionId=session.session_id,
+                            intent="alert_rule",
+                            agents=["Router", "Generator"],
+                            steps=[ChatStep(step=1, agent="Generator", action="requested clarification", result="ambiguous_metric")],
+                            answer=clarification_q,
+                            candidates=raw_candidates,
+                        ))
 
                 if alert_rule:
                     session.pending_payload = {"alert_rule": alert_rule}
@@ -572,6 +614,23 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
             status = first.get("status", "ok")
             query = " ; ".join(r.get("query") for r in results_list if r.get("query")) or first.get("query")
             explanation = pipeline_res.get("synthesis") or first.get("explanation") or "Query executed successfully."
+
+            if status == "ambiguous_metric":
+                raw_candidates = first.get("candidates") or []
+                cand_names = [c["name"] for c in raw_candidates if c.get("name")]
+                if cand_names:
+                    session.pending_action = "awaiting_metric_for_query"
+                    session.pending_payload = {"original_request": text, "candidates": cand_names}
+                    clarification_q = first.get("clarification") or explanation or "Which metric did you mean?"
+                    return respond(ChatResponse(
+                        status="clarification",
+                        sessionId=session.session_id,
+                        intent="prometheus",
+                        agents=["Router", "Generator"],
+                        steps=[ChatStep(step=1, agent="Generator", action="requested clarification", result="ambiguous_metric")],
+                        answer=clarification_q,
+                        candidates=raw_candidates,
+                    ))
             
             raw_series = []
             for r in results_list:
