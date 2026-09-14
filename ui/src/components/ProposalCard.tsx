@@ -36,6 +36,7 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [dashboardUrl, setDashboardUrl] = useState<string | null>(null);
+  const [dismissed, setDismissed] = useState(false);
 
   const panels: PanelIR[] = ir.panels || [];
   const availableTargets: string[] = ir.availableTargets || [];
@@ -264,7 +265,37 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
     ir?.removeDashboard || (ir?.operation === "remove" && ir?.removeDashboard)
   );
 
+  if (proposal.status === "rejected") {
+    if (dismissed) return null;
+    return (
+      <section
+        className="proposal-card proposal-card-rejected"
+        data-proposal={proposal.proposalId}
+      >
+        <div className="proposal-rejected-bar">
+          <span className="proposal-rejected-icon">✕</span>
+          <span className="proposal-rejected-text">
+            {isDeleteDashboard ? "Deletion request for" : "Suggestion for"}{" "}
+            <strong>{ir.name || "Dashboard"}</strong> rejected
+          </span>
+          <span className="badge" style={{ marginLeft: "auto", fontSize: "11px" }}>
+            {isDeleteDashboard ? "Cancelled" : "Rejected"}
+          </span>
+          <button
+            type="button"
+            className="proposal-rejected-close"
+            onClick={() => setDismissed(true)}
+            title="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   if (isDeleteDashboard) {
+
     return (
       <section
         className="proposal-card proposal-card-delete"
