@@ -24,6 +24,13 @@ set, the same question can also PROPOSE creating a brand-new Grafana alert
 rule — never automatically, always behind a separate explicit confirmation
 call. See §11. Off by default; skip §11 entirely if you're not using it yet.
 
+A second, separate opt-in: if `DEPENDENT_QUERY_RESOLUTION_ENABLED` is set, a
+compound question where a later part needs the concrete entity resolved by
+an earlier part's result (e.g. "which node has the highest CPU utilization,
+and how much memory is available on that node?") is resolved in stages
+instead of one flat pass. See §14. Off by default, and independent of the
+alert-rule flag above — turning one on has no effect on the other.
+
 ---
 
 ## 2. Running it / connecting to it
@@ -122,10 +129,13 @@ for (const entry of entries) {
 > mechanical reason it failed). It behaves identically to `declined` from
 > the frontend's point of view: show the explanation, nothing to retry.
 
-`mode: "multi"` responses additionally carry `synthesis`: either `null`, or
-a short natural-language string tying the multiple results together (e.g.
-"Both nodes are under 40% CPU utilization over the last hour.") — safe to
-show as a one-line summary above the individual charts, when non-null.
+`mode: "multi"` responses additionally carry `synthesis`: either `null`
+(the ordinary case), or, **only when `DEPENDENT_QUERY_RESOLUTION_ENABLED`
+resolved this specific response, §14** — a short, deterministic
+natural-language string tying the multiple results together (e.g. "Node-7
+is at 92.5% CPU utilization. Available memory on node-7 is 2.00 GB.") —
+safe to show as a one-line summary above the individual charts, when
+non-null.
 
 ### 4.2 The `execution` block — the actual data
 
@@ -360,146 +370,293 @@ out a UI affordance ahead of time instead of learning it from a failed query.
 
 ## 8. Catalog and Markdown responsibilities
 
-The generated catalog at `app/catalog/catalog.json` is the authoritative
-structured metric universe and normal routing base for the current 43 supported
-metrics: 16 Node Exporter metrics and 27 DCGM metrics. It owns metric names,
-structured metadata, exporter association, retrieval metadata, and
-status/reconciliation information. Normal integrated deployments use
-`CATALOG_ASSISTED_ROUTING_ENABLED=true`; catalog-assisted routing deterministically
-narrows the relevant Markdown references, with a miss falling back to the full
-routing path.
+**The persistent Catalog (`app/catalog/catalog.json`) is generated from the
+vendor metric document, not from Markdown.** This is the final,
+implemented architecture as of the vendor-source cutover batches (Batch 1,
+Batch 2, the corrective patch, and this finalization batch):
 
-The catalog-related switches are deliberately separate:
+```text
+Vendor metric document
+        |
+        v
+app/catalog/vendor_docx.py (parser) -> VendorMetricRecord
+        |
+        v
+app/catalog/vendor.py::build_catalog_from_vendor_records()
+        |
+        v
+app/catalog/catalog.json  (name / type / help / category / exporter,
+                            all vendor-sourced; reference_path resolved
+                            independently, by metric-name join against
+                            existing Markdown -- see below)
+```
 
-- `CATALOG_ASSISTED_ROUTING_ENABLED=true` is the normal/default catalog-assisted
-  query-routing configuration.
-- `CATALOG_SHADOW_MODE_ENABLED=true` is a development/validation mechanism only;
-  it is not required for normal operation.
-- `CATALOG_METRIC_STATUS_VALIDATION_ENABLED=true` adds catalog metric-status
-  validation independently of routing.
-- `ALERT_RULE_CREATION_ENABLED=true` enables optional alert-rule functionality
-  only when that workflow is being demonstrated or used. It is separate from
-  catalog routing; a deployment demonstrating both uses both flags set to
-  `true`.
+The production entry point is:
 
-Disabling catalog-assisted routing is useful only for regression or baseline
-testing, not as the normal integrated configuration.
-The catalog does not replace the Router, Generator, Validator, `SKILL.md`, or
-ADK session state.
+```bash
+python -m scripts.generate_production_catalog <vendor_docx_path> [skills_root] [output_path]
+```
+
+`app/catalog/generator.py`'s own `generate_catalog()`/`main()` (Markdown-based)
+is **not** the production path anymore -- it predates the cutover, and is kept
+only for migration/testing/comparison (e.g. diffing a Markdown-derived
+candidate against the real, vendor-derived committed catalog; see
+`tests/test_vendor_catalog.py`). Its CLI's default output path was deliberately
+changed to a non-production filename so running it can never silently
+overwrite the real `catalog.json`.
+
+**A new vendor metric does NOT require a Markdown file to enter the
+persistent Catalog.** `reference_path` is optional (`None` when no matching
+Markdown exists) and every part of the runtime that reads it --
+`SkillIndex.metric_directory()`, `app/pipeline.py`'s Level 1 candidate
+narrowing, the deterministic validator's known-metric check -- treats a
+vendor-only, `reference_path=None` metric as a normal, fully-supported case,
+not a degraded one. `skills/scripts/check_metric_directory.py`'s catalog
+consistency check does not flag it either.
+
+### Vendor authority vs. Markdown authority (Option C)
+
+```text
+CatalogEntry.category   = the vendor document's own Category column, verbatim
+Markdown Category bullet = additive retrieval-keyword enrichment only
+```
+
+`CatalogEntry.category`, `.type`, `.help`, `.exporter`, and `.name` are all
+vendor-sourced and never overridden by Markdown, even when a domain file's
+per-metric `Category` bullet is more specific than the vendor's own
+(frequently coarser) categorization -- that divergence is expected, not a
+bug (`tests/test_vendor_catalog.py`'s divergence check documents this).
+What a domain file's `Category` bullet DOES still do:
+`app.catalog.generator.build_markdown_category_index()` feeds it into
+`app.catalog.rules.generate_keywords()`, applied at request time in
+`app/pipeline.py::_get_catalog()`, as additive retrieval vocabulary --
+broadening what a question can match against without ever changing what the
+Catalog reports as the metric's category. This enrichment is optional (a
+metric with no Markdown simply gets none) and never required for Catalog
+generation.
+
+`unit` is the one field the vendor document does not reliably provide --
+every entry in the real, currently-committed catalog has `unit: None`.
+Markdown's per-metric `**Unit:**` bullet remains the sole source of unit
+information anywhere in this system; nothing removes or shortens it.
+
+### Why Markdown still matters at runtime -- Level 1 vs. Level 2/3
+
+`SkillIndex.read_reference()` returns a matched domain file's **entire**
+Markdown text verbatim into the Generator's prompt whenever the Router
+selects that reference. Separately, `app/pipeline.py::_build_metric_metadata()`
+(Batch 1/Phase 2) passes a small, structured `{name, type, help, unit}`
+block straight from the Catalog for metrics that are CONFIDENT catalog
+candidates for the current question ("Level 1"). These are additive, not a
+replacement of one by the other:
+
+- **Level 1** (confident catalog match): the Generator gets both the
+  structured Catalog block AND (if this reference was also Router-matched)
+  the full Markdown text.
+- **Level 2** (Router matched a reference, but the catalog wasn't confident
+  enough to narrow to a specific metric within it) / **Level 3** (a fresh,
+  catalog-unnarrowed routing pass): the Generator's ONLY source of a
+  metric's Purpose/Category/Type/Unit and all of its semantic guidance
+  (`Use When`, confusable-metric distinctions, query construction guidance,
+  guardrails, examples) is the raw Markdown text.
+
+This is why the finalization batch's Markdown-reduction pass (see below)
+did not remove any further per-metric basic-metadata bullets
+(`Category`/`Purpose`/`Type`/`Unit`) beyond what an earlier phase already
+consolidated: `metric_metadata` only ever covers the metrics a specific
+question's catalog search confidently narrows to, never every metric under
+a Router-matched reference, so Level 2/3 remains a live, load-bearing path
+that depends on the Markdown fields staying intact. `Use When`, confusable-
+metric distinctions, query construction guidance, guardrails, and examples
+are not represented anywhere in the Catalog at all, at any level, and were
+never candidates for removal.
 
 The responsibility split is:
 
 | Area | Owns |
 |---|---|
-| Catalog | Metric universe, structured metadata, exporter association, status/reconciliation, retrieval metadata |
+| Vendor metric document | Ground truth for name / Prometheus type / What it Measures / Category, for every supported metric |
+| Catalog (`app/catalog/catalog.json`) | The metric universe itself: name, type, help, category, exporter, status/reconciliation, retrieval metadata (keywords, priority) -- all vendor-sourced or vendor-derived, plus optional Markdown-category keyword enrichment |
 | `skills/SKILL.md` | Shared behavior, routing architecture, common PromQL/query rules, execution/response contract |
-| Metric-specific Markdown | Genuinely metric-specific semantic guidance, including distinctions, special transformations, and guardrails |
-| Exporter `overview.md` files | Exporter/domain guidance, entity scope, navigation, shared/domain guardrails, and applicable cross-domain semantics |
-| Metric Directory | No longer an independently maintained source of truth |
+| Metric-specific Markdown | Human-authored semantic knowledge: `Use When`, distinctions/confusable metrics, query construction guidance, guardrails, examples, unit (the vendor document doesn't reliably provide one) -- the sole channel for all of this, and the sole channel for ANY of a metric's information when Level 2/3 applies |
+| Exporter `overview.md` files | Exporter/domain guidance, entity scope, navigation, shared/domain guardrails, cross-domain semantics -- no Metric Directory table |
 
-The two current exporter overview files intentionally retain domain-level
-guidance and navigation but no longer contain exhaustive metric tables.
-SKILL.md remains responsible for shared behavioral, query, and execution rules,
-while metric-specific Markdown remains responsible for detailed metric
-semantics, transformations, distinctions, and guardrails. Catalog-assisted
-routing narrows the relevant Markdown references; it does not eliminate the
-Markdown layer. Standard metadata still remains in metric-specific Markdown
-because the current Generator consumes the selected Markdown reference. A
-stricter future design in which the Generator obtains all reusable metadata
-directly from the catalog is deferred and is not required for the current
-integration.
+Two configuration switches that used to gate catalog integration ("is it
+turned on for this deployment yet") -- `CATALOG_ASSISTED_ROUTING_ENABLED` and
+`CATALOG_GENERATOR_CANDIDATES_ENABLED` -- were removed once that architecture
+was implemented and validated; there is no longer a way to run the normal
+query pipeline with catalog integration switched off. A related
+validation-only comparison tool, `CATALOG_SHADOW_MODE_ENABLED`, was removed at
+the same time. This finalization batch did not reintroduce any feature flag
+for the vendor-source cutover either -- catalog generation is unconditionally
+vendor-sourced now, with no toggle back to the Markdown-sourced path (that
+path exists only as an explicit, separate CLI invocation for
+comparison/testing, never as a runtime switch).
+
+One catalog-related switch remains, as a genuine independent capability
+rather than a migration switch:
+
+- `CATALOG_METRIC_STATUS_VALIDATION_ENABLED=true` adds catalog metric-status
+  validation (rejecting `discovered_pending_review`/`rejected` metrics)
+  independently of routing/candidate construction, purely additive to the
+  existing known-metric check. Off by default so a deployment whose
+  catalog.json currently has many pending-review entries isn't forced to
+  start blocking them immediately.
+- `ALERT_RULE_CREATION_ENABLED=true` enables optional alert-rule functionality
+  only when that workflow is being demonstrated or used. It is unrelated to
+  catalog routing.
+
+The catalog does not replace the Router, Generator, Validator, `SKILL.md`, or
+ADK session state.
 
 `SkillIndex` retains a compatibility lookup for legacy overview tables where
-they still exist. In the current repository, when an overview has no table,
-that lookup reads metric-to-reference mappings from the catalog. This keeps
-legacy skill packages loadable without creating another metric list.
+they still exist. In the current repository, every overview has no table, so
+that lookup always reads metric-to-reference mappings from the catalog --
+including `reference_path=None` (vendor-only) entries, which it correctly
+surfaces into `known_prometheus_metrics` the same as any Markdown-documented
+metric.
 
 ## 9. Completed catalogization phases and deferred work
 
-Phases 2–16 are complete:
+Phases 2–16 (the original catalog-assisted-routing project) are complete, as
+described in earlier project history. Since then, the vendor-source cutover
+work replaced how the Catalog itself is generated, in four batches:
 
-- Phases 2–3: generated and validated the 43-entry catalog.
-- Phase 4: vendor/runtime reconciliation and pending-review status handling.
-- Phase 5: deterministic keyword, category, and priority generation.
-- Phase 6: deterministic retrieval/ranking.
-- Phase 7: retrieval evaluation harness using the 46-question set.
-- Phase 8: opt-in catalog shadow mode with no behavior change when disabled.
-- Phase 9: safe catalog-assisted routing with full-routing fallback on misses.
-- Phase 10: Router/catalog integration.
-- Phase 11: Generator integration evaluation; no unnecessary redesign.
-- Phase 12: additive catalog metric-status validation.
-- Phase 13: alert-rule metric knownness/status validation fix.
-- Phase 14: full regression verification.
-- Phase 15: conservative Markdown reduction preserving semantic guidance.
-- Phase 16: Metric Directory deprecation as an independent source of truth.
+- **Batch 1**: built `app/catalog/vendor.py` (vendor record -> `CatalogEntry`
+  mapping) and `app/catalog/vendor_docx.py` (vendor DOCX parser), with
+  parser/Catalog/SkillIndex tests, and fixed `SkillIndex.metric_directory()`
+  to be runtime-safe for `reference_path=None`. Production `catalog.json`
+  was left unchanged at this point (candidate-only).
+- **Batch 2**: the production cutover itself --
+  `scripts/generate_production_catalog.py` became the authoritative
+  generation entry point; `app/catalog/catalog.json` was regenerated from
+  the vendor source (verified: 43 metrics, 16 node-exporter + 27
+  dcgm-exporter, the one known malformed vendor row rejected); Option C
+  keyword enrichment (`app.catalog.generator.build_markdown_category_index()`
+  + `app.catalog.rules.generate_keywords()`) was added and wired into
+  `app/pipeline.py::_get_catalog()`; `scripts/evaluate_catalog_retrieval.py`
+  was fixed to evaluate the real committed catalog (with Option C
+  enrichment) instead of a freshly Markdown-regenerated one.
+- **Corrective patch**: fixed a live `ambiguous_metric` contract/prompt
+  inconsistency (SKILL.md §9's `ambiguous_metric`/`unsupported_metric`
+  examples now show `"mode": "single"` like every other status; the
+  contract normalizer additionally repairs a known status value placed
+  directly in `mode` with no separate `status` key); added
+  "memory-bound"/"bandwidth-bound" vocabulary to SKILL.md §4's
+  `dcgm-exporter/memory.md` routing row; corrected two tests that had
+  drifted from the actual post-cutover production Catalog (one used a
+  freshly Markdown-regenerated catalog where it should have used the real
+  committed one; one asserted a 14-metric category divergence that the
+  cutover itself had already closed to zero). A known scheduling-activity
+  Router-vocabulary gap (`"Show me high scheduling activity"`) was
+  identified and deliberately NOT fixed, pending live evaluation.
+- **This finalization batch**: audited every per-metric Markdown field
+  against its actual runtime consumers (see §8's Level 1 vs. Level 2/3
+  explanation) and found no further reduction was safe -- `Category`,
+  `Purpose`, `Type`, and `Unit` all remain load-bearing for Level 2/3, and
+  `Unit` is Markdown's exclusively (the vendor document never provides it).
+  Cleaned up the now-stale assumption that every Catalog metric must have a
+  Markdown `reference_path` (`skills/scripts/check_metric_directory.py`'s
+  `check_catalog_consistency()` used to flag a `reference_path=None`
+  vendor-only metric as an inconsistency; it no longer does). Marked
+  `app/catalog/generator.py`'s Markdown-based `generate_catalog()`/`main()`
+  as explicitly legacy/non-production in their own docstrings, and changed
+  `main()`'s default output path so it can never silently overwrite the
+  real production catalog. Replaced
+  `tests/test_catalog_consistency.py`'s stale
+  `Markdown-generate_catalog() == committed catalog` invariant with the
+  analogous, currently-correct one: regenerating from the real vendor
+  source (via `scripts.generate_production_catalog`) must match the
+  committed catalog. Updated `skills/EXTENDING.md`'s maintainer-facing
+  "how do I add a metric" instructions, which still described adding a row
+  to an `overview.md` Metric Directory table that no longer exists, to
+  describe the actual vendor-document-driven flow. Rewrote this section and
+  §10 of this document.
 
-Phase 17 scale testing with synthetic 100/500/1000-metric universes is
-deferred. It is not required for the currently completed catalog-assisted
-routing implementation. The future stricter Catalog-to-Generator metadata path
-is also deferred and is not required for the current implementation.
+Phase 17 scale testing with synthetic 100/500/1000-metric universes remains
+deferred, as does building out OpenSearch domain coverage (§7).
 
-### Verified Phase 16 baseline
+### Test/validation status as of this finalization batch
 
-The current repository was verified with:
-
-```bash
-ALERT_RULE_CREATION_ENABLED=false python -m pytest -q
-```
-
-Result: **373 passed, 7 warnings**. The warnings are dependency/library
-warnings, not regressions.
+Every environment this project has been developed in so far has lacked
+network access and (for at least this batch's sandbox) usable native builds
+of `pydantic`/`fastapi`/`google-genai`/etc. -- a bundled `.venv` from a prior
+macOS environment has the right package *versions* but Mach-O/darwin-only
+compiled extensions (`pydantic_core`) that do not load on Linux, and a fresh
+Linux-native virtualenv has no network path to actually install the
+dependencies. This was re-verified, not assumed, at the start of this batch.
+**The full automated pytest suite has NOT been re-run in any of the
+vendor-cutover batches** (Batch 1 through this finalization batch) for this
+reason -- do not treat any specific pass/fail count in this document as
+current. What HAS been verified in each of those batches, by direct
+execution of the pure-Python logic outside pytest (no pydantic/fastapi
+required) and by running `skills/scripts/check_metric_directory.py`
+directly, is documented in each batch's own handoff/report; the concrete
+commands below (§13.1) are what to run, in a properly dependency-installed
+environment, to get a real, current number.
 
 ```bash
 python skills/scripts/check_metric_directory.py
 ```
 
-Result:
+was run directly (not mocked, no dependency gap) after every code/Markdown
+change in every one of these batches, and passes as of this document.
 
-```text
-OK: Metric Directory / domain-file consistency and routing links verified.
-```
-
-Despite its historical name, this checker does not establish a Metric Directory
-as authoritative. It validates catalog metric references against their
-metric-specific Markdown definitions, validates legacy overview tables if one
-is present, and verifies `SKILL.md` routing links.
-
-```bash
-python -m scripts.evaluate_catalog_retrieval
-```
-
-Current retrieval baseline: 46 questions; recall@1 **20/46 (43%)**; recall@5
-**33/46 (72%)**; MRR **0.533**; reference visible rate **43/46 (93%)**;
-multi-metric **8/8**; unsafe narrows **3/46**.
+The 46-question retrieval baseline (`python -m scripts.evaluate_catalog_retrieval`)
+has not been re-measured since `scripts/evaluate_catalog_retrieval.py` was
+fixed (Batch 2) to evaluate the real committed catalog with Option C
+enrichment applied, instead of a freshly Markdown-regenerated one without
+it — the previously-recorded numbers were measured against the old,
+pre-fix methodology and are not reproduced here so they aren't mistaken for
+current. Run the command above, in a dependency-installed environment, to
+get a real current baseline; do not rely on a number from before this
+finalization batch.
 
 ## 10. How "dynamic" this actually is — adding new coverage later
 
 This was a specific design requirement, so it's worth being precise about
-what "automatic" actually covers.
+what "automatic" actually covers, post-vendor-cutover.
 
 **Fully automatic, zero code change, ever:**
-- A new **metric-specific definition** added to an existing domain file (e.g. a
-  new CPU metric in `cpu.md`) — the Markdown is picked up when re-read, but the
-  authoritative catalog must also be regenerated/reconciled before the metric
-  is part of the current catalog universe.
 - A new **label key** appearing on an existing metric in Prometheus (e.g.
   someone adds a `datacenter` label to `node_cpu_seconds_total` tomorrow) —
   `label_discovery.py` queries Prometheus's own metadata live, every
   request. Nothing about label keys is ever hardcoded anywhere in `app/`.
 
+**Requires a Catalog regeneration, but no Markdown and no code change:**
+- A new **vendor metric** — add it to the vendor metric document, then run
+  `python -m scripts.generate_production_catalog <vendor_docx_path>` to
+  regenerate `app/catalog/catalog.json`. The metric is immediately part of
+  the persistent Catalog (name/type/help/category/exporter, `status:
+  "approved"`) with `reference_path=None`, fully usable by Level 1 catalog
+  narrowing, `SkillIndex.metric_directory()`'s catalog fallback, and the
+  deterministic validator's known-metric check. No Markdown file is
+  required for this.
+
+**Additionally requires a Markdown definition, for semantic depth:**
+- Anything beyond bare Catalog membership — `Use When` disambiguation,
+  confusable-metric distinctions, query construction guidance, guardrails,
+  a verified query example, or Option C retrieval-keyword enrichment from a
+  domain-specific `Category` bullet — still requires a
+  `### \`metric_name\`` section in the relevant domain file, per
+  `skills/EXTENDING.md`. This does not change what the Catalog reports as
+  the metric's `category` (see §8's Option C explanation) — only what
+  semantic context is available to the Router/Generator when this
+  reference is matched, and what keyword tokens Option C contributes.
+
 **Automatic after a restart, or `POST /api/v1/admin/reload-skill`
 (no restart needed):**
 - A new **domain file** (e.g. `disk-io.md`) with its own metric definitions,
-  once the catalog is regenerated/reconciled and the file has a routing-table
-  row in `SKILL.md` §4. A Metric Directory row in `overview.md` is no longer
-  required.
+  once it has a routing-table row in `SKILL.md` §4. No Metric Directory row
+  anywhere is required — `overview.md` files no longer maintain one.
 - A brand-new **exporter** or **datasource**, same mechanism.
 
 Follow `skills/EXTENDING.md` exactly for the authoring steps (it's
 maintainer-facing, thorough, and already covers "Adding a Metric," "Adding
 a New Domain File," "Adding a New Exporter," and "Adding a New Datasource"
-each as a numbered checklist) — that document, not this one, is the source
-of truth for how to author new skill content correctly.
+each as a numbered checklist, updated in this finalization batch to
+describe the vendor-document-driven flow) — that document, not this one, is
+the source of truth for how to author new skill content correctly.
 
 ---
 
@@ -643,6 +800,18 @@ pip install -r requirements-dev.txt
 ALERT_RULE_CREATION_ENABLED=false python -m pytest -q
 ```
 
+> **Environment status as of this finalization batch (see §9's "Test/
+> validation status" for the full explanation):** this exact command has
+> NOT been re-run since before the vendor-source cutover batches began —
+> every sandbox this project has been developed in since then has been
+> missing either network access or a Linux-compatible build of
+> `pydantic`/`fastapi`/etc. This is a real gap, not a formality: run this
+> command yourself, in an environment with the real dependencies
+> installed, before trusting that the suite is green. Everything that
+> COULD be checked without pytest in each batch (direct execution of the
+> pure-Python logic, `skills/scripts/check_metric_directory.py`) was
+> checked and is documented in that batch's own report.
+
 Every single test mocks the LLM and the backends — this checks the
 backend's own logic (routing decisions, query construction rules, the
 deterministic validator, response normalization, error handling, the whole
@@ -727,6 +896,18 @@ OpenSearch connection has been. Run these, in order, on your own machine:
    Also test `"confirm": false` and confirm nothing gets created. Also re-confirm
    "silence this alert" still comes back `out_of_scope_action` — this flag
    must never change that.
+7. **Pending live re-test from the corrective patch (not yet run against a
+   real Gemini/Prometheus connection as of this document):**
+   - `"How can I tell if the system is overloaded?"` — should come back
+     `ambiguous_metric` (load average vs. CPU utilization), not
+     `validation_failed`.
+   - `"How can I tell if the workload is memory-bound?"` — should route to
+     `dcgm-exporter/memory.md` and resolve, not `unmapped`/misrouted.
+   - `"Show me high scheduling activity."` — regression check ONLY; this is
+     a known, deliberately-unfixed Router-vocabulary gap (Catalog correctly
+     narrows to `node_context_switches_total`/`cpu.md`, but the Router may
+     still not pick the reference). Confirm it behaves the same as before
+     the corrective patch — no new failure mode, but no fix expected either.
 
 ### 13.3 What "ready to hand to the frontend team" looks like
 
@@ -752,39 +933,149 @@ rough edges to surface on first real use.
 
 ---
 
-## 14. File manifest (what's in this folder and why)
+## 14. Dependent Query Resolution (opt-in) — read this before turning it on
+
+Off by default (`DEPENDENT_QUERY_RESOLUTION_ENABLED=false`, `app/config.py`).
+Independent of `ALERT_RULE_CREATION_ENABLED` (§11) — either can be on, off,
+or both, with no interaction between them (dependency resolution never
+considers an alert-rule-creation request at all, regardless of this flag).
+
+### 14.1 What it's for
+
+A compound question where a later part needs the concrete entity resolved
+by an earlier part's own result, within the SAME question — e.g. "which
+node has the highest CPU utilization, and how much memory is available on
+**that node**?" With the flag off, this backend still answers a compound
+question like that (§4, `mode: "multi"`), but each part is constructed
+independently — the second part has no way to know which specific node the
+first part's answer turned out to be about, so it would either need its own
+concrete entity from the question itself or come back ambiguous/best-effort
+over every instance. With the flag on, a genuine case like this is resolved
+in stages instead: the "which node" part runs first, and its real,
+already-executed answer (the winning node) is fed into the second part
+before its query is even built.
+
+This is unrelated to the existing follow-up/clarification flow (§6) — that
+resolves a reference back to a PRIOR turn's question/result; this resolves
+a reference within the SAME turn's own compound question.
+
+### 14.2 What changes for the frontend: nothing structural
+
+The output contract (§4) is unchanged. A dependency-resolved response is a
+completely ordinary `mode: "multi"` response — same per-entry `status`
+shapes (§4.1), same `execution` block shape (§4.2). The only visible
+difference is that `synthesis` (§4) may now be a real string instead of
+always `null`, for this one kind of response specifically. There is no new
+field to branch on, no new status to handle, and no change to how a
+clarification (`ambiguous_metric`/`parameter_requires_clarification`) is
+handled if one comes back instead — it behaves exactly like §6 already
+describes; if a root part of the compound question needs a human answer,
+this feature detects that and re-resolves the whole question through the
+ordinary flat path instead of executing anything early, so `session_id`
+still means exactly what §4/§6 already say it means.
+
+### 14.3 What's actually different, mechanically (for you, not the frontend)
+
+With the flag on, the Router may tag each matched reference with an
+`intent_id`/`depends_on` pair (SKILL.md §13.2) when the question's own
+wording makes one part genuinely conditional on another. This is validated
+deterministically (unique ids, no self-reference, no cycle) before it's
+ever trusted — anything short of a clean, genuine dependency (including,
+overwhelmingly, most requests: no dependency declared at all) is treated
+exactly like this flag were off. When a genuine dependency IS found:
+
+1. Every "root" part (no `depends_on`) is resolved and validated in one
+   Generator call, then **executed immediately, inside the backend** —
+   this is the one real behavior change worth knowing about operationally:
+   with this flag on, some responses do a Prometheus/OpenSearch round-trip
+   during pipeline resolution itself, before the usual post-pipeline
+   execution step, rather than only ever once, always after.
+2. Each dependent part is resolved with its own single Generator call,
+   told the resolved entity value from its already-executed parent, and
+   MUST retain that value as an explicit filter (SKILL.md §13.4) — a
+   generated query that doesn't is never sent to Prometheus/OpenSearch at
+   all; it comes back as an ordinary `endpoint_error` (§4.2) instead.
+3. If a dependent's own generation can't be validated, or its parent never
+   produced usable data, that ONE part of the response becomes an ordinary
+   `unsupported_metric` entry (§4.1) explaining why — this never fails the
+   whole response.
+4. The combined, already-executed response is what the pipeline itself
+   returns; the backend's own post-pipeline execution step is skipped for
+   this one response (an internal marker the frontend never sees is what
+   tells it to skip that step) so nothing is queried against
+   Prometheus/OpenSearch twice.
+
+### 14.4 Testing this
+
+`tests/test_pipeline.py`'s "Dependency-aware compound query resolution"
+section (search that heading) covers: the dependency-graph validation
+rules on their own (missing/duplicate `intent_id`, self-dependency, an
+unknown `depends_on` id, a cycle), that the flag being off ignores any
+dependency tagging entirely, a full happy-path staged resolution, the
+"generated query dropped the resolved filter" safety check, a parent that
+fails to execute, and the "a root needs clarification → abandon staging"
+fallback. There is no separate live-testing tool for this feature the way
+§11.1/§13.2 has one for alert-rule creation — the regression-cases file
+(`evals/regression-cases.md`, §13.1) is the right place to add a few real
+compound questions once you have live Prometheus data with more than one
+node/GPU to actually exercise a genuine dependency against.
+
+---
+
+## 15. File manifest (what's in this folder and why)
 
 ```
 app/            All backend logic. See README.md's "Project layout" for the
-                per-file breakdown.
+                per-file breakdown. Includes app/catalog/vendor.py and
+                app/catalog/vendor_docx.py (the production Catalog-
+                generation parser/mapper -- see §8).
 skills/         The skill package (SKILL.md + references/). This is DATA,
                 not code -- read fresh from disk every request, and where all
                 domain knowledge (metrics, exporters, routing) lives. This
                 is what you keep editing for OpenSearch coverage; app/ does
-                not need to change for that.
+                not need to change for that. Adding a METRIC, though, now
+                starts with the vendor document, not here -- see §8/§10 and
+                EXTENDING.md.
   SKILL.md                    The routing table + all behavioral rules,
                                 including alert-rule-creation (§12 in
                                 SKILL.md itself -- yes, same number as this
                                 document's own §11 on the same topic; they're
-                                independently numbered documents).
+                                independently numbered documents) and
+                                dependent query resolution (§13 in SKILL.md
+                                itself -- this document's own §14).
   EXTENDING.md                 How to author new skill content correctly --
                                 read this, not this handoff doc, when adding
-                                OpenSearch domains or a new metric's Alert
+                                OpenSearch domains, a new metric's Markdown
+                                (name/type/category itself comes from the
+                                vendor document, not here), or an alert
                                 query/threshold field.
   references/                  Per-exporter/per-domain/per-backend content.
   assets/templates/            Copy these when authoring new reference files.
   evals/regression-cases.md    Hand-authored test questions -- your primary
                                 live-testing tool (§11.2).
   scripts/check_metric_directory.py  Validates catalog-to-domain metric
-                                references and SKILL.md routing links. Legacy
-                                overview-table drift is checked only when a
-                                legacy table is present.
-tests/          Automated tests (§13.1). Mirrors app/'s module structure.
-                Includes test_grafana_client.py and test_alerts_api.py for
-                the alert-rule-creation feature (§11).
+                                references (a catalog metric with
+                                reference_path=None -- vendor-only, no
+                                Markdown -- is valid and not flagged) and
+                                SKILL.md routing links. Legacy overview-table
+                                drift is checked only when a legacy table is
+                                present.
 scripts/        smoke_test_gemini.py, smoke_test_prometheus.py,
                 smoke_test_grafana.py (§11.1, §13.2) -- the last one only
                 relevant if ALERT_RULE_CREATION_ENABLED is set.
+                generate_production_catalog.py -- the production Catalog-
+                generation entry point (§8); run this after editing the
+                vendor metric document.
+                evaluate_catalog_retrieval.py -- the 46-question retrieval
+                evaluation harness; evaluates the real, committed catalog.json
+                (vendor-sourced, with Option C keyword enrichment applied)
+                rather than a freshly regenerated one, so its numbers reflect
+                actual production behavior.
+tests/          Automated tests (§13.1). Mirrors app/'s module structure.
+                Includes test_grafana_client.py and test_alerts_api.py for
+                the alert-rule-creation feature (§11), and
+                test_vendor_catalog.py / test_generate_production_catalog.py
+                for the vendor-source Catalog-generation path (§8).
 .env.example    Every setting, documented inline, including the GRAFANA_*
                 block (§11.1). Copy to .env and fill in. Did not exist before
                 this version -- created fresh alongside the alert-rule-

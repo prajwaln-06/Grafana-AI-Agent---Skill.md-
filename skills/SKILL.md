@@ -2,7 +2,7 @@
 name: observability-query-builder
 description: Constructs read-only PromQL and OpenSearch queries from natural-language questions about host and GPU observability metrics (Node Exporter: CPU, context switches, interrupts, memory, cache, buffers, swap, system load, filesystem capacity; DCGM Exporter: GPU utilization, compute-pipeline and Tensor Core activity, temperature, power, clocks). Use when the user asks to check, monitor, compare, or investigate a system or GPU metric, or explicitly asks for a Prometheus, PromQL, or OpenSearch query. Never silences, acknowledges, deletes, or modifies an existing alert, restarts a service, or performs any other mutating action under any framing; only builds and validates read-only queries -- with one narrow, explicit exception (§12): it may PROPOSE creation of a brand-new Grafana alert rule for any metric it can already build an ordinary read query for, which this skill never creates automatically and which always requires a separate, explicit user confirmation step outside this skill's own construction procedure before anything is written to Grafana.
 metadata:
-  version: "1.3"
+  version: "1.4"
 ---
 
 # Observability Query Builder
@@ -30,17 +30,15 @@ It does **not**:
   loaded reference file or, for label keys specifically, supplied by the
   runtime (Principle 9, §5).
 
-`metadata.version` above reflects this skill's current version, `1.3`.
+`metadata.version` above reflects this skill's current version, `1.4`.
 Versioning was restarted with the migration to the Agent Skills standard: the
 pre-migration ad-hoc skill's version history (`2.x`–`3.x`) belonged to a
 different, non-conformant architecture and is preserved for provenance in
-`EXTENDING.md`'s Version History rather than continued here. `1.3` adds the
-`query_type` output field so a question asking for a single current value
-resolves to a true instant read instead of always being forced through a
-range/matrix query, and makes alert-rule condition-query construction (§12.4)
-reuse the exact same Step 5 procedure as an ordinary read query instead of
-requiring a separate, per-metric hand-verified "alert query" — see §11 for
-the current changelog entry.
+`EXTENDING.md`'s Version History rather than continued here. `1.4` adds
+optional `intent_id`/`depends_on` matched-reference tagging and the
+`synthesis` field's dependency-aware use (§13) -- both **opt-in** and inert
+unless the deployment has separately enabled `dependent_query_resolution_
+enabled` (app/config.py) -- see §11 for the current changelog entry.
 
 ## 2. Skill structure / mental model
 
@@ -131,7 +129,7 @@ remove, or change which reference that metric's requests route to.
 | DCGM Exporter's overall scope, entity model, or what it does *not* cover | prometheus | [references/dcgm-exporter/overview.md](references/dcgm-exporter/overview.md) |
 | Overall GPU utilization, graphics/SM engine activity, Tensor Core or FP64/FP32/FP16 pipeline activity | prometheus | [references/dcgm-exporter/compute.md](references/dcgm-exporter/compute.md) |
 | GPU or GPU-memory temperature, power draw or power throttling, SM/core or memory clock | prometheus | [references/dcgm-exporter/thermal.md](references/dcgm-exporter/thermal.md) |
-| GPU memory (VRAM) capacity used/free, memory controller utilization, or DRAM bandwidth utilization | prometheus | [references/dcgm-exporter/memory.md](references/dcgm-exporter/memory.md) |
+| GPU memory (VRAM) capacity used/free, memory controller utilization, DRAM bandwidth utilization, or whether a workload is memory-bound/bandwidth-bound | prometheus | [references/dcgm-exporter/memory.md](references/dcgm-exporter/memory.md) |
 | PCIe or NVLink transmit/receive traffic throughput | prometheus | [references/dcgm-exporter/interconnect.md](references/dcgm-exporter/interconnect.md) |
 | GPU ECC errors, retired or pending-retirement memory pages, or NVLink error/recovery health signals | prometheus | [references/dcgm-exporter/reliability.md](references/dcgm-exporter/reliability.md) |
 | PromQL syntax: selectors, Counter/Gauge/Histogram handling, functions, aggregation, time modifiers | prometheus | [references/prometheus-fundamentals.md](references/prometheus-fundamentals.md) |
@@ -151,9 +149,10 @@ If more than one row plausibly matches, open all of them and resolve per §6 Ste
 1. **Never fabricate** a metric name, index name, derived-measurement
    relationship, field, or — for an alert-rule-creation request (§12) — an
    alert condition query or threshold, not explicitly documented in an
-   opened reference file. **Label keys are a separate case with a separate
-   source of truth — see Principle 9: they must never be invented or assumed
-   from a reference file, only confirmed from runtime-supplied metadata.**
+   opened reference file. **Label keys and label values are a separate case
+   with a separate source of truth — see Principle 9: neither may be
+   invented or assumed from a reference file, only confirmed from
+   runtime-supplied metadata.**
 2. **Never resolve metric-level ambiguity by guessing**, defaulting to one
    candidate, or answering with all candidates at once. Ambiguity at the level of
    *which measurement* is being asked for is always surfaced to the user.
@@ -182,10 +181,11 @@ If more than one row plausibly matches, open all of them and resolve per §6 Ste
    explicit statement that the metric's query/result semantics themselves are
    unverified — as with a metric whose exposed unit is unverified — that blocks
    construction and requires classifying the result as `unsupported_metric`.
-9. **Label keys are sourced dynamically, never from this skill's reference
-   files.** The exact label keys available for a selected metric are supplied
-   by the runtime/backend at query-generation time. Reference files
-   intentionally do not enumerate label keys, because those are live schema
+9. **Label keys AND label values are sourced dynamically, never from this
+   skill's reference files.** The exact label keys available for a selected
+   metric, and the values those keys currently take, are supplied by the
+   runtime/backend at query-generation time. Reference files intentionally do
+   not enumerate label keys or values, because those are live schema
    information that may vary by environment — a reference file may document
    that a metric varies by a semantic dimension (e.g. "this metric varies by
    CPU and mode/state"), but never present a specific label-key catalog as
@@ -199,13 +199,28 @@ If more than one row plausibly matches, open all of them and resolve per §6 Ste
    - preserve an explicit user scope constraint using a runtime-confirmed
      label key when the runtime metadata establishes the corresponding
      semantic scope;
-   - do not independently require verification that a user-supplied label
-     *value* exists in the current datasource — that is a separate concern
-     from confirming the label *key* itself;
-   - if the user explicitly provides a scope constraint that cannot be mapped
-     to a runtime-confirmed label key, do not guess a label key and do not
-     silently discard the constraint — use `declined` /
-     `parameter_requires_clarification` (§7.2, §8);
+   - **a user-supplied scope constraint's *value* must also be matched to a
+     runtime-confirmed value for the chosen label key — confirming the key
+     alone is not sufficient.** A value that merely looks plausible (a
+     substring, a prefix, a differently-formatted variant of a real value)
+     is not the same as a confirmed value, and must not be used as if it
+     were one — for example, if the user says "node-01" and the only
+     runtime-confirmed values for a candidate key are host:port pairs like
+     `"node-01:9200"`, `"node-01"` alone is *not* a confirmed value for that
+     key, even though it looks like an obvious prefix of one;
+   - **when more than one runtime-confirmed label key could plausibly
+     express the same real-world scope** (for example, a bare identifier
+     key alongside a differently-formatted one for the same underlying
+     entity, such as `node_id` vs. `instance` for the same host), **prefer
+     whichever key's confirmed values contain an exact literal match to the
+     user's phrase** over a key that would require guessing a
+     transformation of the user's text (stripping or adding a port, a
+     prefix, or any other reformatting) to make it fit;
+   - if the user's phrase does not exactly match any runtime-confirmed value
+     for any candidate label key, do not guess the closest-looking value and
+     do not silently drop the constraint — use `declined` /
+     `parameter_requires_clarification` (§7.2, §8), the same as when no
+     runtime-confirmed label key can express the constraint at all;
    - a runtime label list is not required for every query — only when label
      information is needed to express the request, in particular to preserve
      an explicit user scope constraint. An unfiltered metric request that
@@ -298,10 +313,12 @@ determine `query_type` (§8 "Instant vs. range") from the question's phrasing
 and any explicit time constraint, then check the reference's Metric-Specific
 Query/Result Semantics for that metric, then build using, in combination: (1)
 the exporter/domain reference's semantic knowledge (what the metric means,
-its documented dimensions, confusable neighbors), (2) label keys supplied by
-the runtime for the selected metric (Principle 9 — never a reference file's
-static content), (3) the metric's documented query/result semantics, and (4)
-the appropriate datasource-fundamentals reference (§4) — except as follows:
+its documented dimensions, confusable neighbors), (2) label keys AND label
+values supplied by the runtime for the selected metric (Principle 9 — never
+a reference file's static content, and never a plausible-looking value the
+runtime didn't actually confirm), (3) the metric's documented query/result
+semantics, and (4) the appropriate datasource-fundamentals reference (§4) —
+except as follows:
 
 - **Query/result semantics themselves stated as unverified** (e.g. an
   unverified exposed unit): STOP query construction for that measurement and
@@ -319,7 +336,9 @@ the appropriate datasource-fundamentals reference (§4) — except as follows:
 result objects produced across every reference consulted in Step 3.
 - Exactly one total → `{"mode": "single", ...that object's fields, inline...}`
 - More than one total → `{"mode": "multi", "results": [...], "synthesis": null}`
-  (§9.2)
+  (§9.2). `synthesis` stays `null` here -- it is populated only by the
+  separate, opt-in dependency-aware resolution path (§13), never by this
+  construction procedure itself.
 
 **Step 7 — Sanity pass.** For every result with status `ok` or
 `panic_mode_best_effort` only: confirm the query is non-empty and its shape
@@ -489,6 +508,7 @@ those.
 
 ```json
 {
+  "mode": "single",
   "status": "ambiguous_metric",
   "reference_used": "<reference file path>",
   "candidates": [
@@ -503,6 +523,7 @@ those.
 
 ```json
 {
+  "mode": "single",
   "status": "unsupported_metric",
   "reference_used": "<reference file path>",
   "requested_measurement": "<restated interpretation of what was asked>",
@@ -616,7 +637,20 @@ the new content requires a new default in §8 or a new status in §9.
 
 **Changelog**
 
-* **1.3 (current)** — Two fixes:
+* **1.4 (current)** — Added an opt-in, app-config-gated path (§13,
+  `app/config.py`'s `dependent_query_resolution_enabled`, default off) for a
+  compound question where a later measurement needs the concrete entity
+  RESOLVED BY an earlier measurement's already-executed result — e.g. "which
+  node has the highest CPU utilization, and how much memory is available on
+  that node?" Added optional `intent_id`/`depends_on` fields the Router may
+  attach to `matched_references` entries (§4's routing table itself is
+  unchanged — this only annotates which reference(s) already matched), and
+  documented the `synthesis` field's one real (non-null) use, populated
+  deterministically (no second LLM call) only by this path. This is
+  additive and inert for any deployment that hasn't turned the flag on:
+  every existing construction step, output shape, and status in this
+  document behaves exactly as it did in `1.3`.
+* **1.3** — Two fixes:
   1. Added the `query_type` output field (§8's "Instant vs. range", §9's `ok`
      schema, Step 5). Previously every `ok`/`panic_mode_best_effort` result
      was built as a range/matrix query regardless of whether the question
@@ -814,3 +848,108 @@ out-of-band, explicit user confirmation, and only creates anything in
 Grafana once that confirmation is received — this skill never learns whether
 the rule was actually created, confirmed, or discarded, and does not need
 to.
+
+## 13. Dependent Query Resolution (opt-in)
+
+This section defines an **opt-in, application-level** exception to §6 Step
+6's normal "one flat construction pass" flow — like §12, it is gated behind
+its own deployment config flag (`app/config.py`'s
+`dependent_query_resolution_enabled`, default off) and changes nothing about
+how this skill behaves for a deployment that hasn't turned it on.
+
+### 13.1 What this covers
+
+A compound question can ask for a second measurement that only makes sense
+**after** an earlier part of the SAME question has actually run — the later
+part names no concrete entity of its own; it refers back to whichever entity
+the earlier part's result turns out to be about. For example: "which node
+has the highest CPU utilization, and how much memory is available on **that
+node**?" The memory half cannot be constructed until the CPU half's query
+has actually executed and returned a winner.
+
+This is narrower than an ordinary compound question (§6 Step 1, multiple
+measurements matched independently) and narrower than a follow-up question
+(§6 Step 2, resolved against `previous_question`/`previous_result` from a
+PRIOR turn). Dependent query resolution is for two (or more) measurements
+**within the same question**, where one's concrete entity comes from
+another's result.
+
+Two independent measurements that merely share a topic, or that each
+already name their own concrete entity ("CPU and memory usage on node-1"),
+are **not** a dependency — both already have everything they need from the
+question itself, and are handled by the ordinary §6 procedure exactly as
+before, even with this feature enabled.
+
+### 13.2 How a dependency is recognized: `intent_id` / `depends_on`
+
+When this feature is enabled, every object this skill's routing phase
+matches may carry two additional fields, alongside `reference_path` and
+`data_source`:
+
+- `intent_id` — a short id for this one distinct measurement/intent within
+  the question (e.g. `"q1"`, `"q2"`).
+- `depends_on` — a list of the `intent_id`(s) of any EARLIER intent in this
+  same question whose concrete, resolved result this one needs. Empty (or
+  omitted) for a measurement that already stands on its own.
+
+Only set `depends_on` when the question's own wording makes one part
+genuinely conditional on another part's concrete result — a pronoun or
+definite reference ("that node", "it", "the same GPU") pointing back at an
+entity resolved by an earlier part. Never invent a dependency two
+measurements don't actually have merely because they're topically related.
+
+This tagging is validated deterministically before it is ever trusted:
+every entry must carry a usable, unique `intent_id`; every `depends_on`
+entry must name a real, different `intent_id`; and the resulting graph must
+be acyclic. Anything short of that — including simply no dependency
+declared at all, by far the most common case — is treated exactly like an
+ordinary, non-dependent set of matched references, with no different
+behavior visible anywhere in this skill's own construction procedure.
+
+### 13.3 Root construction: prefer an instant top/bottom-N query
+
+If the measurement being built is the ROOT of a dependency (an earlier part
+whose result a LATER part needs a concrete entity from) and the question
+asks for a highest/lowest/top/bottom entity, build it as an **instant**
+top/bottom-N query (`topk(1, ...)` / `bottomk(1, ...)`, `query_type:
+"instant"` — §8) rather than a range query. A range-query top/bottom-N can
+return the union of different winners across the window, which is unsafe to
+hand to a dependent measurement expecting exactly one resolved entity.
+
+### 13.4 Dependent construction: the resolved value MUST be retained
+
+If a dependent measurement is told which entity value was already resolved
+from an earlier, already-executed part of the same question (e.g.
+`node_id="node-7"`), the query built for it MUST include an explicit
+equality filter on that exact value — never omitted, and never constructed
+as an unfiltered query across every instance the metric reports for. This
+is checked mechanically, not only by instruction: a generated dependent
+query that does not retain the resolved filter is never executed against
+the live backend.
+
+If the upstream result could not be resolved at all, and the measurement
+cannot be meaningfully answered without it, this is a normal
+`unsupported_metric` case (§9) — explain that the required upstream value
+was unavailable, rather than guessing or returning an unfiltered query.
+
+### 13.5 `synthesis`: the one case it is ever non-null
+
+§6 Step 6 and §9.2 define `synthesis` as always `null` for an ordinary
+`mode: "multi"` response — that remains true. The ONLY exception is this
+feature's own response: once every intent (root and dependent) has resolved
+and executed, a short, deterministic (no second LLM call — plain formatting
+of the already-executed results' own data) one-line summary MAY populate
+`synthesis` instead of leaving it `null`. This is assembled entirely outside
+this skill's own per-question construction procedure; nothing in §5–§8
+changes to accommodate it.
+
+### 13.6 Scope
+
+This feature does not apply to alert-rule creation (§12) — an alert rule's
+condition query is never built from another intent's runtime data, and a
+`propose_alert_rule` request is never considered for dependency resolution
+regardless of what this deployment's flag is set to. It also does not
+re-route: if a dependent measurement's own construction attempt fails, this
+skill's routing table (§4) is not re-consulted for it mid-chain the way §5's
+Level-3 fallback might for an ordinary request — it resolves to
+`unsupported_metric` instead, per §13.4.

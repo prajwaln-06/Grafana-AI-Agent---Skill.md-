@@ -48,7 +48,7 @@ discovery path to a required reference.
 |---|---|---|
 | Behavior (all exporters, all backends) | `SKILL.md` | Construction procedure, output contract, error handling, parameter defaults, routing table |
 | Backend query mechanics | `references/<backend>-fundamentals.md` | Data model, query shape, functions/clauses, gotchas — never metric meaning |
-| Exporter-wide facts | `references/<exporter>/overview.md` | Entity model, Metric Directory, Do-Not-Use boundaries, cross-domain distinctions |
+| Exporter-wide facts | `references/<exporter>/overview.md` | Entity model, Do-Not-Use boundaries, cross-domain distinctions (no Metric Directory table — the Catalog is the metric-universe source of truth; see `app/skill_index.py`'s catalog-backed `metric_directory()`) |
 | Domain-specific facts | `references/<exporter>/<domain>.md` | Per-metric definitions, confusable-metric writeups within that domain |
 | Downstream execution shape | `references/execution-contract.md` | The post-validation `execution` block — not query construction |
 
@@ -97,15 +97,31 @@ When authoring or editing a reference file:
 
 ## Adding a Metric to an Existing Domain File
 
-1. Add a row to the parent exporter's `overview.md` Metric Directory (Domain /
-   Intent / Metric name / this domain file).
-2. Add a `### \`metric_name\`` section to the domain file following
-   `assets/templates/domain-reference-template.md`'s per-metric shape exactly —
-   every field, including `Additional Known Labels` (document any semantic
+1. Add a row to the vendor metric document (name / Prometheus type / What it
+   Measures / Category) and regenerate the production Catalog:
+   `python -m scripts.generate_production_catalog <vendor_docx> [skills_root]`
+   — this is what actually registers the metric in `app/catalog/catalog.json`
+   (name/type/help/category/exporter). A metric does not need a Markdown
+   domain-file entry to exist in the Catalog; skip straight to step 4 if this
+   metric needs no semantic write-up beyond what the Catalog already carries.
+   Exporter `overview.md` files no longer maintain a Metric Directory table —
+   `SkillIndex.metric_directory()` reads the Catalog directly (see
+   `app/skill_index.py`); do not add one.
+2. If this metric needs semantic guidance a bare Catalog entry can't carry —
+   `Use When` disambiguation, confusable-metric distinctions, query
+   construction guidance, or a verified query example — add a
+   `### \`metric_name\`` section to the domain file following
+   `assets/templates/domain-reference-template.md`'s per-metric shape (every
+   field, including `Additional Known Labels` — document any semantic
    dimension only, never a static label-key list — see Dynamic Label Sourcing
-   above; never leave this field blank) and `Query Examples` (state explicitly
-   whether an example is verified, or state "No verified query example is
-   currently available. Do not invent a literal query example.").
+   above; never leave this field blank — and `Query Examples` — state
+   explicitly whether an example is verified, or state "No verified query
+   example is currently available. Do not invent a literal query example.").
+   Adding this Markdown does not, by itself, change the Catalog's `category`
+   field (the vendor document is authoritative for that — see "Vendor
+   Category vs. Markdown Category" below); it only makes reference_path
+   resolve for this metric and adds optional retrieval-keyword enrichment
+   from the `Category` bullet.
 3. If this metric is confusable with an existing metric in the domain, add it to
    (or create) that domain file's Confusable Measurements section — don't create
    a second, differently-worded explanation of the same distinction.
@@ -114,6 +130,20 @@ When authoring or editing a reference file:
    block on query construction entirely) put it in that metric's own
    Metric-Specific Query/Result Semantics field, never as a change to `SKILL.md`.
 5. Run `scripts/check_metric_directory.py` (see Validation below).
+
+### Vendor Category vs. Markdown Category
+
+`CatalogEntry.category` always comes from the vendor document's own Category
+column, verbatim — never from a domain file's per-metric `Category` bullet,
+even when the two differ (the vendor document's own categorization is
+frequently coarser than a domain file's more specific curation, and that is
+expected, not a bug). A domain file's `Category` bullet is not wasted when it
+differs: `app.catalog.generator.build_markdown_category_index()` feeds it into
+`app.catalog.rules.generate_keywords()` at request time as additive retrieval
+vocabulary (Option C) — it broadens what a question can match against, it
+never overrides what the Catalog reports as this metric's category. Do not
+edit a domain file's `Category` bullet to try to change `CatalogEntry.category`
+— edit the vendor document and regenerate instead.
 
 ## Adding a New Domain File
 
@@ -127,7 +157,10 @@ When authoring or editing a reference file:
    reverse-engineer the reasoning. Fill it in honestly even when the grouping
    seems obvious; read it before assuming an existing domain boundary is
    arbitrary.
-2. Add its metrics to the parent exporter's `overview.md` Metric Directory.
+2. Add its metrics to the vendor metric document and regenerate the
+   production Catalog (see "Adding a Metric to an Existing Domain File" step
+   1 above) — exporter `overview.md` files no longer maintain a Metric
+   Directory table.
 3. Add one row to `SKILL.md` §4's routing table linking **directly** to the new
    file. Do not rely on the exporter's `overview.md` to make it discoverable —
    an agent must be able to find this file by reading `SKILL.md` alone.
@@ -241,13 +274,18 @@ Directory, a domain file's metric definitions, or `SKILL.md`'s routing table:
 python3 scripts/check_metric_directory.py .
 ```
 
-It verifies two invariants, neither previously checked by anything but careful
+It verifies three invariants, none previously checked by anything but careful
 authoring:
 
-1. Every metric in an exporter's Metric Directory has a matching
-   `### \`metric_name\`` definition in the domain file it points to, and vice
-   versa.
-2. Every reference linked from `SKILL.md` §4 exists on disk, unless that
+1. Every catalog metric that has a `reference_path` has a matching
+   `### \`metric_name\`` definition in the domain file it points to (a
+   `reference_path=None` vendor-only metric is valid and not checked here —
+   see "Vendor Category vs. Markdown Category" above).
+2. Any legacy `overview.md` Metric Directory table still present (current
+   overview files intentionally have none — the Catalog is the
+   metric-universe source of truth) is internally consistent with its
+   domain file.
+3. Every reference linked from `SKILL.md` §4 exists on disk, unless that
    routing-table row is explicitly marked "pending addition."
 
 A clean run prints `OK: ...` and exits `0`. Any inconsistency is listed with the
@@ -288,8 +326,8 @@ prevents the same bug from returning silently.
 | `SKILL.md` §6 (Construction Procedure) | Every reference's Metric-Specific Query/Result Semantics still fits the procedure's assumptions; full regression suite |
 | `SKILL.md` §9 (Output Contract) | Every regression case's `Expected` field shape; `references/execution-contract.md`'s stated relationship to `time_range` |
 | `SKILL.md` §4 (Routing Table) | `scripts/check_metric_directory.py` (link resolution check); no reference file is orphaned or newly unreachable |
-| An exporter's `overview.md` Metric Directory | The corresponding domain file(s); `scripts/check_metric_directory.py` |
-| A domain file's metric definitions | The parent `overview.md` Metric Directory; any regression case referencing that metric |
+| The vendor metric document | Regenerate the Catalog (`python -m scripts.generate_production_catalog`); `scripts/check_metric_directory.py`; any domain file whose per-metric `Category` bullet should be revisited for Option C keyword enrichment |
+| A domain file's metric definitions | Any regression case referencing that metric; `scripts/check_metric_directory.py` |
 | A datasource-fundamentals file | Every exporter/domain file using that `data_source`; the query-construction guidance in `SKILL.md` §6 Step 5 |
 | A template in `assets/templates/` | Not retroactive — existing files aren't required to change, but new files should follow the updated template |
 

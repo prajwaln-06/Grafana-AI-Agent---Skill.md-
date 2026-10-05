@@ -143,15 +143,35 @@ def test_check_metric_directory_script_still_passes():
 # ---- deterministic / idempotent generation ------------------------------
 
 
-def test_regenerating_catalog_from_scratch_matches_committed_artifact():
-    """If catalog.json has been committed, regenerating it fresh (with the
-    same generated_at) must produce byte-identical content -- proof the
-    generator is deterministic and that the committed artifact isn't
-    stale relative to the skill package it was generated from."""
+def test_regenerating_production_catalog_from_vendor_source_matches_committed_artifact():
+    """If catalog.json has been committed, regenerating it fresh from the
+    REAL production source -- the vendor metric document, joined against
+    the skill package's existing Markdown for reference_path resolution
+    -- with the same generated_at must produce byte-identical content:
+    proof the production generator (scripts/generate_production_catalog.py)
+    is deterministic and that the committed artifact isn't stale relative
+    to its actual source.
+
+    Supersedes the old invariant this test used to check (regenerating
+    from Markdown alone via generate_catalog() and comparing to
+    committed): that was correct before Batch 2's vendor-source cutover,
+    when Markdown was the sole source of catalog metadata, but is not a
+    meaningful invariant anymore -- generate_catalog()'s Markdown-derived
+    `help`/`category`/`unit` values now deliberately diverge from the
+    vendor-sourced committed catalog by design (see
+    tests/test_generate_production_catalog.py's own diff coverage, and
+    tests/test_vendor_catalog.py's candidate-vs-committed divergence
+    check, which is the right place to assert THAT specific difference).
+    This test asserts the analogous-but-correct property against the
+    metric universe's actual current source of truth instead.
+    """
     if not CATALOG_PATH.exists():
         return  # nothing to compare yet; covered by the other tests.
+    from scripts.generate_production_catalog import generate_production_catalog
+
     committed = load_catalog(CATALOG_PATH)
-    regenerated = generate_catalog(
-        REAL_SKILLS_ROOT, generated_at=committed.generated_at
+    vendor_doc = Path(__file__).resolve().parent / "fixtures" / "prometheus_metrics.docx"
+    regenerated, _rejected_rows = generate_production_catalog(
+        vendor_doc, REAL_SKILLS_ROOT, generated_at=committed.generated_at
     )
     assert committed.to_dict() == regenerated.to_dict()

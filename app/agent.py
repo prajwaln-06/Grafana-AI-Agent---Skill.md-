@@ -6,7 +6,7 @@ from google.adk.agents.base_agent import BaseAgent
 from google.adk.events.event import Event
 from google.adk.agents.invocation_context import InvocationContext
 
-from app.pipeline import PipelineContext, run_pipeline
+from app.pipeline import ALREADY_EXECUTED_MARKER, PipelineContext, run_pipeline
 from app.config import get_settings
 from app import executor
 from app.skill_index import SkillIndex
@@ -120,6 +120,16 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             )
             return
 
+        # 4b. Dependency-aware compound query resolution (opt-in -- see
+        # app/config.py's `dependent_query_resolution_enabled` and
+        # app/pipeline.py's module docstring) already executed the contract
+        # itself, inside the pipeline, in order to feed each dependent
+        # sub-query its parent's real result before generating it -- pop the
+        # internal marker (it must never reach the frontend) and remember
+        # whether that happened so step 6 below doesn't run the exact same
+        # queries against Prometheus/OpenSearch a second time for nothing.
+        already_executed = bool(contract.pop(ALREADY_EXECUTED_MARKER, False))
+
         # 5. Check if it needs clarification or confirmation
         needs_clar = self._needs_clarification(contract)
         needs_conf = self._needs_confirmation(contract)
@@ -158,8 +168,9 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             )
             return
 
-        # 6. Execute contract
-        executed = executor.execute_contract(contract, settings)
+        # 6. Execute contract (unless the dependency-aware path already did
+        # this for us -- see 4b above).
+        executed = contract if already_executed else executor.execute_contract(contract, settings)
         yield Event(
             invocation_id=ctx.invocation_id,
             author=self.name,

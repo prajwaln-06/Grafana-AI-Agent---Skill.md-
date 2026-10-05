@@ -37,7 +37,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.catalog.generator import generate_catalog
+from app.catalog.generator import build_markdown_category_index
+from app.catalog.loader import load_catalog
 from app.catalog.rules import apply_rules
 from app.catalog.schema import Catalog
 from app.catalog.search import search
@@ -46,6 +47,11 @@ from app.pipeline import NarrowingDecision, catalog_narrowing_candidates
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SKILLS_ROOT = REPO_ROOT / "skills"
+# Batch 2 fix: the actual production Catalog file (see
+# app.config.Settings.catalog_path's own default) -- mirrors
+# DEFAULT_SKILLS_ROOT's "read the real default, don't hardcode a second
+# literal" convention below.
+DEFAULT_CATALOG_PATH = REPO_ROOT / Settings.model_fields["catalog_path"].default
 
 # Batch 4 (Phase 10) default confidence floor -- see app/config.py's
 # `catalog_narrow_min_score` for the full reasoning. Read off the real
@@ -434,7 +440,22 @@ def format_multi_metric_report(report: MultiMetricReport) -> str:
 
 
 def main() -> int:  # pragma: no cover -- thin CLI wrapper
-    catalog = apply_rules(generate_catalog(DEFAULT_SKILLS_ROOT))
+    # Batch 2 fix: evaluate the ACTUAL production Catalog (the committed
+    # app/catalog/catalog.json, now vendor-source-generated -- see
+    # scripts/generate_production_catalog.py) with the exact same
+    # in-memory enrichment app/pipeline.py::_get_catalog() applies at
+    # request time (Phase 5 keyword/priority classification, AND the
+    # Batch 2 Option C Markdown-Category keyword enrichment) -- not a
+    # freshly Markdown-regenerated catalog that never goes through either
+    # step the same way. This changes ONLY which Catalog object gets
+    # passed into evaluate()/evaluate_reference_level()/
+    # evaluate_multi_metric() below; the questions, scoring, thresholds,
+    # and ranking methodology inside those functions are untouched.
+    markdown_category_index = build_markdown_category_index(DEFAULT_SKILLS_ROOT)
+    catalog = apply_rules(
+        load_catalog(DEFAULT_CATALOG_PATH),
+        markdown_category_index=markdown_category_index,
+    )
     print(format_report(evaluate(catalog)))
     print()
     print(format_reference_level_report(evaluate_reference_level(catalog)))

@@ -42,8 +42,8 @@ def test_only_two_llm_calls_for_a_normal_ok_result(skill_index, settings):
     gen_resp = MagicMock(parsed=gen_contract)
 
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, gen_resp]) as mock_call, \
-         patch.object(label_discovery, "discover_labels_for_metrics",
-                       return_value={"node_load1": ["instance", "job"]}):
+         patch.object(label_discovery, "discover_label_details_for_metrics",
+                       return_value={"node_load1": label_discovery.LabelDetails(keys=["instance", "job"], values={})}):
         result = _run(pipeline.run_pipeline("load average on node-1", skill_index, settings))
 
     assert mock_call.call_count == 2
@@ -77,8 +77,8 @@ def test_generator_prompt_includes_live_labels_block_and_section_7(skill_index, 
         return MagicMock(parsed=gen_contract)
 
     with patch.object(llm_client, "call_llm_json", side_effect=fake_call), \
-         patch.object(label_discovery, "discover_labels_for_metrics",
-                       return_value={"node_load1": ["node_id", "instance", "job", "cluster"]}):
+         patch.object(label_discovery, "discover_label_details_for_metrics",
+                       return_value={"node_load1": label_discovery.LabelDetails(keys=["node_id", "instance", "job", "cluster"], values={})}):
         result = _run(pipeline.run_pipeline("system load", skill_index, settings))
 
     assert result["status"] == "panic_mode_best_effort"
@@ -107,8 +107,8 @@ def test_validation_failure_produces_internal_status_not_a_crash(skill_index, se
     }
 
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics",
-                       return_value={"node_load1": ["instance", "job"]}):
+         patch.object(label_discovery, "discover_label_details_for_metrics",
+                       return_value={"node_load1": label_discovery.LabelDetails(keys=["instance", "job"], values={})}):
         result = _run(pipeline.run_pipeline("load average", skill_index, settings))
 
     assert result["mode"] == "single"
@@ -137,7 +137,7 @@ def test_unresolved_topic_appended_alongside_a_resolved_prometheus_result(skill_
     }
 
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_load1": []}):
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value={"node_load1": label_discovery.LabelDetails(keys=[], values={})}):
         result = _run(pipeline.run_pipeline(
             "show CPU load and recent error logs for node-1", skill_index, settings))
 
@@ -198,7 +198,7 @@ def test_generator_omitting_the_mode_wrapper_is_repaired_not_rejected(skill_inde
 
     with patch.object(llm_client, "call_llm_json",
                        side_effect=[router_resp, MagicMock(parsed=gen_contract_missing_mode)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics", return_value={}):
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value={}):
         result = _run(pipeline.run_pipeline("Has the GPU been power throttling?", skill_index, settings))
 
     assert result["status"] == "unsupported_metric"
@@ -232,12 +232,101 @@ def test_generator_multi_mode_missing_wrapper_is_also_repaired(skill_index, sett
     }
     with patch.object(llm_client, "call_llm_json",
                        side_effect=[router_resp, MagicMock(parsed=gen_contract_missing_mode)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics",
-                       return_value={"node_load1": [], "node_memory_MemAvailable_bytes": []}):
+         patch.object(label_discovery, "discover_label_details_for_metrics",
+                       return_value={"node_load1": label_discovery.LabelDetails(keys=[], values={}), "node_memory_MemAvailable_bytes": label_discovery.LabelDetails(keys=[], values={})}):
         result = _run(pipeline.run_pipeline("CPU and available memory", skill_index, settings))
 
     assert result["mode"] == "multi"
     assert len(result["results"]) == 2
+
+
+# ---- Corrective patch: `mode` holding a status value, no `mode` repair -----
+#
+# Live failure C traced: "How can I tell if the system is overloaded?" --
+# the Generator, confused by SKILL.md Section 9's ambiguous_metric/
+# unsupported_metric examples not showing "mode": "single" explicitly (now
+# fixed), produced `{"mode": "ambiguous_metric", ...}` with no separate
+# "status" key at all. `_normalize_contract_shape` previously left any
+# contract with a pre-existing "mode" key untouched (regardless of its
+# value), so this failed validation with "'mode' must be 'single' or
+# 'multi'; got 'ambiguous_metric'." -- discarding a substantively-correct
+# answer over the same class of envelope confusion as the missing-mode
+# case above.
+
+
+def test_normalize_contract_shape_repairs_known_status_value_placed_in_mode():
+    """Unit-level check of the normalizer itself, independent of the full
+    pipeline: a known status value in `mode`, no `status` key, gets
+    repaired to mode:"single" + status:<value>, with every other field
+    preserved unchanged."""
+    contract = {
+        "mode": "ambiguous_metric",
+        "reference_used": "references/node-exporter/cpu.md",
+        "candidates": [
+            {"name": "node_load1", "purpose": "1-minute load average"},
+            {"name": "node_cpu_seconds_total", "purpose": "CPU time by mode"},
+        ],
+        "clarification": "Do you mean system load average or CPU utilization?",
+        "explanation": "Both plausibly represent 'overloaded'.",
+    }
+    result = pipeline._normalize_contract_shape(contract)
+    assert result["mode"] == "single"
+    assert result["status"] == "ambiguous_metric"
+    assert result["candidates"] == contract["candidates"]
+    assert result["clarification"] == contract["clarification"]
+
+
+def test_normalize_contract_shape_does_not_touch_a_genuinely_unrecognized_mode():
+    """A `mode` value that is neither 'single'/'multi' nor a recognized
+    status (truly malformed input, not this specific near-miss) must be
+    left untouched -- the deterministic validator still reports it, rather
+    than this function silently guessing at unrecognized input."""
+    contract = {"mode": "not_a_real_mode_or_status", "status": "ok"}
+    assert pipeline._normalize_contract_shape(contract) == contract
+
+    contract_no_status = {"mode": "not_a_real_mode_or_status", "explanation": "x"}
+    assert pipeline._normalize_contract_shape(contract_no_status) == contract_no_status
+
+
+def test_normalize_contract_shape_does_not_touch_a_status_value_in_mode_if_status_already_present():
+    """If `status` is already present, a `mode` value that happens to also
+    look like a status is left alone -- this is a different, more
+    ambiguous malformation than the one observed live (which always had NO
+    separate status key), so it's deliberately not guessed at."""
+    contract = {"mode": "ambiguous_metric", "status": "ok", "explanation": "x"}
+    assert pipeline._normalize_contract_shape(contract) == contract
+
+
+def test_generator_ambiguous_metric_status_value_in_mode_is_repaired_end_to_end(skill_index, settings):
+    """Full pipeline regression test for the live failure: Router matches
+    a CPU/load-ambiguous reference, Generator emits the malformed
+    {"mode": "ambiguous_metric", ...} shape (no "status" key), and the
+    final result must be the correctly-repaired ambiguous_metric response,
+    not a validation_failed."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [{"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus"}],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    gen_contract_status_in_mode = {
+        "mode": "ambiguous_metric",
+        "reference_used": "references/node-exporter/cpu.md",
+        "candidates": [
+            {"name": "node_load1", "purpose": "1-minute load average"},
+            {"name": "node_cpu_seconds_total", "purpose": "CPU time spent by mode"},
+        ],
+        "clarification": "Do you mean system load average or CPU utilization percentage?",
+        "explanation": "'Overloaded' could plausibly mean either high load average or high CPU busy time.",
+    }
+    with patch.object(llm_client, "call_llm_json",
+                       side_effect=[router_resp, MagicMock(parsed=gen_contract_status_in_mode)]), \
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value={}):
+        result = _run(pipeline.run_pipeline(
+            "How can I tell if the system is overloaded?", skill_index, settings))
+
+    assert result["mode"] == "single"
+    assert result["status"] == "ambiguous_metric"
+    assert result["clarification"]
 
 
 def test_out_of_scope_action_missing_requested_action_still_fails_loudly(skill_index, settings):
@@ -290,8 +379,8 @@ def test_multi_datasource_question_where_both_sides_match_uses_multi_mode(skill_
     }
 
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics",
-                       return_value={"node_load1": [], "node_memory_MemAvailable_bytes": []}):
+         patch.object(label_discovery, "discover_label_details_for_metrics",
+                       return_value={"node_load1": label_discovery.LabelDetails(keys=[], values={}), "node_memory_MemAvailable_bytes": label_discovery.LabelDetails(keys=[], values={})}):
         result = _run(pipeline.run_pipeline("load average and available memory", skill_index, settings))
 
     assert result["mode"] == "multi"
@@ -314,7 +403,7 @@ def test_opensearch_side_of_generator_context_only_built_when_matched(skill_inde
         "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "test",
     }
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_load1": []}), \
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value={"node_load1": label_discovery.LabelDetails(keys=[], values={})}), \
          patch.object(field_discovery, "discover_attributes_for_all_known_patterns") as mock_field_discovery:
         _run(pipeline.run_pipeline("load average", skill_index, settings))
 
@@ -417,7 +506,8 @@ def test_alert_rule_proposed_gets_default_folder_and_null_datasource_uid_injecte
         "explanation": "Derived from the verified idle-based CPU utilization expression. Proposal only.",
     }
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_cpu_seconds_total": []}):
+         patch.object(label_discovery, "discover_label_details_for_metrics",
+                       return_value={"node_cpu_seconds_total": label_discovery.LabelDetails(keys=["mode"], values={})}):
         result = _run(pipeline.run_pipeline("alert me if CPU exceeds 90% for 5m", skill_index, enabled))
 
     assert result["status"] == "alert_rule_proposed"
@@ -450,7 +540,367 @@ def test_alert_rule_proposed_missing_threshold_is_not_auto_created(skill_index, 
         "explanation": "Missing comparison -- should have been declined/parameter_requires_clarification instead.",
     }
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_cpu_seconds_total": []}):
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value={"node_cpu_seconds_total": label_discovery.LabelDetails(keys=[], values={})}):
         result = _run(pipeline.run_pipeline("alert me on CPU", skill_index, enabled))
 
     assert result["status"] == pipeline.INTERNAL_VALIDATION_FAILED_STATUS
+
+
+# ---- Dependency-aware compound query resolution (opt-in) -----------------------
+
+
+def _dependency_settings(skills_root, **overrides):
+    from app.config import Settings
+    defaults = dict(
+        gemini_api_key="test-key-not-real", skills_root=skills_root,
+        prometheus_url="http://localhost:9090", opensearch_url="http://localhost:9600",
+        dependent_query_resolution_enabled=True,
+    )
+    defaults.update(overrides)
+    return Settings(**defaults)
+
+
+def test_dependency_plan_absent_when_no_intent_declares_a_dependency():
+    """The overwhelmingly common case: intent_id present on everything (a
+    deployment with the flag on tags every request), but nothing actually
+    depends on anything -- must return None so run_pipeline falls straight
+    through to the ordinary flat path."""
+    matched = [
+        {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus", "intent_id": "q1"},
+        {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus", "intent_id": "q2"},
+    ]
+    assert pipeline._extract_dependency_plan(matched) is None
+
+
+def test_dependency_plan_falls_back_on_missing_intent_id():
+    matched = [
+        {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus", "intent_id": "q1"},
+        {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus", "depends_on": ["q1"]},
+    ]
+    assert pipeline._extract_dependency_plan(matched) is None
+
+
+def test_dependency_plan_falls_back_on_duplicate_intent_id():
+    matched = [
+        {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+         "intent_id": "q1", "depends_on": []},
+        {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+         "intent_id": "q1", "depends_on": ["q1"]},
+    ]
+    assert pipeline._extract_dependency_plan(matched) is None
+
+
+def test_dependency_plan_falls_back_on_self_dependency():
+    matched = [
+        {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+         "intent_id": "q1", "depends_on": ["q1"]},
+    ]
+    assert pipeline._extract_dependency_plan(matched) is None
+
+
+def test_dependency_plan_falls_back_on_unknown_depends_on():
+    matched = [
+        {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+         "intent_id": "q1", "depends_on": []},
+        {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+         "intent_id": "q2", "depends_on": ["ghost"]},
+    ]
+    assert pipeline._extract_dependency_plan(matched) is None
+
+
+def test_dependency_plan_falls_back_on_cycle():
+    matched = [
+        {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+         "intent_id": "q1", "depends_on": ["q2"]},
+        {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+         "intent_id": "q2", "depends_on": ["q1"]},
+    ]
+    assert pipeline._extract_dependency_plan(matched) is None
+
+
+def test_dependency_plan_resolves_a_valid_chain():
+    q1 = {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+          "intent_id": "q1", "depends_on": []}
+    q2 = {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+          "intent_id": "q2", "depends_on": ["q1"]}
+    plan = pipeline._extract_dependency_plan([q1, q2])
+    assert plan is not None
+    assert plan.roots == [q1]
+    assert plan.dependent_order == [q2]
+
+
+def test_router_prompt_includes_dependency_addendum_only_when_enabled(skill_index, settings):
+    enabled = _dependency_settings(settings.skills_root)
+    assert pipeline._build_router_instructions(settings) == pipeline._ROUTER_INSTRUCTIONS
+    assert "DEPENDENT QUERY RESOLUTION IS ENABLED" in pipeline._build_router_instructions(enabled)
+
+
+def test_generator_prompt_includes_dependency_addendum_only_when_enabled(settings):
+    enabled = _dependency_settings(settings.skills_root)
+    assert pipeline._build_generator_instructions(settings, "read_query") == pipeline._GENERATOR_INSTRUCTIONS
+    assert "DEPENDENT QUERY RESOLUTION IS ENABLED" in pipeline._build_generator_instructions(enabled, "read_query")
+
+
+def test_flag_disabled_ignores_dependency_metadata_entirely(skill_index, settings):
+    """With the flag off, even a Router response that DOES carry
+    intent_id/depends_on must be treated exactly like the ordinary flat
+    path always has been -- one flat Generator call across every matched
+    reference, no staged execution, no ALREADY_EXECUTED_MARKER."""
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [
+            {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+             "intent_id": "q1", "depends_on": []},
+            {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+             "intent_id": "q2", "depends_on": ["q1"]},
+        ],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    gen_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_load1", "source_metrics": []},
+        "data_source": "prometheus", "query": "node_load1",
+        "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "test",
+    }
+    with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]) as mock_call, \
+         patch.object(label_discovery, "discover_label_details_for_metrics",
+                       return_value={"node_load1": label_discovery.LabelDetails(keys=[], values={})}):
+        result = _run(pipeline.run_pipeline("cpu and memory on node-1", skill_index, settings))
+
+    assert mock_call.call_count == 2
+    assert pipeline.ALREADY_EXECUTED_MARKER not in result
+    assert result["status"] == "ok"
+
+
+def test_dependency_aware_end_to_end_happy_path(skill_index):
+    """'Which node has the highest CPU utilization, and how much memory is
+    available on that node?' -- the root resolves and executes in-process,
+    and the dependent's single Generator call is fed the root's resolved
+    `instance` label/value and produces a properly filtered query."""
+    from app import prometheus_client
+
+    enabled = _dependency_settings(skill_index.skills_root)
+
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [
+            {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+             "intent_id": "q1", "depends_on": []},
+            {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+             "intent_id": "q2", "depends_on": ["q1"]},
+        ],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    root_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+        "data_source": "prometheus",
+        "query": 'topk(1, 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100))',
+        "query_type": "instant", "time_range": {"time": "now"}, "explanation": "root",
+    }
+    dependent_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/memory.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_memory_MemAvailable_bytes", "source_metrics": []},
+        "data_source": "prometheus", "query": 'node_memory_MemAvailable_bytes{instance="node-7:9100"}',
+        "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "dependent",
+    }
+
+    label_details = {
+        "node_cpu_seconds_total": label_discovery.LabelDetails(keys=["instance", "mode"], values={}),
+        "node_memory_MemAvailable_bytes": label_discovery.LabelDetails(keys=["instance"], values={}),
+    }
+    root_outcome = prometheus_client.ExecutionOutcome(
+        status="success",
+        raw_data={"resultType": "vector", "result": [{"metric": {"instance": "node-7:9100"}, "value": [1735689600, "92.5"]}]},
+    )
+    dep_outcome = prometheus_client.ExecutionOutcome(
+        status="success",
+        raw_data={"resultType": "matrix", "result": [{"metric": {"instance": "node-7:9100"}, "values": [[1735689600, "2147483648"]]}]},
+    )
+
+    with patch.object(llm_client, "call_llm_json",
+                       side_effect=[router_resp, MagicMock(parsed=root_contract), MagicMock(parsed=dependent_contract)]) as mock_call, \
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value=label_details), \
+         patch.object(prometheus_client, "query_instant", return_value=root_outcome), \
+         patch.object(prometheus_client, "query_range", return_value=dep_outcome):
+        result = _run(pipeline.run_pipeline(
+            "which node has the highest CPU utilization, and how much memory is available on that node?",
+            skill_index, enabled,
+        ))
+
+    assert mock_call.call_count == 3  # router + root generator + one dependent generator
+    assert result[pipeline.ALREADY_EXECUTED_MARKER] is True
+    assert result["mode"] == "multi"
+    assert [r["status"] for r in result["results"]] == ["ok", "ok"]
+    assert result["results"][0]["execution"]["execution_status"] == "success"
+    assert result["results"][1]["execution"]["execution_status"] == "success"
+    assert result["synthesis"]  # deterministic, non-empty best-effort summary
+
+
+def test_dependent_query_that_drops_the_resolved_filter_is_never_executed(skill_index):
+    """If the dependent's own Generator call forgets to filter on the
+    parent's resolved entity value, the pipeline must refuse to run it as
+    an unfiltered query -- no query_range/query_instant call happens for
+    that entry at all, and it surfaces as an ordinary execution-time
+    endpoint_error instead."""
+    from app import prometheus_client
+
+    enabled = _dependency_settings(skill_index.skills_root)
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [
+            {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+             "intent_id": "q1", "depends_on": []},
+            {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+             "intent_id": "q2", "depends_on": ["q1"]},
+        ],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    root_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+        "data_source": "prometheus",
+        "query": 'topk(1, 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100))',
+        "query_type": "instant", "time_range": {"time": "now"}, "explanation": "root",
+    }
+    # Forgets the instance="node-7:9100" filter entirely -- unsafe.
+    unfiltered_dependent_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/memory.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_memory_MemAvailable_bytes", "source_metrics": []},
+        "data_source": "prometheus", "query": "node_memory_MemAvailable_bytes",
+        "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "dependent",
+    }
+    label_details = {
+        "node_cpu_seconds_total": label_discovery.LabelDetails(keys=["instance", "mode"], values={}),
+        "node_memory_MemAvailable_bytes": label_discovery.LabelDetails(keys=["instance"], values={}),
+    }
+    root_outcome = prometheus_client.ExecutionOutcome(
+        status="success",
+        raw_data={"resultType": "vector", "result": [{"metric": {"instance": "node-7:9100"}, "value": [1735689600, "92.5"]}]},
+    )
+
+    with patch.object(llm_client, "call_llm_json",
+                       side_effect=[router_resp, MagicMock(parsed=root_contract), MagicMock(parsed=unfiltered_dependent_contract)]), \
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value=label_details), \
+         patch.object(prometheus_client, "query_instant", return_value=root_outcome), \
+         patch.object(prometheus_client, "query_range") as mock_range:
+        result = _run(pipeline.run_pipeline(
+            "which node has the highest CPU utilization, and how much memory is available on that node?",
+            skill_index, enabled,
+        ))
+
+    assert not mock_range.called  # the unsafe query was never actually run
+    dependent_entry = result["results"][1]
+    assert dependent_entry["status"] == "ok"
+    assert dependent_entry["execution"]["execution_status"] == "endpoint_error"
+    assert "unfiltered" in dependent_entry["execution"]["error"]
+
+
+def test_dependent_whose_parent_failed_to_execute_gets_a_deterministic_fallback_entry(skill_index):
+    """If the root's execution doesn't succeed, the dependent Generator
+    call is still made (informed that no upstream value is available) --
+    and if it can't produce something that validates, the pipeline injects
+    a deterministic unsupported_metric entry rather than failing the whole
+    response."""
+    from app import prometheus_client
+
+    enabled = _dependency_settings(skill_index.skills_root)
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [
+            {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+             "intent_id": "q1", "depends_on": []},
+            {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+             "intent_id": "q2", "depends_on": ["q1"]},
+        ],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    root_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/cpu.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+        "data_source": "prometheus",
+        "query": 'topk(1, 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100))',
+        "query_type": "instant", "time_range": {"time": "now"}, "explanation": "root",
+    }
+    # Deliberately broken (missing required 'query') so validation fails.
+    broken_dependent_contract = {
+        "mode": "single", "status": "ok", "reference_used": "references/node-exporter/memory.md",
+        "measurement_used": {"type": "raw_metric", "name": "node_memory_MemAvailable_bytes", "source_metrics": []},
+        "data_source": "prometheus", "time_range": {"from": "now-1h", "to": "now", "step": "60s"},
+        "explanation": "dependent",
+    }
+    label_details = {
+        "node_cpu_seconds_total": label_discovery.LabelDetails(keys=["instance", "mode"], values={}),
+        "node_memory_MemAvailable_bytes": label_discovery.LabelDetails(keys=["instance"], values={}),
+    }
+    root_outcome = prometheus_client.ExecutionOutcome(status="timeout", error="Prometheus request timed out.")
+
+    with patch.object(llm_client, "call_llm_json",
+                       side_effect=[router_resp, MagicMock(parsed=root_contract), MagicMock(parsed=broken_dependent_contract)]), \
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value=label_details), \
+         patch.object(prometheus_client, "query_instant", return_value=root_outcome):
+        result = _run(pipeline.run_pipeline(
+            "which node has the highest CPU utilization, and how much memory is available on that node?",
+            skill_index, enabled,
+        ))
+
+    assert result[pipeline.ALREADY_EXECUTED_MARKER] is True
+    root_entry, dependent_entry = result["results"]
+    assert root_entry["execution"]["execution_status"] == "timeout"
+    assert dependent_entry["status"] == "unsupported_metric"
+    assert result["synthesis"] is None  # nothing in this response could be described
+
+
+def test_dependency_path_falls_back_to_flat_when_root_needs_clarification(skill_index):
+    """A root that comes back ambiguous must never be partially executed --
+    the whole request instead re-resolves through the ordinary flat path
+    across every matched reference, exactly as if the flag were off."""
+    enabled = _dependency_settings(skill_index.skills_root)
+    router_resp = MagicMock(parsed={
+        "gate_stop": None,
+        "matched_references": [
+            {"reference_path": "references/node-exporter/cpu.md", "data_source": "prometheus",
+             "intent_id": "q1", "depends_on": []},
+            {"reference_path": "references/node-exporter/memory.md", "data_source": "prometheus",
+             "intent_id": "q2", "depends_on": ["q1"]},
+        ],
+        "panic_mode": False, "unresolved_topics": [],
+    })
+    ambiguous_root_contract = {
+        "mode": "single", "status": "ambiguous_metric",
+        "reference_used": "references/node-exporter/cpu.md",
+        "candidates": [{"name": "node_cpu_seconds_total", "purpose": "CPU time by mode"},
+                       {"name": "node_load1", "purpose": "1-minute load average"}],
+        "clarification": "Which CPU mode do you mean?",
+        "explanation": "Multiple CPU-related metrics could answer this.",
+    }
+    flat_fallback_contract = {
+        "mode": "multi",
+        "results": [
+            {"status": "ambiguous_metric", "reference_used": "references/node-exporter/cpu.md",
+             "candidates": [{"name": "node_cpu_seconds_total", "purpose": "CPU time by mode"},
+                            {"name": "node_load1", "purpose": "1-minute load average"}],
+             "clarification": "Which CPU mode do you mean?",
+             "explanation": "Multiple CPU-related metrics could answer this."},
+            {"status": "ok", "reference_used": "references/node-exporter/memory.md",
+             "measurement_used": {"type": "raw_metric", "name": "node_memory_MemAvailable_bytes", "source_metrics": []},
+             "data_source": "prometheus", "query": "node_memory_MemAvailable_bytes",
+             "time_range": {"from": "now-1h", "to": "now", "step": "60s"}, "explanation": "test"},
+        ],
+        "synthesis": None,
+    }
+    label_details = {
+        "node_cpu_seconds_total": label_discovery.LabelDetails(keys=["instance", "mode"], values={}),
+        "node_memory_MemAvailable_bytes": label_discovery.LabelDetails(keys=["instance"], values={}),
+    }
+    with patch.object(llm_client, "call_llm_json",
+                       side_effect=[router_resp, MagicMock(parsed=ambiguous_root_contract), MagicMock(parsed=flat_fallback_contract)]), \
+         patch.object(label_discovery, "discover_label_details_for_metrics", return_value=label_details):
+        result = _run(pipeline.run_pipeline(
+            "which node has the highest CPU utilization, and how much memory is available on that node?",
+            skill_index, enabled,
+        ))
+
+    assert pipeline.ALREADY_EXECUTED_MARKER not in result
+    assert result["mode"] == "multi"
+    assert result["results"][0]["status"] == "ambiguous_metric"

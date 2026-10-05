@@ -30,4 +30,20 @@ def settings(skills_root):
         skills_root=skills_root,
         prometheus_url="http://localhost:9090",
         opensearch_url="http://localhost:9600",
+        # Catalog participation is mandatory for the normal pipeline (see
+        # app/pipeline.py's module docstring), so ordinary tests that don't
+        # explicitly care about catalog-narrowed routing/candidates would
+        # otherwise silently pick up the real, committed app/catalog/
+        # catalog.json (a relative default path that resolves against the
+        # repo root most test runs execute from) and get real Level-1/2/3
+        # behavior layered onto whatever mocked Router/Generator responses
+        # they use -- exactly the kind of incidental coupling this default
+        # is meant to prevent. Point at a path that can never exist instead,
+        # so `_get_catalog` degrades to None (logged once) and every test
+        # using this fixture gets deterministic, catalog-free behavior
+        # unless it explicitly opts in (see
+        # tests/test_pipeline_catalog_integration.py's own `_settings`
+        # helper and `real_catalog` fixture, which build a real catalog on
+        # purpose for exactly that kind of test).
+        catalog_path=skills_root.parent / "tests" / "__no_catalog_for_this_fixture__.json",
     )

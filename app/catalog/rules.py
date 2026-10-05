@@ -72,12 +72,93 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) >= _MIN_KEYWORD_LEN and t not in _STOPWORDS]
 
 
-def generate_keywords(entry: CatalogEntry) -> tuple[str, ...]:
+# ---- targeted vocabulary augmentation (Batch 1 / Phase 1) -----------------
+#
+# Per the frozen architecture's §11: "Do NOT automatically extract every
+# Markdown `Use when` token into catalog keywords" (that experiment was
+# already tried and measured to increase candidate contamination). The
+# alternative the spec calls for instead is "targeted vocabulary
+# augmentation for documented concepts where current lexical retrieval is
+# weak" -- a small, curated, per-metric addition, not a blanket extraction
+# rule.
+#
+# This table is that curated addition, and it is deliberately NOT copied
+# verbatim from the architecture handoff's candidate list -- each entry
+# below was chosen by actually running
+# `python -m scripts.evaluate_catalog_retrieval` against the real 46-
+# question evaluation set (see that script's own docstring for where the
+# question set comes from) and inspecting exactly why the expected metric
+# scored zero against its expected question. Two categories of gap showed
+# up, and both are singular/deterministic tokenization issues, not
+# semantic ones:
+#
+#   1. A plural/singular mismatch between a query token and the only
+#      matching keyword search.py's tokenizer produces (e.g. a metric only
+#      carries "buffers"/"errors" but the real question says "buffer
+#      cache usage"/"error trend" -- exact-token overlap, no stemming, so
+#      the singular form never matches the plural one).
+#   2. A documented alternate name/phrasing for the same concept that
+#      never appears anywhere in the metric's own name/category/help text
+#      at all (e.g. "double-precision" for FP64, "hardware degradation"
+#      for a retired-pages metric, "link stability" for an NVLink
+#      recovery-event counter).
+#
+# Each addition below is annotated with the specific evaluation-set
+# question it was added to fix. `DCGM_FI_PROF_DRAM_ACTIVE` ("memory-bound
+# workload") was investigated and deliberately NOT given an addition here:
+# it already carries "memory" as a keyword and still loses to node_memory_*
+# entries because their literal metric NAME contains "memory" (name is
+# search.py's highest-weighted field) -- that is field-weight contention
+# between two genuinely memory-related metrics, not a missing-vocabulary
+# gap, and per the frozen architecture is exactly the kind of "weight-
+# precision problem for a future tuning phase" this targeted pass is not
+# meant to solve.
+_KEYWORD_AUGMENTATIONS: dict[str, tuple[str, ...]] = {
+    # "Double-precision workload"
+    "DCGM_FI_PROF_PIPE_FP64_ACTIVE": ("double", "precision"),
+    # "Single-precision workload"
+    "DCGM_FI_PROF_PIPE_FP32_ACTIVE": ("single", "precision"),
+    # "Mixed-precision workload"
+    "DCGM_FI_PROF_PIPE_FP16_ACTIVE": ("mixed", "precision"),
+    # "Buffer cache usage" -- entry only had the plural "buffers".
+    "node_memory_Buffers_bytes": ("buffer",),
+    # "Error trend" -- entry only had the plural "errors"; an unrelated
+    # NVLink counter's singular "error" keyword was outscoring it.
+    "DCGM_FI_DEV_ECC_SBE_VOL_TOTAL": ("error",),
+    # "Memory degradation" -- category is "Reliability", with no "memory"
+    # or "degradation" token anywhere in name/category/help.
+    "DCGM_FI_DEV_RETIRED_SBE": ("memory", "degradation"),
+    # "Serious hardware degradation" -- same gap, "hardware"/"degradation".
+    "DCGM_FI_DEV_RETIRED_DBE": ("hardware", "degradation"),
+    # "Link stability" -- "nvlink" tokenizes as one token, so it never
+    # matches a query's separate "link" token, and "stability" doesn't
+    # appear anywhere in the entry at all.
+    "DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL": ("link", "stability"),
+}
+
+
+def generate_keywords(
+    entry: CatalogEntry, markdown_category: str | None = None
+) -> tuple[str, ...]:
     """Deterministic keyword extraction from the fields the catalog
     already has -- name, category, and help/Purpose text -- in that
     priority order (name-derived tokens first, since a query matching the
     metric name itself is the strongest possible signal; see search.py's
-    own weighting, which mirrors this ordering).
+    own weighting, which mirrors this ordering), followed by this
+    metric's targeted vocabulary augmentation (`_KEYWORD_AUGMENTATIONS`
+    above), if any.
+
+    `markdown_category` (Batch 2, Option C): the metric's Markdown
+    "Category" bullet text, if any -- see
+    app.catalog.generator.build_markdown_category_index(), which is how a
+    caller obtains this. When provided, its tokens are added as a final,
+    additive enrichment stage, AFTER base keyword generation and the
+    targeted augmentation table above. This is retrieval vocabulary only:
+    `markdown_category` is never written to `entry.category` (which
+    remains the vendor category -- see module docstring's Option C
+    boundary and app/catalog/vendor.py), and passing None (no Markdown,
+    e.g. a vendor-only metric with reference_path=None) is a normal,
+    no-op case, not an error.
 
     Deduplicates while preserving first-occurrence order, and caps at
     _MAX_KEYWORDS so a long Purpose sentence doesn't dilute the token set
@@ -89,6 +170,15 @@ def generate_keywords(entry: CatalogEntry) -> tuple[str, ...]:
     seen: set[str] = set()
     for source in (entry.name, entry.category, entry.help):
         for token in _tokenize(source):
+            if token not in seen:
+                seen.add(token)
+                ordered.append(token)
+    for token in _KEYWORD_AUGMENTATIONS.get(entry.name, ()):
+        if token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    if markdown_category:
+        for token in _tokenize(markdown_category):
             if token not in seen:
                 seen.add(token)
                 ordered.append(token)
@@ -150,9 +240,23 @@ def classify_priority(entry: CatalogEntry) -> str:
 # ---- applying rules across a catalog ---------------------------------------
 
 
-def apply_rules(catalog: Catalog, *, overwrite_existing: bool = False) -> Catalog:
+def apply_rules(
+    catalog: Catalog,
+    *,
+    overwrite_existing: bool = False,
+    markdown_category_index: dict[str, str] | None = None,
+) -> Catalog:
     """Returns a new Catalog with `keywords` and `priority` filled in for
     every entry, via generate_keywords()/classify_priority() above.
+
+    `markdown_category_index` (Batch 2, Option C): optional metric name ->
+    Markdown Category text map (see
+    app.catalog.generator.build_markdown_category_index()), threaded
+    through to generate_keywords() as additive retrieval-keyword
+    enrichment for entries whose name has an entry in the index. Omitting
+    it (the default) reproduces pre-Option-C behavior exactly -- callers
+    that don't care about Markdown-category enrichment (e.g. most
+    existing tests) do not need to change.
 
     By default (`overwrite_existing=False`), an entry that already has a
     non-empty `keywords` tuple or a `priority` other than `Priority.
@@ -163,11 +267,14 @@ def apply_rules(catalog: Catalog, *, overwrite_existing: bool = False) -> Catalo
     `overwrite_existing=True` only for a deliberate full re-classification
     pass (e.g. after `_PRIORITY_PATTERNS` itself changes).
     """
+    markdown_category_index = markdown_category_index or {}
     updated: list[CatalogEntry] = []
     for entry in catalog.metrics:
         new_keywords = entry.keywords
         if overwrite_existing or not entry.keywords:
-            new_keywords = generate_keywords(entry)
+            new_keywords = generate_keywords(
+                entry, markdown_category_index.get(entry.name)
+            )
 
         new_priority = entry.priority
         if overwrite_existing or entry.priority == Priority.REVIEW.value:

@@ -47,7 +47,8 @@ Do not use this reference for:
 
 - GPU utilization, GPU temperature, GPU power, GPU clocks, or other DCGM
   measurements → `dcgm-exporter/overview.md`
-- Any Node Exporter metric not listed in the Metric Directory below.
+- Any Node Exporter metric not present in the generated catalog
+  (`app/catalog/catalog.json`) — see the note below.
 
 Metric names and structured metadata are maintained in the generated catalog.
 Metric-specific semantics remain in the linked domain files.

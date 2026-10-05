@@ -107,7 +107,17 @@ def check_metric_directory_consistency(skill_root: Path) -> list[str]:
 
 
 def check_catalog_consistency(skill_root: Path) -> list[str]:
-    """Verify the catalog is wired to real metric-specific Markdown.
+    """Verify the catalog is wired to real metric-specific Markdown, for
+    every metric that has a reference_path at all.
+
+    `reference_path=None` (a vendor-only metric with no semantic Markdown)
+    is a valid, expected state as of the Batch 2 vendor-source cutover --
+    that cutover specifically established that a vendor metric does NOT
+    require Markdown to enter the persistent Catalog -- and is
+    deliberately NOT flagged as a problem here. This function only checks
+    metrics that DO have a reference_path: that it points at a real file,
+    and that the file actually defines a matching `### `metric_name``
+    section.
 
     Legacy overview tables, when present in an older package, are still
     checked by check_metric_directory_consistency above. Current overview
@@ -133,7 +143,7 @@ def check_catalog_consistency(skill_root: Path) -> list[str]:
             continue
         names.add(name)
         if not reference:
-            problems.append(f"{catalog_path}: metric {name!r} has no reference_path.")
+            # Vendor-only metric, no Markdown -- valid, not a problem.
             continue
         domain_path = skill_root / reference
         if not domain_path.exists():

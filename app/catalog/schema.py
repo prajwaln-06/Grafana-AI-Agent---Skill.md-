@@ -316,3 +316,15 @@ class Catalog:
 
     def by_exporter(self, exporter: str) -> tuple[CatalogEntry, ...]:
         return tuple(m for m in self.metrics if m.exporter == exporter)
+
+    def by_reference_path(self, reference_path: str) -> tuple[CatalogEntry, ...]:
+        """Every catalog entry belonging to one Markdown reference file.
+        Not used by the normal (Level-1) Generator candidate path -- added
+        as the smallest reusable `reference_path -> catalog metrics`
+        lookup for a future Level-2 fallback (broaden to every metric in
+        the Router-selected reference(s) when Level-1's narrower candidate
+        set is demonstrably insufficient), per the frozen architecture's
+        instruction not to make the Generator responsible for that lookup
+        itself and not to duplicate catalog data in a second
+        {reference_path: [metric_name, ...]} map elsewhere."""
+        return tuple(m for m in self.metrics if m.reference_path == reference_path)

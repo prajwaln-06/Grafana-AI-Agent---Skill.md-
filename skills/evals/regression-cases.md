@@ -253,16 +253,32 @@ silently drop the model constraint and answer for all GPUs unfiltered.
 
 ## 19. Dynamic label sourcing — label value vs. label key
 
-**Input:** "What's the CPU utilization on node-7?"
-(assume runtime metadata confirms an `instance` label key represents node-level
-scope for `node_cpu_seconds_total`)
-**Expected:** `status: "ok"`. The label *value* `node-7` is used directly as
-supplied by the user once the label *key* (`instance`) is confirmed by the
-runtime — the skill does not independently re-verify that a series with
-`instance="node-7"` actually exists in the current datasource before
-constructing the query. Confirming the label key is the runtime-sourcing
-requirement (`SKILL.md` §5 Principle 9); confirming the specific value exists
-is a separate, out-of-scope concern for query construction.
+**Input:** "What's the CPU utilization on node-01?"
+(assume runtime metadata confirms, for `node_cpu_seconds_total`: an `instance`
+key whose only confirmed values are host:port pairs like `"node-01:9200"`,
+and a `node_id` key whose confirmed values are bare identifiers like
+`"node-01"`)
+**Expected:** `status: "ok"`, scoped using `node_id="node-01"` (an EXACT match
+to a runtime-confirmed value), not `instance="node-01"` (which is only a
+prefix/substring of the real value `"node-01:9200"`, never a confirmed value
+in its own right). Confirming a label *key* is not sufficient by itself —
+Principle 9 also requires the specific *value* used to be one of that key's
+runtime-confirmed values, and when multiple keys could express the same
+real-world scope, the one giving an exact value match is preferred over one
+that would require guessing a transformation (stripping a port, in this
+case) of the user's text.
+
+**Input (negative control — must decline, not guess):** "What's the CPU
+utilization on node-1?" (same runtime metadata as above — note there is no
+`"node-1"` value, exact or as a prefix, for either `instance` or `node_id`;
+the confirmed identifiers are `"node-00"`, `"node-01"`, `"node-02"`,
+`"node-03"`)
+**Expected:** `status: "declined"`, `reason:
+"parameter_requires_clarification"`. `"node-1"` is not an exact match to any
+runtime-confirmed value for any candidate label key on this metric — it is
+easy to mistake for `"node-01"`, but Principle 9 requires an exact match, not
+a closest-looking one, and must not silently correct the user's typo/short
+form by guessing which real node they meant.
 
 ## 20. Dynamic label sourcing — runtime label list unavailable for a required scope
 
@@ -500,19 +516,25 @@ ambiguous with "health" per the Cross-Domain Semantic Distinctions entry.
 
 ## 34. Alert-rule creation (Section 12) — narrow exception vs. unchanged out-of-scope boundary
 
-**Input:** "Create an alert if CPU usage on node-1 exceeds 90% for 5 minutes."
+**Input:** "Create an alert if CPU usage on node-01 exceeds 90% for 5 minutes."
 **Expected** (`alert_rule_creation_enabled = true`): `status:
 "alert_rule_proposed"`. Resolves `node_cpu_seconds_total` via `cpu.md`'s
 Step 3 metric-selection procedure — unchanged from a read question — then
 builds `alert_rule.condition_query` via the exact same Step 5 procedure
 Section 12.4 now specifies, which for this metric means reusing its verified
 Query Example expression. `alert_rule.condition_query` must reuse that exact
-base expression (scoped to `node-1` via a runtime-confirmed `instance`
-label, per Principle 9); `alert_rule.comparison` must be `{"operator": ">",
-"threshold": 90}` and `alert_rule.for_duration` must be `"5m"`, all taken
-verbatim from the request, never a "reasonable-sounding" substitute. A
-session id is returned; nothing is created in Grafana by this response —
-§12.1's separate confirmation step is required before anything is written.
+base expression, scoped to `node-01` via whichever runtime-confirmed label
+key gives an EXACT value match per Principle 9 (e.g. `node_id="node-01"`,
+not a guessed `instance="node-01"` if the real `instance` values are
+host:port pairs — same distinction as case 19); `alert_rule.comparison` must
+be `{"operator": ">", "threshold": 90}` and `alert_rule.for_duration` must
+be `"5m"`, all taken verbatim from the request, never a "reasonable-sounding"
+substitute. A session id is returned; nothing is created in Grafana by this
+response — §12.1's separate confirmation step is required before anything
+is written. (§12.4's Principle 9 value check applies here exactly as it
+does to an ordinary read query — an alert proposal scoped to a fabricated
+or unconfirmed label value must fail validation the same way, not be
+special-cased as "just an alert.")
 
 **Input:** "Alert me if GPU temperature gets too high."
 **Expected:** No threshold value or comparison direction stated →

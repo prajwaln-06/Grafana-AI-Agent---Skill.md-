@@ -21,10 +21,11 @@ def _ok_entry(**overrides):
     return entry
 
 
-def _validate(entry, labels_by_metric=None):
+def _validate(entry, labels_by_metric=None, label_values_by_metric=None):
     contract = {"mode": "single", **entry}
     return validator.validate_contract(
         contract, known_metrics=KNOWN_METRICS, labels_by_metric=labels_by_metric or {},
+        label_values_by_metric=label_values_by_metric or {},
         known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
     )
 
@@ -233,6 +234,125 @@ def test_label_discovery_failure_downgrades_to_warning_not_a_failure():
     r = _validate(entry, labels_by_metric={"node_load1": None})
     assert r.passed
     assert any("DISCOVERY FAILED".lower() not in w.lower() and "could not be confirmed" in w for w in r.warnings)
+
+
+# ---- Prometheus-specific: Principle 9, VALUE half (the node-01/node-01:9200 bug) --
+
+
+def test_incomplete_label_value_fails_principle_9():
+    """Reproduces the real bug found in manual testing: the model generated
+    `instance="node-01"` when the only live values are host:port pairs like
+    `"node-01:9200"`. The label KEY ("instance") is real, so the existing
+    key-only check passed this straight through with status "ok"; it then
+    executed cleanly and returned an empty result. This must now fail
+    closed instead, the same way an invented label KEY already does."""
+    entry = _ok_entry(
+        query='node_cpu_seconds_total{instance="node-01"}',
+        measurement_used={"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+    )
+    r = _validate(
+        entry,
+        labels_by_metric={"node_cpu_seconds_total": ["instance"]},
+        label_values_by_metric={"node_cpu_seconds_total": {
+            "instance": ["node-00:9200", "node-01:9200", "node-02:9200", "node-03:9200"],
+        }},
+    )
+    assert not r.passed
+    assert "instance" in r.reason and "node-01" in r.reason and "Principle 9" in r.reason
+
+
+def test_exact_confirmed_label_value_passes():
+    entry = _ok_entry(
+        query='node_cpu_seconds_total{instance="node-01:9200"}',
+        measurement_used={"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+    )
+    r = _validate(
+        entry,
+        labels_by_metric={"node_cpu_seconds_total": ["instance"]},
+        label_values_by_metric={"node_cpu_seconds_total": {
+            "instance": ["node-00:9200", "node-01:9200", "node-02:9200", "node-03:9200"],
+        }},
+    )
+    assert r.passed, r.reason
+
+
+def test_label_value_check_is_skipped_without_confirmed_values():
+    """No label_values_by_metric supplied at all (e.g. an older call site,
+    or a metric for which value discovery wasn't available) -- must behave
+    exactly like before this check existed, never a new false rejection."""
+    entry = _ok_entry(
+        query='node_cpu_seconds_total{instance="node-01"}',
+        measurement_used={"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+    )
+    r = _validate(entry, labels_by_metric={"node_cpu_seconds_total": ["instance"]})
+    assert r.passed, r.reason
+
+
+def test_label_value_check_skipped_for_key_with_no_confirmed_values_entry():
+    """A key that's confirmed to EXIST (Principle 9 key check passes) but
+    has no entry in that metric's values dict -- e.g. its value set exceeded
+    MAX_VALUES_PER_LABEL and was deliberately left unconfirmed -- must be
+    fail-open, not treated as 'no valid values, reject everything.'"""
+    entry = _ok_entry(
+        query='node_cpu_seconds_total{cpu="17"}',
+        measurement_used={"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+    )
+    r = _validate(
+        entry,
+        labels_by_metric={"node_cpu_seconds_total": ["cpu"]},
+        label_values_by_metric={"node_cpu_seconds_total": {}},  # cpu present as a key but truncated -> not here
+    )
+    assert r.passed, r.reason
+
+
+def test_incomplete_label_value_in_negation_does_not_fail():
+    """`!=` excludes a value rather than asserting one -- excluding a value
+    that doesn't exist is a harmless no-op, not a fabrication, so this is
+    deliberately NOT checked the same way "=" is."""
+    entry = _ok_entry(
+        query='node_cpu_seconds_total{instance!="node-01"}',
+        measurement_used={"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+    )
+    r = _validate(
+        entry,
+        labels_by_metric={"node_cpu_seconds_total": ["instance"]},
+        label_values_by_metric={"node_cpu_seconds_total": {
+            "instance": ["node-00:9200", "node-01:9200"],
+        }},
+    )
+    assert r.passed, r.reason
+
+
+def test_regex_label_selector_is_not_value_checked():
+    """`=~` is a regex pattern, not a literal value -- checking it against a
+    confirmed exact-value list would reject legitimate regex queries."""
+    entry = _ok_entry(
+        query='node_cpu_seconds_total{instance=~"node-0.*"}',
+        measurement_used={"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+    )
+    r = _validate(
+        entry,
+        labels_by_metric={"node_cpu_seconds_total": ["instance"]},
+        label_values_by_metric={"node_cpu_seconds_total": {
+            "instance": ["node-00:9200", "node-01:9200"],
+        }},
+    )
+    assert r.passed, r.reason
+
+
+def test_label_value_extraction_excludes_dunder_name():
+    entry = _ok_entry(
+        query='{__name__="node_cpu_seconds_total", instance="node-00:9200"}',
+        measurement_used={"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+    )
+    r = _validate(
+        entry,
+        labels_by_metric={"node_cpu_seconds_total": ["instance"]},
+        label_values_by_metric={"node_cpu_seconds_total": {
+            "instance": ["node-00:9200"],
+        }},
+    )
+    assert r.passed, r.reason
 
 
 def test_query_type_instant_uses_time_field_instead_of_range():
@@ -459,6 +579,86 @@ def test_alert_rule_proposed_missing_title_fails():
     entry = _alert_entry(alert_rule=alert_rule)
     r = validator.validate_contract({"mode": "single", **entry}, known_references=KNOWN_REFS, known_datasources=KNOWN_DS)
     assert not r.passed and "title" in r.reason
+
+
+# ---- alert_rule_proposed: Principle 9 now also applies to condition_query ----------
+#
+# Closes a real, pre-existing gap: SKILL.md Section 12.4 has always stated
+# condition_query is built via "the EXACT SAME procedure Step 5 already
+# uses" for an ordinary read query, but _validate_alert_rule_proposed never
+# actually checked it for invented label keys or unconfirmed label values
+# the way _validate_prometheus_entry has always checked a read query. These
+# mirror that file's Principle-9 tests, applied to the alert path instead.
+
+
+def test_alert_condition_query_with_invented_label_key_fails_principle_9():
+    entry = _alert_entry(alert_rule={
+        **_alert_entry()["alert_rule"],
+        "condition_query": '100 - (avg(rate(node_cpu_seconds_total{made_up_key="x", mode="idle"}[1m])) * 100)',
+    })
+    r = validator.validate_contract(
+        {"mode": "single", **entry}, known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        labels_by_metric={"node_cpu_seconds_total": ["mode", "instance"]},
+    )
+    assert not r.passed and "made_up_key" in r.reason and "Principle 9" in r.reason
+
+
+def test_alert_condition_query_with_confirmed_label_key_passes():
+    entry = _alert_entry(alert_rule={
+        **_alert_entry()["alert_rule"],
+        "condition_query": '100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)',
+    })
+    r = validator.validate_contract(
+        {"mode": "single", **entry}, known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        labels_by_metric={"node_cpu_seconds_total": ["mode", "instance"]},
+    )
+    assert r.passed, r.reason
+
+
+def test_alert_condition_query_with_incomplete_label_value_fails_principle_9():
+    """The same node-01/node-01:9200 bug, reproduced on the alert-creation
+    path specifically -- this is the gap the docstring above describes as
+    arguably worse than the read-query version, since a proposed alert can
+    be confirmed and left running."""
+    entry = _alert_entry(alert_rule={
+        **_alert_entry()["alert_rule"],
+        "condition_query": '100 - (avg(rate(node_cpu_seconds_total{instance="node-01", mode="idle"}[1m])) * 100)',
+    })
+    r = validator.validate_contract(
+        {"mode": "single", **entry}, known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        labels_by_metric={"node_cpu_seconds_total": ["mode", "instance"]},
+        label_values_by_metric={"node_cpu_seconds_total": {
+            "instance": ["node-00:9200", "node-01:9200"],
+        }},
+    )
+    assert not r.passed and "instance" in r.reason and "node-01" in r.reason and "Principle 9" in r.reason
+
+
+def test_alert_condition_query_with_exact_confirmed_label_value_passes():
+    entry = _alert_entry(alert_rule={
+        **_alert_entry()["alert_rule"],
+        "condition_query": '100 - (avg(rate(node_cpu_seconds_total{instance="node-01:9200", mode="idle"}[1m])) * 100)',
+    })
+    r = validator.validate_contract(
+        {"mode": "single", **entry}, known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        labels_by_metric={"node_cpu_seconds_total": ["mode", "instance"]},
+        label_values_by_metric={"node_cpu_seconds_total": {
+            "instance": ["node-00:9200", "node-01:9200"],
+        }},
+    )
+    assert r.passed, r.reason
+
+
+def test_alert_condition_query_label_checks_are_skipped_without_discovery_data():
+    """Backward compatibility: existing call sites/tests that validate an
+    alert entry without labels_by_metric/label_values_by_metric at all must
+    behave exactly as before this fix -- never a new false rejection."""
+    entry = _alert_entry(alert_rule={
+        **_alert_entry()["alert_rule"],
+        "condition_query": '100 - (avg(rate(node_cpu_seconds_total{instance="node-01", mode="idle"}[1m])) * 100)',
+    })
+    r = validator.validate_contract({"mode": "single", **entry}, known_references=KNOWN_REFS, known_datasources=KNOWN_DS)
+    assert r.passed, r.reason
 
 
 def test_alert_rule_proposed_is_always_single_mode_in_the_documented_set():
@@ -706,3 +906,143 @@ def test_multi_metric_derived_measurement_checks_every_source_metric_against_cat
     )
     r = _validate_with_catalog_status(entry, catalog_status_by_metric=CATALOG_STATUS_BY_METRIC, known_metrics=known)
     assert not r.passed and "node_disk_io_now" in r.reason and "rejected" in r.reason
+
+# -- Batch 2 (Phase 3): candidate-scope enforcement ----------------------------------
+
+
+def _validate_with_scope(entry, candidate_metric_scope=None, known_metrics=None):
+    return validator.validate_contract(
+        {"mode": "single", **entry},
+        known_metrics=KNOWN_METRICS if known_metrics is None else known_metrics,
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        candidate_metric_scope=candidate_metric_scope,
+    )
+
+
+def test_candidate_in_scope_passes():
+    """A metric that's both known AND inside the current candidate scope
+    validates exactly as it always did."""
+    r = _validate_with_scope(_ok_entry(), candidate_metric_scope={"node_load1", "node_cpu_seconds_total"})
+    assert r.passed, r.reason
+
+
+def test_known_metric_outside_candidate_scope_is_rejected():
+    """The core Phase 3 guarantee: node_load1 is a perfectly real,
+    known_metrics-valid metric, but if the current attempt's candidate
+    scope is {node_cpu_seconds_total} only, node_load1 must be rejected
+    -- and flagged as a candidate_scope_violation specifically (so
+    pipeline.py knows this is Level-2-retryable, unlike a fabricated
+    metric)."""
+    r = _validate_with_scope(_ok_entry(), candidate_metric_scope={"node_cpu_seconds_total"})
+    assert not r.passed
+    assert r.candidate_scope_violation
+    assert "node_load1" in r.reason and "candidate scope" in r.reason
+
+
+def test_fabricated_metric_outside_scope_is_rejected_by_known_metrics_first_not_scope():
+    """Ordering requirement: known_metrics is checked BEFORE candidate
+    scope, so a fabricated metric is rejected as fabricated (not flagged
+    as a retryable candidate_scope_violation) even if it's also, by
+    coincidence, absent from the candidate scope."""
+    entry = _ok_entry(
+        measurement_used={"type": "raw_metric", "name": "totally_made_up_metric", "source_metrics": []},
+        query="totally_made_up_metric",
+    )
+    r = _validate_with_scope(entry, candidate_metric_scope={"node_cpu_seconds_total"})
+    assert not r.passed
+    assert not r.candidate_scope_violation
+    assert "fabricated" in r.reason
+
+
+def test_empty_candidate_scope_is_a_noop_like_catalog_status():
+    """None/empty candidate_metric_scope means no additional restriction
+    beyond known_metrics -- exactly what a Level-2 attempt, a
+    flag-off deployment, or a Level-1 miss all look like."""
+    assert _validate_with_scope(_ok_entry(), candidate_metric_scope=None).passed
+    assert _validate_with_scope(_ok_entry(), candidate_metric_scope=set()).passed
+
+
+def test_candidate_scope_and_catalog_status_are_independent_checks():
+    """A metric can be IN the candidate scope but still rejected by
+    catalog status (pending/rejected) -- the two checks don't shadow each
+    other. Uses candidate_metric_scope alongside catalog_status_by_metric
+    directly via validate_contract."""
+    known = KNOWN_METRICS | {"node_filesystem_free_bytes"}
+    entry = _ok_entry(
+        measurement_used={"type": "raw_metric", "name": "node_filesystem_free_bytes", "source_metrics": []},
+        query="node_filesystem_free_bytes",
+    )
+    r = validator.validate_contract(
+        {"mode": "single", **entry},
+        known_metrics=known, known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        candidate_metric_scope={"node_filesystem_free_bytes"},
+        catalog_status_by_metric=CATALOG_STATUS_BY_METRIC,
+    )
+    assert not r.passed
+    assert not r.candidate_scope_violation  # rejected by catalog status, not scope
+    assert "discovered_pending_review" in r.reason
+
+
+def test_multi_metric_scope_enforcement_checks_every_result_not_just_the_first():
+    """Multi-mode: the first result is in scope, the second is not -- the
+    whole contract must fail, flagged as a candidate_scope_violation,
+    with the violating result's index in the reason."""
+    in_scope = _ok_entry(measurement_used={"type": "raw_metric", "name": "node_cpu_seconds_total", "source_metrics": []},
+                          query="node_cpu_seconds_total")
+    out_of_scope = _ok_entry()  # node_load1
+    r = validator.validate_contract(
+        {"mode": "multi", "results": [in_scope, out_of_scope], "synthesis": None},
+        known_metrics=KNOWN_METRICS, known_references=KNOWN_REFS, known_datasources=KNOWN_DS,
+        candidate_metric_scope={"node_cpu_seconds_total"},
+    )
+    assert not r.passed
+    assert r.candidate_scope_violation
+    assert "results[1]" in r.reason and "node_load1" in r.reason
+
+
+def test_derived_measurement_source_metric_outside_scope_is_rejected():
+    """Multi-metric within ONE entry: a derived_measurement's source_metrics
+    are checked against the candidate scope individually, same as
+    known_metrics/catalog-status already do."""
+    known = KNOWN_METRICS | {"node_load5"}
+    entry = _ok_entry(
+        measurement_used={"type": "derived_measurement", "name": "node_load5",
+                           "source_metrics": ["node_cpu_seconds_total"]},
+        query="node_load5 / node_cpu_seconds_total",
+    )
+    r = _validate_with_scope(entry, candidate_metric_scope={"node_load5"}, known_metrics=known)
+    assert not r.passed
+    assert r.candidate_scope_violation
+    assert "node_cpu_seconds_total" in r.reason
+
+
+# -- Batch 2 (Phase 3): candidate-scope enforcement, alert-rule path -----------------
+
+
+def test_alert_metric_in_candidate_scope_passes():
+    entry = _alert_entry()  # measurement_used.name == "node_cpu_seconds_total"
+    r = validator.validate_contract(
+        {"mode": "single", **entry},
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS, known_metrics=KNOWN_METRICS,
+        candidate_metric_scope={"node_cpu_seconds_total"},
+    )
+    assert r.passed, r.reason
+
+
+def test_alert_metric_outside_candidate_scope_is_rejected():
+    entry = _alert_entry()  # measurement_used.name == "node_cpu_seconds_total"
+    r = validator.validate_contract(
+        {"mode": "single", **entry},
+        known_references=KNOWN_REFS, known_datasources=KNOWN_DS, known_metrics=KNOWN_METRICS,
+        candidate_metric_scope={"node_load1"},
+    )
+    assert not r.passed
+    assert r.candidate_scope_violation
+
+
+def test_check_candidate_scope_helper_directly():
+    assert validator._check_candidate_scope(["node_load1"], None).passed
+    assert validator._check_candidate_scope(["node_load1"], set()).passed
+    assert validator._check_candidate_scope(["node_load1"], {"node_load1"}).passed
+    r = validator._check_candidate_scope(["node_load1"], {"node_cpu_seconds_total"})
+    assert not r.passed and r.candidate_scope_violation

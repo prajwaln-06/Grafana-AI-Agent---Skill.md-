@@ -162,3 +162,80 @@ def test_apply_rules_produces_a_valid_catalog_for_the_real_43_metrics():
     assert len(result.metrics) == 43
     for entry in result.metrics:
         assert entry.priority in {p.value for p in Priority}
+
+
+# ---- Batch 2 (Option C): Markdown-Category keyword enrichment -------------
+
+
+def test_generate_keywords_markdown_category_is_additive():
+    """Vendor category is coarse ("CPU"); Markdown category ("CPU
+    Utilization") should contribute an extra "utilization" token on top
+    of -- never instead of -- the base keyword set."""
+    entry = _entry(category="CPU", help_="CPU time in different modes.")
+    base = generate_keywords(entry)
+    enriched = generate_keywords(entry, markdown_category="CPU Utilization")
+    assert "utilization" not in base
+    assert "utilization" in enriched
+    assert set(base) <= set(enriched)
+
+
+def test_generate_keywords_markdown_category_none_is_a_no_op():
+    entry = _entry()
+    assert generate_keywords(entry, markdown_category=None) == generate_keywords(entry)
+
+
+def test_generate_keywords_markdown_category_does_not_duplicate_existing_tokens():
+    entry = _entry(category="CPU Utilization", help_="CPU utilization.")
+    enriched = generate_keywords(entry, markdown_category="CPU Utilization")
+    assert enriched.count("utilization") == 1
+
+
+def test_apply_rules_markdown_category_index_enriches_only_matching_entries():
+    """A metric name present in markdown_category_index gets enrichment;
+    a metric name absent from it (e.g. a vendor-only metric with no
+    Markdown) gets none -- proving the enrichment is optional and never
+    required for an entry to be classified."""
+    catalog = Catalog(
+        catalog_version="1.0", generated_at="t",
+        metrics=(
+            _entry(name="node_cpu_seconds_total", category="CPU",
+                   help_="CPU time in modes."),
+            _entry(name="vendor_only_metric_total", category="Vendor Only",
+                   help_="A vendor-only metric.", reference_path=None),
+        ),
+    )
+    index = {"node_cpu_seconds_total": "CPU Utilization"}
+    result = apply_rules(catalog, markdown_category_index=index)
+
+    enriched_entry = result.get("node_cpu_seconds_total")
+    assert "utilization" in enriched_entry.keywords
+
+    unenriched_entry = result.get("vendor_only_metric_total")
+    # No Markdown category for this metric -> no enrichment tokens beyond
+    # what generate_keywords(entry, None) already produces.
+    assert unenriched_entry.keywords == generate_keywords(unenriched_entry)
+
+
+def test_apply_rules_markdown_category_never_overwrites_catalog_category():
+    """Option C's core invariant: CatalogEntry.category stays the vendor
+    category no matter what the Markdown category enrichment contributes
+    to keywords."""
+    catalog = Catalog(
+        catalog_version="1.0", generated_at="t",
+        metrics=(_entry(name="node_cpu_seconds_total", category="CPU"),),
+    )
+    result = apply_rules(
+        catalog, markdown_category_index={"node_cpu_seconds_total": "CPU Utilization"}
+    )
+    assert result.get("node_cpu_seconds_total").category == "CPU"
+
+
+def test_apply_rules_default_omits_markdown_category_index_unchanged_behavior():
+    """Callers that don't pass markdown_category_index (e.g. every
+    pre-Batch-2 call site) get exactly the pre-Option-C keyword set."""
+    catalog = Catalog(
+        catalog_version="1.0", generated_at="t",
+        metrics=(_entry(category="CPU", help_="CPU time in modes."),),
+    )
+    assert apply_rules(catalog).get("node_cpu_seconds_total").keywords == \
+        generate_keywords(_entry(category="CPU", help_="CPU time in modes."))

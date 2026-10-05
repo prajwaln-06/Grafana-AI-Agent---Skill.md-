@@ -308,12 +308,21 @@ class SkillIndex:
 
         exporter = overview_reference_path.split("/")[-2]
         catalog = load_catalog(self.catalog_path)
+        # Every Catalog metric for this exporter, regardless of whether
+        # reference_path is None. A vendor-sourced metric with no matching
+        # semantic Markdown yet (reference_path=None) is still a real,
+        # catalogued metric -- excluding it here would silently drop it
+        # from known_prometheus_metrics and therefore from Level-1
+        # candidates, label discovery, and the validator's known-metric
+        # gate (see the vendor-source migration's required runtime
+        # compatibility fix). Only .keys() of this dict is used by
+        # app/pipeline.py's known_prometheus_metrics population; a None
+        # value here is never dereferenced as a path.
         return {
             entry.name: entry.reference_path
             for entry in catalog.metrics
-            if entry.exporter == exporter and entry.reference_path
+            if entry.exporter == exporter
         }
-        return metrics
 
 
 # ---- module-level parsing helpers --------------------------------------------
