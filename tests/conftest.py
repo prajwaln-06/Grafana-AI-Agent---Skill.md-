@@ -46,4 +46,6 @@ def settings(skills_root):
         # helper and `real_catalog` fixture, which build a real catalog on
         # purpose for exactly that kind of test).
         catalog_path=skills_root.parent / "tests" / "__no_catalog_for_this_fixture__.json",
+        alert_rule_creation_enabled=False,
+        dependent_query_resolution_enabled=False,
     )

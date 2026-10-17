@@ -972,7 +972,10 @@ handled if one comes back instead — it behaves exactly like §6 already
 describes; if a root part of the compound question needs a human answer,
 this feature detects that and re-resolves the whole question through the
 ordinary flat path instead of executing anything early, so `session_id`
-still means exactly what §4/§6 already say it means.
+still means exactly what §4/§6 already say it means. (If that flat
+re-resolution would itself *execute* — i.e. it answered the dependent part
+with no entity filter — it is discarded and the response is a
+`validation_failed` result instead; §14.3 item 5.)
 
 ### 14.3 What's actually different, mechanically (for you, not the frontend)
 
@@ -989,21 +992,43 @@ exactly like this flag were off. When a genuine dependency IS found:
    this is the one real behavior change worth knowing about operationally:
    with this flag on, some responses do a Prometheus/OpenSearch round-trip
    during pipeline resolution itself, before the usual post-pipeline
-   execution step, rather than only ever once, always after.
+   execution step, rather than only ever once, always after. Both the root
+   call and each dependent call still see the full compound question, so
+   each prompt carries a "STAGE SCOPE" block naming the one intent/reference
+   that call owns and telling it to leave the rest to the other stage. The
+   validator can't enforce that scope itself (its known references/metrics
+   are exporter-wide), so the pipeline separately checks, before executing
+   the root, that it returned exactly one result per root intent and that
+   each result's `reference_used` is the reference that intent was routed
+   to.
 2. Each dependent part is resolved with its own single Generator call,
    told the resolved entity value from its already-executed parent, and
    MUST retain that value as an explicit filter (SKILL.md §13.4) — a
    generated query that doesn't is never sent to Prometheus/OpenSearch at
-   all; it comes back as an ordinary `endpoint_error` (§4.2) instead.
-3. If a dependent's own generation can't be validated, or its parent never
-   produced usable data, that ONE part of the response becomes an ordinary
-   `unsupported_metric` entry (§4.1) explaining why — this never fails the
-   whole response.
+   all; it comes back as an ordinary `endpoint_error` (§4.2) instead. The
+   entity is taken only from a *successful* parent result with **exactly
+   one** series (so the root should be a `topk(1, …)` instant query); a
+   parent with zero or several series resolves nothing — the pipeline never
+   picks one of several.
+3. If a dependent's own generation can't be validated, its contract is
+   multi-result or names a reference other than its own, or its parent never
+   produced a single resolvable entity (failed, empty, several series), that
+   ONE part of the response becomes an ordinary `unsupported_metric` entry
+   (§4.1) explaining why — this never fails the whole response. In the
+   last case the dependent's Generator isn't called at all.
 4. The combined, already-executed response is what the pipeline itself
    returns; the backend's own post-pipeline execution step is skipped for
    this one response (an internal marker the frontend never sees is what
    tells it to skip that step) so nothing is queried against
-   Prometheus/OpenSearch twice.
+   Prometheus/OpenSearch twice. `synthesis` names each measurement, e.g.
+   "node_cpu_seconds_total for node_id=node-00 is 38.7%. node_memory_
+   MemAvailable_bytes for node_id=node-00 is 3.20 GB."
+5. **There is no silent flat fallback.** If the *root* stage can't be
+   trusted (wrong result count, wrong `reference_used`) the response is a
+   single `validation_failed` result (§4.1, treat like `declined`) and
+   nothing is executed. Earlier versions re-resolved the whole question
+   through the flat path in that case, which has no entity filter and
+   produced an every-node memory query with `synthesis: null`.
 
 ### 14.4 Testing this
 
@@ -1014,7 +1039,14 @@ unknown `depends_on` id, a cycle), that the flag being off ignores any
 dependency tagging entirely, a full happy-path staged resolution, the
 "generated query dropped the resolved filter" safety check, a parent that
 fails to execute, and the "a root needs clarification → abandon staging"
-fallback. There is no separate live-testing tool for this feature the way
+fallback. The "Dependency-aware resolution: stage scope, provenance,
+fail-safe" section below it covers the stage-scope prompts, an over-producing
+root, malformed root/dependent contracts, failed/empty/multi-series roots,
+the guarded pause fallback, and the unchanged ordinary path;
+`tests/test_api.py` has one end-to-end run through the HTTP route. The
+Router/Generator there are *scripted*, so they prove the pipeline's
+deterministic guards and prompt scoping, not that a live model follows
+the scoping instruction — that still needs the live check below. There is no separate live-testing tool for this feature the way
 §11.1/§13.2 has one for alert-rule creation — the regression-cases file
 (`evals/regression-cases.md`, §13.1) is the right place to add a few real
 compound questions once you have live Prometheus data with more than one

@@ -257,3 +257,54 @@ def test_pipeline_timeout_is_actually_wired_to_settings():
         with _client() as client:
             r = client.post("/api/v1/query", json={"question": "anything"})
     assert r.status_code == 504
+
+
+def test_dependent_compound_query_returns_filtered_multi_result_with_synthesis_through_the_api(skills_root):
+    """End to end through the real HTTP route and agent (only the LLM and
+    Prometheus are scripted): the response carries both results, the
+    dependent memory query filtered on the node the CPU query returned, a
+    non-null synthesis, no leaked internal marker, and each query ran once
+    (agent.py must not re-execute the already-executed contract)."""
+    from app import label_discovery, llm_client, pipeline, prometheus_client
+    from app.agent import root_agent
+    from tests import test_pipeline as tp
+
+    # The agent's SkillIndex needs a real catalog file; use the committed one
+    # (so this also exercises Level-1 catalog narrowing against the real data).
+    settings = tp._dependency_settings(
+        skills_root, catalog_path=skills_root.parent / "app" / "catalog" / "catalog.json")
+    llm = tp._ScriptedLLM(
+        tp._router_resp(), tp._cpu_contract(),
+        lambda prompt: tp._mem_contract(tp._dependent_filter_from_prompt(prompt)),
+    )
+    root_agent._skill_index = None  # force a load under the patched settings
+    pipeline.reset_catalog_cache()  # module-global cache: don't inherit/leak a catalog across tests
+    try:
+        with patch("app.agent.get_settings", return_value=settings), \
+             patch.object(llm_client, "call_llm_json", new=llm), \
+             patch.object(label_discovery, "discover_label_details_for_metrics", return_value=tp._NODE_LABELS), \
+             patch.object(prometheus_client, "query_instant",
+                           return_value=tp._vector_outcome(("node-00", 38.72))) as inst, \
+             patch.object(prometheus_client, "query_range",
+                           return_value=tp._matrix_outcome("node-00", 3.2 * 1024 ** 3)) as rng:
+            with _client() as client:
+                r = client.post("/api/v1/query", json={"question": tp._Q})
+    finally:
+        root_agent._skill_index = None  # don't leak the patched-settings index into other tests
+        pipeline.reset_catalog_cache()
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["session_id"] is None
+    result = body["result"]
+    assert result["mode"] == "multi" and len(result["results"]) == 2
+    assert pipeline_marker_absent(result)
+    assert result["results"][1]["query"] == 'node_memory_MemAvailable_bytes{node_id="node-00"}'
+    assert [x["execution"]["execution_status"] for x in result["results"]] == ["success", "success"]
+    assert result["synthesis"] and "node-00" in result["synthesis"]
+    assert inst.call_count == 1 and rng.call_count == 1  # no double execution
+
+
+def pipeline_marker_absent(result: dict) -> bool:
+    from app.pipeline import ALREADY_EXECUTED_MARKER
+    return ALREADY_EXECUTED_MARKER not in result

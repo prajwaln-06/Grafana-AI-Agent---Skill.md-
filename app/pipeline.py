@@ -214,18 +214,31 @@ query actually runs.
        via the same `_resolve_matched_group` helper the flat path itself
        now uses (Level-1/2/3 catalog cascade included, verbatim -- this
        refactor changes no behavior for the ordinary path; it only gives
-       the dependency path a reusable entry point).
+       the dependency path a reusable entry point). That call still sees
+       the full compound question, so its prompt carries a STAGE SCOPE
+       block (`_root_stage_scope_text`) naming exactly which intent(s) and
+       reference(s) it owns and that every other part is a later stage's
+       job; each dependent call gets the equivalent
+       (`_dependent_stage_scope_text`). The Validator cannot enforce this
+       scope itself -- its known references/metrics are exporter-wide, so
+       a sibling reference's measurement passes validation inside a
+       root-only call -- hence the deterministic check in step 2.
     2. If that root result needs a human answer before anything can be
        executed (`ambiguous_metric`, `parameter_requires_clarification`,
-       or an alert-rule proposal) -- or its entries can't be confidently
-       matched back to the roots that produced them (`_index_executed_
-       entries` returning `None`) -- abandons the dependency-aware path
-       entirely for this request and re-resolves the FULL matched set
-       through the ordinary flat path instead. This is a hard rule with no
-       exception: the output contract (HANDOFF.md's `session_id` /
-       `result` pairing) promises `result` carries no data while a
-       clarification/confirmation is pending, so nothing may be executed
-       until that's no longer possible.
+       or an alert-rule proposal), nothing is executed and the FULL
+       matched set is re-resolved through the ordinary flat path so the
+       whole response pauses together (the output contract -- HANDOFF.md's
+       `session_id` / `result` pairing -- promises `result` carries no data
+       while a clarification/confirmation is pending). That flat result is
+       returned only if it still pauses or executes nothing; one that would
+       execute is the unfiltered every-instance dependent query this
+       feature exists to prevent, and becomes a `validation_failed` result
+       instead. If the root stage did not honor its scope -- not exactly
+       one result per root, or a result claiming another reference
+       (`_index_executed_entries` returning `None`) -- the request ALSO
+       fails with `validation_failed`, before anything executes. It is
+       never re-resolved through the flat path: that path has no parent
+       context and no entity-filter check.
     3. Otherwise executes the root result itself, in-process
        (`executor.execute_contract`), so `_resolve_dependent_entry` can
        read each dependent's parent's real, already-executed data.
@@ -233,9 +246,14 @@ query actually runs.
        ONE Generator call each (`_run_generator`'s new, purely-additive
        `parent_context_text` parameter carries the parent's resolved
        entity label/value and latest execution value into that one
-       prompt -- see `_summarize_parent_entries_for_prompt`). A dependent
-       whose parent produced no usable data, or whose own generation fails
-       deterministic validation, becomes a plain, pipeline-authored
+       prompt -- see `_summarize_parent_entries_for_prompt`). A parent's
+       entity is resolved only from a successful result with EXACTLY ONE
+       series (`_resolve_parent_entity` -- never an arbitrary pick of
+       several); if any parent is unresolved the dependent's Generator is
+       not even called. A dependent whose parent produced no usable data,
+       whose own generation fails deterministic validation, or whose
+       contract is multi-result or names a reference other than its own,
+       becomes a plain, pipeline-authored
        `unsupported_metric` entry (`_dependency_unresolved_entry` -- the
        same "inject a fixed, already-valid-shape entry" precedent
        `_unmapped_entry_for` already establishes for unresolved topics),
@@ -388,7 +406,8 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
 
 async def _resolve_matched_group(question: str, matched: list[dict], panic_mode: bool, action_intent: str,
                                   unresolved_topics: list[dict], skill_index: SkillIndex, settings: Settings,
-                                  context: PipelineContext, catalog: Catalog | None) -> dict:
+                                  context: PipelineContext, catalog: Catalog | None,
+                                  stage_scope_text: str | None = None) -> dict:
     """The full Generator -> Level-1/2/3 catalog cascade -> deterministic-
     Validator pipeline for one group of matched references, resolved as a
     SINGLE flat Generator call (plus its Level-2/Level-3 retries, per this
@@ -447,6 +466,7 @@ async def _resolve_matched_group(question: str, matched: list[dict], panic_mode:
     contract, merged, validated = await _run_generation_attempt(
         question, matched, panic_mode, generator_context, skill_index, settings, context, action_intent,
         unresolved_topics, candidate_metric_scope=level1_candidate_scope, validator_kwargs=validator_kwargs,
+        stage_scope_text=stage_scope_text,
     )
 
     # Batch 2 (Phase 4): Level-1 -> Level-2 fallback. Only ever considered
@@ -468,6 +488,7 @@ async def _resolve_matched_group(question: str, matched: list[dict], panic_mode:
         contract, merged, validated = await _run_generation_attempt(
             question, matched, panic_mode, level2_context, skill_index, settings, context, action_intent,
             unresolved_topics, candidate_metric_scope=None, validator_kwargs=validator_kwargs,
+            stage_scope_text=stage_scope_text,
         )
 
         # Batch 3 (Phase 5): Level-2 -> Level-3 fallback. The ONLY trigger:
@@ -828,18 +849,135 @@ def _index_executed_entries(executed_contract: dict, roots: list[dict]) -> dict[
     were given to the Generator -- positional mapping is exact. If the
     entry count doesn't match the root count at all, this returns `None`
     rather than guess at a mapping that could silently attribute the wrong
-    data to the wrong dependent -- the caller treats that exactly like a
-    root that needed a pause (falls back to the ordinary flat path across
-    the full matched set)."""
+    data to the wrong dependent.
+
+    Positional mapping is also VERIFIED, not just assumed: any entry that
+    names a `reference_used` must name exactly the reference its positional
+    root was routed to. (The Validator cannot check this on its own -- its
+    `known_references`/`known_metrics` are exporter-wide, so an entry for a
+    sibling reference's measurement, e.g. memory.md's, can still pass
+    validation inside a cpu.md-only root call.)
+
+    A `None` return means the root stage did not honor its scope; the caller
+    (`_run_dependency_aware_pipeline`) fails the request with a
+    deterministic `validation_failed` result -- it never falls back to the
+    flat path, which would resolve the dependent part with no parent
+    context and no entity filter (see that function's docstring). Callable
+    on either the pre-execution or the executed root contract (execution
+    preserves entry order and count)."""
     entries = executed_contract["results"] if executed_contract.get("mode") == "multi" else [executed_contract]
     if len(entries) != len(roots):
         logger.warning(
             "dependent_query_resolution: root Generator call produced %d result object(s) for "
-            "%d root intent(s) -- can't confidently attribute results to intents; falling back "
-            "to the flat path for this question.", len(entries), len(roots),
+            "%d root intent(s) -- can't confidently attribute results to intents.",
+            len(entries), len(roots),
         )
         return None
+    for root, entry in zip(roots, entries):
+        used = entry.get("reference_used") if isinstance(entry, dict) else None
+        if used is not None and used != root.get("reference_path"):
+            logger.warning(
+                "dependent_query_resolution: root intent %r was routed to %r but its generated "
+                "result claims reference_used=%r -- can't attribute it to this intent.",
+                root.get("intent_id"), root.get("reference_path"), used,
+            )
+            return None
     return {root["intent_id"]: entry for root, entry in zip(roots, entries)}
+
+
+def _dependency_stage_failure(reason: str) -> dict:
+    """Deterministic, pipeline-authored failure for a dependency-resolution
+    request whose staged resolution could not be completed SAFELY. Same
+    shape/status as `_package_validated`'s validation failure (the frontend
+    treats `validation_failed` exactly like `declined` -- HANDOFF.md 4.1) --
+    deliberately NOT a silent re-resolution through the flat path, which
+    would answer the dependent part with an unfiltered, every-instance
+    query and present it as the answer."""
+    logger.warning("dependent_query_resolution: failing request safely: %s", reason)
+    return {"mode": "single", "status": INTERNAL_VALIDATION_FAILED_STATUS,
+            "explanation": f"Dependent query resolution could not complete safely: {reason}"}
+
+
+def _contract_has_executable_entry(contract: dict) -> bool:
+    entries = contract.get("results", []) if contract.get("mode") == "multi" else [contract]
+    return any(isinstance(e, dict) and e.get("status") in executor.EXECUTABLE_STATUSES for e in entries)
+
+
+def _root_stage_scope_text(roots: list[dict]) -> str:
+    """Prompt block for the ROOT-stage Generator call. The call still sees
+    the full compound question (it needs it for constraints like
+    "highest"), so it must be told, explicitly, which intent(s) it owns and
+    that the rest is a LATER stage's job -- otherwise SKILL.md Step 3a/3e/6
+    ("identify ALL requested measurements") leads it to answer the
+    dependent half too."""
+    lines = "\n".join(f"- intent {r.get('intent_id')!r} -> {r.get('reference_path')}" for r in roots)
+    n = len(roots)
+    shape = (
+        'mode "single" with that result\'s fields inline (never mode "multi")' if n == 1 else
+        f'mode "multi" with exactly {n} entries in `results`, in the order listed, and `synthesis: null`'
+    )
+    return (
+        "STAGE SCOPE -- ROOT STAGE of dependent query resolution. The question above is COMPOUND, but in "
+        "THIS call you resolve ONLY the following measurement intent(s), each already routed to the "
+        f"reference shown:\n{lines}\n"
+        "Every other part of the question (e.g. a later part that refers back to \"that node\") depends on "
+        "your result and is resolved in a LATER, separate stage after your query has actually run. Do NOT "
+        "build, mention, or return a result for any such part -- not even an unfiltered placeholder. "
+        f"Return exactly {n} result object(s), one per intent listed, as {shape}. Each result's "
+        "`reference_used` MUST be exactly the reference path listed for its intent."
+    )
+
+
+def _dependent_stage_scope_text(dep_matched: dict) -> str:
+    """Prompt block for a DEPENDENT-stage Generator call (see
+    `_root_stage_scope_text` for why this is needed)."""
+    return (
+        "STAGE SCOPE -- DEPENDENT STAGE of dependent query resolution. The question above is COMPOUND, but in "
+        f"THIS call you resolve ONLY intent {dep_matched.get('intent_id')!r} -> {dep_matched.get('reference_path')}. "
+        "The earlier part(s) of the question were already resolved and executed (see the upstream block below, "
+        "if any) -- do NOT build a result for them again. Return exactly ONE result object, mode \"single\" "
+        "(never mode \"multi\"), with `reference_used` exactly "
+        f"{dep_matched.get('reference_path')!r}."
+    )
+
+
+def _resolve_parent_entity(parent_id: str, entry: dict | None) -> tuple[tuple[str, str, object] | None, str | None]:
+    """Deterministically extracts the ONE entity a parent's already-executed
+    result is about, as `((label_key, label_value, latest_value), None)`; or
+    `(None, <prompt line explaining why not>)` when it can't be -- no entry,
+    non-executable/unsuccessful execution, no series, no labels, or MORE
+    THAN ONE series.
+
+    More than one series is deliberately unresolvable: a Prometheus result's
+    series order is arbitrary and unsorted (normalizer.py preserves it), so
+    taking `series[0]` of several would silently pick an arbitrary entity as
+    "the" winner. The root is asked to build a `topk(1, ...)` instant query
+    (`_DEPENDENCY_GENERATOR_ADDENDUM`), but that is only a prompt
+    instruction -- this is the mechanical enforcement of it."""
+    if not entry:
+        return None, f"- Upstream intent '{parent_id}': no result is available for it at all."
+    execution = entry.get("execution") or {}
+    status = entry.get("status")
+    if status not in executor.EXECUTABLE_STATUSES or execution.get("execution_status") != "success":
+        return None, (
+            f"- Upstream intent '{parent_id}': did not produce usable data "
+            f"(status={status!r}, execution_status={execution.get('execution_status')!r}). "
+            "No entity value could be resolved from it automatically."
+        )
+    series = execution.get("series") or []
+    if not series:
+        return None, f"- Upstream intent '{parent_id}': produced no series to resolve an entity value from."
+    if len(series) > 1:
+        return None, (
+            f"- Upstream intent '{parent_id}': returned {len(series)} series, so no single entity could "
+            "be identified from it -- an entity is never picked arbitrarily from several."
+        )
+    labels = series[0].get("labels") or {}
+    key = next((k for k in _STABLE_ENTITY_LABEL_PRIORITY if k in labels), next(iter(labels), None))
+    if key is None:
+        return None, f"- Upstream intent '{parent_id}': its result series carries no labels to join on."
+    latest_point = (series[0].get("points") or [{}])[-1]
+    return (key, labels[key], latest_point.get("value")), None
 
 
 def _summarize_parent_entries_for_prompt(parent_ids: list[str],
@@ -858,38 +996,15 @@ def _summarize_parent_entries_for_prompt(parent_ids: list[str],
     lines: list[str] = []
     resolved_values: dict[str, str] = {}
     for parent_id, entry in zip(parent_ids, parent_entries):
-        if not entry:
-            lines.append(f"- Upstream intent '{parent_id}': no result is available for it at all.")
+        resolved, unresolved_line = _resolve_parent_entity(parent_id, entry)
+        if resolved is None:
+            lines.append(unresolved_line)
             continue
-        execution = entry.get("execution") or {}
-        status = entry.get("status")
-        if status not in executor.EXECUTABLE_STATUSES or execution.get("execution_status") != "success":
-            lines.append(
-                f"- Upstream intent '{parent_id}': did not produce usable data "
-                f"(status={status!r}, execution_status={execution.get('execution_status')!r}). "
-                "No entity value could be resolved from it automatically."
-            )
-            continue
-        series = execution.get("series") or []
-        if not series:
-            lines.append(f"- Upstream intent '{parent_id}': produced no series to resolve an entity value from.")
-            continue
-        if len(series) > 1:
-            logger.info(
-                "dependent_query_resolution: upstream intent %r returned %d series; using the "
-                "first one for entity resolution.", parent_id, len(series),
-            )
-        labels = series[0].get("labels") or {}
-        key = next((k for k in _STABLE_ENTITY_LABEL_PRIORITY if k in labels), next(iter(labels), None))
-        if key is None:
-            lines.append(f"- Upstream intent '{parent_id}': its result series carries no labels to join on.")
-            continue
-        value = labels[key]
+        key, value, latest_value = resolved
         resolved_values[key] = value
-        latest_point = (series[0].get("points") or [{}])[-1]
         lines.append(
             f"- Upstream intent '{parent_id}' resolved: {key}=\"{value}\" (its latest value was "
-            f"{latest_point.get('value')!r}). The query you build below MUST filter on "
+            f"{latest_value!r}). The query you build below MUST filter on "
             f"{key}=\"{value}\" explicitly -- never construct this as an unfiltered query across "
             "every instance the metric reports for."
         )
@@ -975,6 +1090,22 @@ async def _resolve_dependent_entry(question: str, dep_matched: dict, resolved_en
     parent_entries = [resolved_entries_by_id.get(pid) for pid in parent_ids]
     resolved_values, parent_context_text = _summarize_parent_entries_for_prompt(parent_ids, parent_entries)
 
+    if not all(_resolve_parent_entity(pid, e)[0] is not None for pid, e in zip(parent_ids, parent_entries)):
+        # Deterministic, not left to the LLM: with any parent unresolved
+        # there is no entity to filter on, so `_query_retains_entity_filter`
+        # below would be vacuously true and an every-instance query would
+        # run if the Generator ignored the prompt's "unsupported_metric"
+        # instruction. Never call the Generator at all in that case.
+        logger.warning(
+            "dependent_query_resolution: dependent intent %r has an unresolved parent (%s); not "
+            "generating or executing it.", intent_id, parent_context_text,
+        )
+        return _dependency_unresolved_entry(
+            dep_matched,
+            "its earlier result did not resolve to exactly one entity, so this part was not queried "
+            "(it is never run across every instance instead).",
+        )
+
     generator_context = _build_generator_context(
         [dep_matched], skill_index, settings, question=question, catalog=catalog,
     )
@@ -998,6 +1129,7 @@ async def _resolve_dependent_entry(question: str, dep_matched: dict, resolved_en
     raw_contract = await _run_generator(
         question, [dep_matched], panic_mode, generator_context, skill_index, settings, context,
         action_intent=action_intent, parent_context_text=parent_context_text,
+        stage_scope_text=_dependent_stage_scope_text(dep_matched),
     )
     normalized = _normalize_contract_shape(raw_contract)
     validated = validator.validate_contract(
@@ -1019,13 +1151,31 @@ async def _resolve_dependent_entry(question: str, dep_matched: dict, resolved_en
 
     if normalized.get("mode") == "multi":
         # A dependent's own Generator call is scoped to exactly one matched
-        # reference and is expected to resolve to exactly one measurement;
-        # if it still produced a multi-result accumulator, only its first
-        # entry is used -- never silently merged or averaged across
-        # several.
-        entry = dict(normalized["results"][0])
-    else:
-        entry = {k: v for k, v in normalized.items() if k != "mode"}
+        # reference and must resolve to exactly one measurement. A multi
+        # result means it did not honor that scope (typically: it re-built
+        # the upstream part too) -- never guess which entry was the
+        # intended one (the first may well be the upstream measurement).
+        logger.warning(
+            "dependent_query_resolution: dependent intent %r produced a multi-result contract "
+            "(%d entries) for one dependent measurement; rejecting it.",
+            intent_id, len(normalized.get("results", [])),
+        )
+        return _dependency_unresolved_entry(
+            dep_matched, "produced more than one result for a single dependent measurement.",
+        )
+    entry = {k: v for k, v in normalized.items() if k != "mode"}
+    used = entry.get("reference_used")
+    if used is not None and used != dep_matched.get("reference_path"):
+        # Exporter-wide `known_references` (it includes the shared
+        # overview.md) means the Validator alone can't confirm this
+        # result is for the reference this dependent was routed to.
+        logger.warning(
+            "dependent_query_resolution: dependent intent %r was routed to %r but its result claims "
+            "reference_used=%r; rejecting it.", intent_id, dep_matched.get("reference_path"), used,
+        )
+        return _dependency_unresolved_entry(
+            dep_matched, f"claimed an unexpected reference ({used!r}) instead of its routed one.",
+        )
 
     if (entry.get("status") in executor.EXECUTABLE_STATUSES
             and (entry.get("data_source") or "").strip().lower() == "prometheus"
@@ -1079,15 +1229,21 @@ def _describe_entry_for_synthesis(entry: dict) -> str | None:
     if value is None:
         return None
 
-    label = series[0].get("legend_label") or (entry.get("measurement_used") or {}).get("name") or "this metric"
+    legend = series[0].get("legend_label")
     query = entry.get("query")
     metric_name = (entry.get("measurement_used") or {}).get("name") or ""
+    # Name the measurement (not just the entity), otherwise a combined
+    # sentence reads "node_id=node-00 is 38.7%. node_id=node-00 is 3.20 GB."
+    # with no way to tell which number is which.
+    subject = metric_name or "this measurement"
+    if legend and legend != "value":
+        subject += f" for {legend}"
 
     if isinstance(query, str) and _PERCENT_EXPR_RE.search(query):
-        return f"{label} is {value:.1f}%."
+        return f"{subject} is {value:.1f}%."
     if _BYTES_NAME_HINT_RE.search(metric_name):
-        return f"{label} is {_format_bytes(value)}."
-    return f"{label} is {value:g}."
+        return f"{subject} is {_format_bytes(value)}."
+    return f"{subject} is {value:g}."
 
 
 def _format_bytes(value: float) -> str:
@@ -1127,17 +1283,24 @@ async def _run_dependency_aware_pipeline(question: str, matched: list[dict], pla
                                           catalog: Catalog | None) -> dict:
     """Orchestrates the staged lifecycle this module's docstring describes,
     for a question `_extract_dependency_plan` has already confirmed has a
-    genuine, validated dependency. Any point at which executing anything
-    would be premature or unsafe falls back to `_resolve_matched_group`
-    across the FULL original `matched` set -- i.e., exactly the response
-    this question would have gotten with the feature flag off -- rather
-    than ever partially executing a response the frontend isn't expecting
-    data for yet (see `_contract_needs_pause`) or guessing at an
-    entry-to-intent mapping it can't confirm (see `_index_executed_
-    entries`).
+    genuine, validated dependency.
+
+    The ONLY time this re-resolves through the ordinary flat path across
+    the FULL `matched` set is when a root needs a human answer (see
+    `_contract_needs_pause`), because nothing may be executed while a
+    clarification is pending. Even then the flat result is returned only if
+    it still pauses or executes nothing: the flat path knows nothing about
+    the dependency (no parent context, no entity-filter check), so a flat
+    result that WOULD execute is the every-instance dependent query this
+    feature exists to prevent, and is replaced by a deterministic failure.
+
+    Every other problem -- a root stage that did not honor its scope (wrong
+    result count or provenance, see `_index_executed_entries`) -- is a
+    deterministic `validation_failed` result, never a flat fallback.
     """
     root_contract = await _resolve_matched_group(
         question, plan.roots, panic_mode, action_intent, [], skill_index, settings, context, catalog,
+        stage_scope_text=_root_stage_scope_text(plan.roots),
     )
 
     if root_contract.get("status") == INTERNAL_VALIDATION_FAILED_STATUS:
@@ -1150,25 +1313,36 @@ async def _run_dependency_aware_pipeline(question: str, matched: list[dict], pla
         # A root needs clarification or confirmation before ANYTHING may
         # be executed (HANDOFF.md: `result` carries no data while a
         # clarification/confirmation is pending). Never partially execute
-        # -- fall back to the ordinary flat path across the full matched
-        # set instead, exactly as if this feature were off for this
-        # request.
-        return await _resolve_matched_group(
+        # -- re-resolve through the ordinary flat path across the full
+        # matched set so the whole response pauses together, but see this
+        # function's docstring: that flat result may not be allowed to
+        # execute.
+        flat_contract = await _resolve_matched_group(
             question, matched, panic_mode, action_intent, unresolved_topics,
             skill_index, settings, context, catalog,
+        )
+        if (flat_contract.get("status") == INTERNAL_VALIDATION_FAILED_STATUS
+                or _contract_needs_pause(flat_contract)
+                or not _contract_has_executable_entry(flat_contract)):
+            return flat_contract
+        return _dependency_stage_failure(
+            "a part of the question needed clarification, and re-resolving the whole question without "
+            "dependency context would have queried the dependent part for every instance."
+        )
+
+    # Verify, BEFORE executing anything, that the root stage honored its
+    # scope: exactly one result per root, each for its own routed reference.
+    # (The Validator cannot -- see `_index_executed_entries`.)
+    if _index_executed_entries(root_contract, plan.roots) is None:
+        return _dependency_stage_failure(
+            "the root stage did not resolve exactly the measurement(s) assigned to it, so its result "
+            "can't be safely used to resolve the dependent part."
         )
 
     executed_root = executor.execute_contract(root_contract, settings)
     root_entries_by_id = _index_executed_entries(executed_root, plan.roots)
-    if root_entries_by_id is None:
-        # Couldn't confidently attribute root entries back to root
-        # intents (see `_index_executed_entries`'s own docstring) --
-        # fall back exactly as above, rather than risk feeding the wrong
-        # entity value to a dependent query.
-        return await _resolve_matched_group(
-            question, matched, panic_mode, action_intent, unresolved_topics,
-            skill_index, settings, context, catalog,
-        )
+    if root_entries_by_id is None:  # defensive: execution preserves count/order, so not expected
+        return _dependency_stage_failure("the executed root result could not be attributed to its intent(s).")
 
     resolved_entries_by_id: dict[str, dict] = dict(root_entries_by_id)
     for dep_matched in plan.dependent_order:
@@ -1197,7 +1371,8 @@ async def _run_generation_attempt(question: str, matched: list[dict], panic_mode
                                    generator_context: "GeneratorContext", skill_index: SkillIndex,
                                    settings: Settings, context: "PipelineContext", action_intent: str,
                                    unresolved_topics: list[dict], *, candidate_metric_scope: set[str] | None,
-                                   validator_kwargs: dict) -> tuple[dict, dict, "validator.ValidationResult"]:
+                                   validator_kwargs: dict,
+                                   stage_scope_text: str | None = None) -> tuple[dict, dict, "validator.ValidationResult"]:
     """Batch 2 (Phase 4): one full Generator -> normalize -> alert-defaults
     -> merge-unresolved-topics -> validate pass, parameterized only by
     which `GeneratorContext` (Level 1 or Level 2) and which
@@ -1217,7 +1392,7 @@ async def _run_generation_attempt(question: str, matched: list[dict], panic_mode
     never has to validate the same contract twice.
     """
     contract = await _run_generator(question, matched, panic_mode, generator_context, skill_index, settings,
-                                     context, action_intent=action_intent)
+                                     context, action_intent=action_intent, stage_scope_text=stage_scope_text)
     contract = _normalize_contract_shape(contract)
     contract = _apply_alert_rule_defaults(contract, settings)
     merged = _merge_unresolved_topics(contract, unresolved_topics)
@@ -2128,7 +2303,8 @@ def _build_generator_instructions(settings: Settings, action_intent: str) -> str
 async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
                           ctx: GeneratorContext, skill_index: SkillIndex, settings: Settings,
                           context: PipelineContext, action_intent: str = "read_query",
-                          parent_context_text: str | None = None) -> dict:
+                          parent_context_text: str | None = None,
+                          stage_scope_text: str | None = None) -> dict:
     section_headers = ["## 5.", "## 6.", "## 7.", "## 8.", "## 9."]
     if settings.alert_rule_creation_enabled and action_intent == _ALERT_ACTION_INTENT:
         section_headers.append("## 12.")
@@ -2155,6 +2331,12 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
     prompt_parts.append(f"\nUser question: {question}")
     prompt_parts.append(f"\npanic_mode is currently: {panic_mode}")
     prompt_parts.append(f"\naction_intent (from the routing phase): {action_intent!r}")
+    if stage_scope_text:
+        # Dependency-aware compound query resolution ONLY: tells this
+        # call exactly which intent(s) of the (still fully-quoted) compound
+        # question it resolves, and which it must leave to another stage.
+        # None for every ordinary call site, so their prompts are unchanged.
+        prompt_parts.append(f"\n{stage_scope_text}")
     if parent_context_text:
         # Dependency-aware compound query resolution ONLY (see this
         # module's docstring) -- a purely additive block naming this
