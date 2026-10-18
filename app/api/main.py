@@ -22,6 +22,7 @@ from app.api.routes_chat import router as chat_router
 from app.api.routes_health import router as health_router
 from app.api.routes_proposals import router as proposals_router
 from app.api.routes_query import router as query_router
+from app.catalog.runtime import get_structured_catalog
 from app.config import get_settings
 from app.logging_config import configure_logging
 from app.skill_index import SkillIndex, SkillIndexError
@@ -42,6 +43,10 @@ async def lifespan(app: FastAPI):
     except SkillIndexError as e:
         logger.error("Failed to load skill package: %s", e)
         raise
+    # Warm the structured metric catalog cache. Never fatal: it returns None
+    # (and logs a warning) if catalog.json is missing/invalid, and the
+    # pipeline then runs exactly as it did before the catalog existed.
+    get_structured_catalog(settings)
     yield
 
 

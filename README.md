@@ -134,6 +134,8 @@ cd ui && npm run build
 │   ├── pipeline.py          # Router -> Generator -> Validator -> Executor pipeline
 │   ├── label_discovery.py   # Live Prometheus runtime label harvester
 │   ├── validator.py         # Deterministic schema & PromQL validator
+│   ├── catalog.json         # Dashboard UI catalog (served by /api/catalog)
+│   ├── catalog/             # Structured Prometheus metric catalog (catalog.json + retrieval/runtime)
 │   ├── executor.py          # Prometheus / Loki / OpenSearch execution engine
 │   └── grafana_tools/       # FastMCP Grafana dashboard authoring & compilation
 ├── skills/
@@ -164,3 +166,29 @@ cd ui && npm run build
 | `ALERT_RULE_CREATION_ENABLED` | `true` | Enables alert rule proposal and provisioning (§12) |
 | `DEPENDENT_QUERY_RESOLUTION_ENABLED` | `true` | Enables multi-stage chained query resolution (v1.4) |
 | `PIPELINE_TIMEOUT_SECONDS` | `45.0` | Timeout ceiling for LLM and backend query resolution |
+| `CATALOG_PATH` | `app/catalog/catalog.json` | Structured Prometheus metric catalog (**not** the dashboard catalog `app/catalog.json`) |
+| `CATALOG_NARROW_MIN_SCORE` | `2.0` | Minimum catalog search score before ranked candidates are shown to the Generator |
+| `CATALOG_METRIC_STATUS_VALIDATION_ENABLED` | `false` | Reject metrics whose catalog status is `discovered_pending_review` / `rejected` |
+
+---
+
+## 📚 Structured Metric Catalog
+
+There are **two different catalogs** in this repo — do not confuse them:
+
+| File | Used for |
+|---|---|
+| `app/catalog.json` | Dashboard UI catalog served by `GET /api/catalog` (unchanged) |
+| `app/catalog/catalog.json` | Structured Prometheus metric catalog (43 metrics: 16 Node Exporter, 27 DCGM) used by the query pipeline |
+
+`app/grafana_tools/concept_catalog.py` is a third, separate thing (dashboard concept mapping).
+
+How the structured catalog is used (`app/catalog/runtime.py`, wired into `app/pipeline.py`):
+
+* **Candidate retrieval.** For each request — and for each dependency stage separately — a deterministic ranked search over the question suggests metrics. They are intersected with the metrics of the references the Router matched for *that* request/stage, and shown to the Generator as an advisory block.
+* **Authority is unchanged.** Markdown references still define metric semantics; live Prometheus label discovery still defines which label keys exist; the deterministic validator still checks every metric against the opened references.
+* **Fail-safe.** A catalog miss, a low-confidence hit (below `CATALOG_NARROW_MIN_SCORE`), or a missing/malformed `catalog.json` all fall back to the previous behavior. "Not in the catalog" never means "unsupported".
+* **Optional status validation** (`CATALOG_METRIC_STATUS_VALIDATION_ENABLED`, off by default) additionally rejects `discovered_pending_review` / `rejected` metrics for both query and alert-rule results.
+* **Lifecycle.** Loaded once (warmed at startup, otherwise lazily) and cached. `POST /api/v1/admin/reload-skill` (and `root_agent.reload_skill()`) also reloads it; a bad edit keeps the previous good catalog.
+
+Measure retrieval quality with `python -m scripts.evaluate_catalog_retrieval`.

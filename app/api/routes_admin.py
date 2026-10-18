@@ -21,6 +21,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.catalog.runtime import reload_structured_catalog
 from app.config import get_settings
 from app.skill_index import SkillIndex, SkillIndexError
 
@@ -52,6 +53,13 @@ async def reload_skill(request: Request) -> dict:
     request.app.state.skill_index = new_index
     logger.info("Reloaded skill %r version %s (%d routing rows).",
                 new_index.metadata.name, new_index.metadata.version, len(new_index.routing_rows))
+
+    # Refresh the structured metric catalog alongside the skill: its keyword
+    # enrichment reads the skill's Markdown, so the two should not drift.
+    # Only after the skill reload succeeded (a failed skill reload keeps
+    # everything as it was). A catalog problem never fails this endpoint --
+    # reload_structured_catalog keeps the previous good catalog instead.
+    reload_structured_catalog(settings)
     return {
         "status": "reloaded",
         "skill_name": new_index.metadata.name,

@@ -26,6 +26,21 @@ class Settings(BaseSettings):
     skills_root: Path = Field(default=Path("skills"),
                                description="Directory that directly contains SKILL.md.")
 
+    # --- Structured metric catalog ---
+    catalog_path: Path = Field(
+        default=Path("app/catalog/catalog.json"),
+        description="Path to the structured Prometheus metric catalog, separate "
+                    "from the dashboard UI catalog at app/catalog.json.",
+    )
+    catalog_narrow_min_score: float = Field(
+        default=2.0,
+        description="Minimum catalog search score required to narrow metric candidates.",
+    )
+    catalog_metric_status_validation_enabled: bool = Field(
+        default=False,
+        description="When enabled, validate metric approval status against catalog metadata.",
+    )
+
     # --- Backends ---
     prometheus_url: str = Field(default="http://localhost:9090")
     opensearch_url: str = Field(default="http://localhost:9600")

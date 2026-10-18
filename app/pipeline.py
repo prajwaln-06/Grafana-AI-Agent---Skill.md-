@@ -68,6 +68,27 @@ The resulting `status: "alert_rule_proposed"` result is never auto-executed
 only happens via the separate confirmation endpoint in
 app/api/routes_alerts.py, which is this pipeline's sibling, not something
 it calls.
+
+Structured metric catalog (app/catalog/, `settings.catalog_path`): an
+additive retrieval aid for the Generator, wired in at exactly two points and
+nowhere else -- the Router, its gate/alert checks and the Output Contract
+are untouched.
+
+  1. `_build_generator_context` asks app/catalog/runtime.py for ranked
+     candidate metrics for the question, intersected with the metrics of
+     THIS request's (or this dependency stage's) matched references, and
+     `_run_generator` renders them as an advisory prompt block. Because the
+     context is built per stage, root and dependent stages each get
+     candidates scoped to their own references.
+  2. When `catalog_metric_status_validation_enabled` is on (default off),
+     `_validator_kwargs` hands the validator a {metric: catalog_status}
+     lookup so `discovered_pending_review`/`rejected` metrics are rejected.
+
+Markdown references remain authoritative for metric semantics, live label
+discovery remains authoritative for label keys, and a catalog miss, a
+low-confidence hit, or a missing/malformed catalog.json all fall back to the
+exact pre-catalog behavior. This is unrelated to the dashboard catalog
+(app/catalog.json) and the dashboard concept catalog.
 """
 from __future__ import annotations
 
@@ -78,6 +99,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from app import executor, field_discovery, label_discovery, llm_client, validator
+from app.catalog import runtime as catalog_runtime
 from app.config import Settings
 from app.skill_index import SkillIndex
 
@@ -270,22 +292,18 @@ async def _generate_standard_contract(question: str, routed: _RoutedRequest,
                                       context: PipelineContext) -> dict:
     """The legacy one-shot Generator/Validator path, factored without changing it."""
     matched = routed.matched
-    generator_context = _build_generator_context(matched, skill_index, settings)
+    generator_context = _build_generator_context(
+        matched, skill_index, settings, question=_catalog_query_text(question, context)
+    )
     contract = await _run_generator(question, matched, routed.panic_mode, generator_context, skill_index, settings,
                                      context, action_intent=routed.action_intent)
     contract = _normalize_contract_shape(contract)
     contract = _block_disabled_alert_proposals(contract, settings)
     contract = _apply_alert_rule_defaults(contract, settings)
 
-    known_references = set(generator_context.reference_texts.keys()) | set(generator_context.overview_texts.keys())
-    known_datasources = {(m.get("data_source") or "").strip().lower() for m in matched}
-
     return _finalize(
         contract, routed.unresolved_topics,
-        known_metrics=generator_context.known_prometheus_metrics,
-        labels_by_metric=generator_context.labels_by_metric,
-        known_references=known_references,
-        known_datasources=known_datasources,
+        **_validator_kwargs(generator_context, matched),
     )
 
 
@@ -390,7 +408,9 @@ async def _run_staged_dependency_plan(question: str, routed: _RoutedRequest,
                                       settings: Settings, context: PipelineContext) -> PipelineExecutionResult:
     roots = [intent for intent in plan if not intent.depends_on]
     root_matches = [reference for intent in roots for reference in intent.matched_references]
-    root_ctx = _build_generator_context(root_matches, skill_index, settings)
+    root_ctx = _build_generator_context(
+        root_matches, skill_index, settings, question=_catalog_query_text(question, context)
+    )
     root_contract = await _run_generator(
         question, root_matches, routed.panic_mode, root_ctx, skill_index, settings, context,
         action_intent=routed.action_intent,
@@ -430,7 +450,9 @@ async def _run_staged_dependency_plan(question: str, routed: _RoutedRequest,
             completed[intent.intent_id] = _dependency_scope_unavailable_entry(intent)
             continue
 
-        dep_ctx = _build_generator_context(intent.matched_references, skill_index, settings)
+        dep_ctx = _build_generator_context(
+            intent.matched_references, skill_index, settings, question=_catalog_query_text(question, context)
+        )
         dependent_contract = await _run_generator(
             question, intent.matched_references, routed.panic_mode, dep_ctx, skill_index, settings, context,
             action_intent=routed.action_intent,
@@ -463,12 +485,18 @@ async def _run_staged_dependency_plan(question: str, routed: _RoutedRequest,
 
 
 def _validator_kwargs(ctx: GeneratorContext, matched: list[dict]) -> dict:
-    return {
+    kwargs = {
         "known_metrics": ctx.known_prometheus_metrics,
         "labels_by_metric": ctx.labels_by_metric,
         "known_references": set(ctx.reference_texts) | set(ctx.overview_texts),
         "known_datasources": {(item.get("data_source") or "").strip().lower() for item in matched},
     }
+    if ctx.catalog_status_by_metric:
+        # Only present when catalog status validation is enabled AND the
+        # catalog loaded; otherwise the validator call is exactly what it
+        # was before the structured catalog existed.
+        kwargs["catalog_status_by_metric"] = ctx.catalog_status_by_metric
+    return kwargs
 
 
 def _entries_from_contract(contract: dict) -> list[dict]:
@@ -1049,10 +1077,52 @@ class GeneratorContext:
     attributes_by_pattern: dict[str, dict] = field(default_factory=dict)
     labels_block: str = ""
     attributes_block: str = ""
+    # Structured-catalog candidates for THIS request/stage: plain dicts with
+    # only name/type/help/unit (never keywords/status/reference_path/
+    # dimensions), already intersected with `known_prometheus_metrics`.
+    # Empty whenever the catalog is unavailable, missed, or below the
+    # confidence floor -- in which case the Generator prompt has no catalog
+    # block at all. Deliberately does NOT narrow `known_prometheus_metrics`,
+    # so label discovery and known_metrics validation are unaffected.
+    metric_metadata: tuple[dict[str, str | None], ...] = field(default_factory=tuple)
+    # {metric: catalog_status}; populated only when
+    # `catalog_metric_status_validation_enabled` is True and the catalog
+    # loaded. Empty means the validator does no catalog-status checking.
+    catalog_status_by_metric: dict[str, str] = field(default_factory=dict)
+
+
+def _catalog_query_text(question: str, context: PipelineContext) -> str:
+    """The text the structured catalog is searched with. For a clarification
+    follow-up the Generator resolves the FULL combined intent, so retrieval
+    uses the original question plus the clarifying answer, not the bare
+    follow-up (which would almost always miss)."""
+    if context.previous_question and context.clarification_answer:
+        return f"{context.previous_question} {context.clarification_answer}"
+    return question
+
+
+def _apply_structured_catalog(ctx: GeneratorContext, question: str, settings: Settings) -> None:
+    """Fills `ctx.metric_metadata` / `ctx.catalog_status_by_metric` from the
+    structured catalog. Strictly additive and fail-safe: any problem leaves
+    the context exactly as it was before the catalog existed."""
+    try:
+        catalog = catalog_runtime.get_structured_catalog(settings)
+        if catalog is None:
+            return
+        ctx.metric_metadata = catalog_runtime.build_metric_metadata(
+            catalog, question, ctx.known_prometheus_metrics,
+            min_confident_score=settings.catalog_narrow_min_score,
+        )
+        if settings.catalog_metric_status_validation_enabled:
+            ctx.catalog_status_by_metric = catalog_runtime.catalog_status_by_metric(catalog)
+    except Exception:  # noqa: BLE001 - the catalog must never take a request down
+        logger.exception("Structured catalog lookup failed; continuing without catalog metadata.")
+        ctx.metric_metadata = ()
+        ctx.catalog_status_by_metric = {}
 
 
 def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
-                              settings: Settings) -> GeneratorContext:
+                              settings: Settings, question: str = "") -> GeneratorContext:
     ctx = GeneratorContext()
     datasources: set[str] = set()
 
@@ -1097,6 +1167,11 @@ def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
     if "opensearch" in datasources:
         ctx.attributes_by_pattern = field_discovery.discover_attributes_for_all_known_patterns(settings.opensearch_url)
         ctx.attributes_block = field_discovery.format_attributes_for_prompt(ctx.attributes_by_pattern)
+
+    if "prometheus" in datasources and ctx.known_prometheus_metrics:
+        # Scoped to this call's own `matched` references, so each dependency
+        # stage gets candidates (and status data) for its own references only.
+        _apply_structured_catalog(ctx, question, settings)
 
     return ctx
 
@@ -1327,6 +1402,8 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
         prompt_parts.append(f"\n{ctx.labels_block}")
     if ctx.attributes_block:
         prompt_parts.append(f"\n{ctx.attributes_block}")
+    if ctx.metric_metadata:
+        prompt_parts.append(f"\n{catalog_runtime.format_metric_metadata_for_prompt(ctx.metric_metadata)}")
     prompt_parts.append(f"\nUser question: {question}")
     prompt_parts.append(f"\npanic_mode is currently: {panic_mode}")
     prompt_parts.append(f"\naction_intent (from the routing phase): {action_intent!r}")

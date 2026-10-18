@@ -68,6 +68,16 @@ import re
 from dataclasses import dataclass, field
 
 from app import time_utils
+from app.catalog.schema import CatalogStatus
+
+# Structured-catalog statuses that must never be accepted as a query/alert
+# metric merely because the metric appears in catalog.json. Taken from
+# CatalogStatus (app/catalog/schema.py) instead of bare strings so this
+# module and the catalog's own status model cannot silently drift apart.
+_CATALOG_DISALLOWED_STATUSES = {
+    CatalogStatus.DISCOVERED_PENDING_REVIEW.value,
+    CatalogStatus.REJECTED.value,
+}
 
 # ---- public result type -------------------------------------------------------
 
@@ -118,6 +128,7 @@ def validate_contract(
     labels_by_metric: dict[str, list[str] | None] | None = None,
     known_references: set[str] | None = None,
     known_datasources: set[str] | None = None,
+    catalog_status_by_metric: dict[str, str] | None = None,
 ) -> ValidationResult:
     """Validates a full Output Contract response (either `mode: "single"`
     with fields inline, or `mode: "multi"` with a `results` array).
@@ -137,11 +148,20 @@ def validate_contract(
     known_datasources: every data_source string actually in play for this
       request (from the Router's matched_references), so `data_source`
       can't silently smuggle in a value nothing was routed to.
+    catalog_status_by_metric: optional {metric_name: catalog_status} lookup
+      from the structured metric catalog (app/pipeline.py builds it only
+      when `settings.catalog_metric_status_validation_enabled` is True).
+      ADDITIVE ONLY: it can reject a metric whose catalog status is
+      `discovered_pending_review` or `rejected`, but can never make a
+      metric valid that `known_metrics` would reject, and a missing/empty
+      lookup (flag off, catalog unavailable, metric not in the catalog) is
+      treated exactly as before this parameter existed.
     """
     known_metrics = known_metrics or set()
     labels_by_metric = labels_by_metric or {}
     known_references = known_references or set()
     known_datasources = known_datasources or set()
+    catalog_status_by_metric = catalog_status_by_metric or {}
 
     if not isinstance(contract, dict):
         return ValidationResult(False, f"Contract is not a JSON object (got {type(contract).__name__}).")
@@ -156,6 +176,7 @@ def validate_contract(
         result = _validate_entry(
             entry, known_metrics=known_metrics, labels_by_metric=labels_by_metric,
             known_references=known_references, known_datasources=known_datasources,
+            catalog_status_by_metric=catalog_status_by_metric,
         )
         if not result.passed:
             prefix = f"results[{i}]: " if contract.get("mode") == "multi" else ""
@@ -210,14 +231,16 @@ def _extract_entries(contract: dict) -> list[dict] | ValidationResult:
 
 
 def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: dict,
-                     known_references: set[str], known_datasources: set[str]) -> ValidationResult:
+                     known_references: set[str], known_datasources: set[str],
+                     catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
     status = entry.get("status")
     if status not in _VALID_STATUSES:
         return ValidationResult(False, f"Unknown status {status!r}; must be one of {sorted(_VALID_STATUSES)}.")
 
     if status in _EXECUTABLE_STATUSES:
         return _validate_ok_entry(entry, known_metrics=known_metrics, labels_by_metric=labels_by_metric,
-                                   known_references=known_references, known_datasources=known_datasources)
+                                   known_references=known_references, known_datasources=known_datasources,
+                                   catalog_status_by_metric=catalog_status_by_metric)
     if status == "ambiguous_metric":
         return _validate_ambiguous(entry)
     if status == "unsupported_metric":
@@ -230,9 +253,37 @@ def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: d
         return _require_fields(entry, ["requested_action", "explanation"], status)
     if status == "alert_rule_proposed":
         return _validate_alert_rule_proposed(entry, known_references=known_references,
-                                              known_datasources=known_datasources)
+                                              known_datasources=known_datasources,
+                                              catalog_status_by_metric=catalog_status_by_metric)
     return ValidationResult(False, f"No validation rule implemented for status {status!r} -- this is a gap in "
                                     f"validator.py, not necessarily a bad contract; treat as fail-safe.")
+
+
+def _check_catalog_status(metrics_to_check: list[str],
+                           catalog_status_by_metric: dict[str, str]) -> ValidationResult:
+    """Shared by the ordinary query path and the alert-proposal path so the
+    two cannot disagree about whether a pending/rejected catalog metric is
+    allowed.
+
+    Supplements `known_metrics`, never replaces it. Fail-open on
+    unavailability, fail-closed on a real disallowed status: an empty lookup
+    (flag off, catalog failed to load) or a metric the catalog has no entry
+    for means this check has nothing to say and passes -- catalog
+    unavailability must never become a new rejection mode for ordinary
+    query validation.
+    """
+    if not catalog_status_by_metric:
+        return ValidationResult(True)
+    for metric_name in metrics_to_check:
+        status = catalog_status_by_metric.get(metric_name)
+        if status in _CATALOG_DISALLOWED_STATUSES:
+            return ValidationResult(
+                False,
+                f"metric {metric_name!r} has catalog status {status!r}, which is never a valid "
+                f"query/alert metric -- only 'approved'/'approved_unavailable' catalog-status "
+                f"metrics may be used (see app/catalog/schema.py's CatalogStatus model).",
+            )
+    return ValidationResult(True)
 
 
 def _require_fields(entry: dict, fields_: list[str], status: str) -> ValidationResult:
@@ -269,7 +320,8 @@ def _validate_declined(entry: dict) -> ValidationResult:
 
 
 def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
-                                   known_datasources: set[str]) -> ValidationResult:
+                                   known_datasources: set[str],
+                                   catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
     """SKILL.md Section 12 / Section 9's `alert_rule_proposed` status.
 
     This result is NEVER auto-executed -- it's deliberately absent from
@@ -348,6 +400,13 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
                 f"the condition to be derived from that metric's own verified base expression.",
             )
 
+    # Same catalog-status policy as the ordinary query path (one shared
+    # check, so the two paths cannot disagree about pending/rejected metrics).
+    status_result = _check_catalog_status([m for m in [name, *source_metrics] if m],
+                                          catalog_status_by_metric or {})
+    if not status_result.passed:
+        return status_result
+
     # Section 12.4/12.5: threshold and comparison direction are never
     # supplied by a reference file and are never invented -- they must
     # already have come from the user by the time this is validated.
@@ -401,7 +460,8 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
 
 
 def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: dict,
-                        known_references: set[str], known_datasources: set[str]) -> ValidationResult:
+                        known_references: set[str], known_datasources: set[str],
+                        catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
     status = entry["status"]
     warnings: list[str] = []
 
@@ -448,7 +508,8 @@ def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric
     query = entry.get("query")
 
     if data_source == "prometheus":
-        result = _validate_prometheus_entry(entry, query, name, source_metrics, known_metrics, labels_by_metric)
+        result = _validate_prometheus_entry(entry, query, name, source_metrics, known_metrics, labels_by_metric,
+                                            catalog_status_by_metric=catalog_status_by_metric)
         if not result.passed:
             return result
         warnings.extend(result.warnings)
@@ -470,7 +531,8 @@ def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric
 
 
 def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: list[str],
-                                known_metrics: set[str], labels_by_metric: dict) -> ValidationResult:
+                                known_metrics: set[str], labels_by_metric: dict,
+                                catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
     # Section 6 Step 7 sanity pass: shape matches data source.
     if not isinstance(query, str) or not query.strip():
         return ValidationResult(False, "data_source is 'prometheus' but 'query' is not a non-empty PromQL string.")
@@ -492,6 +554,13 @@ def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: li
                     f"measurement_used.name is {metric_name!r} but that metric name does not "
                     f"appear anywhere in the query string {query!r}.",
                 )
+
+    # Structured-catalog status (opt-in; empty lookup => no-op). Runs AFTER
+    # the Metric Directory membership check above: it only ever adds a
+    # rejection for pending/rejected metrics, never relaxes known_metrics.
+    status_result = _check_catalog_status(metrics_to_check, catalog_status_by_metric or {})
+    if not status_result.passed:
+        return status_result
 
     # Time Expression Grammar (Tightened), prometheus-fundamentals.md --
     # SKILL.md §8 "Instant vs. range" / §9 makes `query_type` a required,

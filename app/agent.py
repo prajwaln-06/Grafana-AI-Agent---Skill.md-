@@ -12,6 +12,7 @@ from app.pipeline import (
     run_pipeline,
     synthesize_executed_contract,
 )
+from app.catalog.runtime import reload_structured_catalog
 from app.config import get_settings
 from app import executor
 from app.skill_index import SkillIndex
@@ -203,6 +204,9 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         settings = get_settings()
         new_index = SkillIndex.load(settings.skills_root)
         self._skill_index = new_index
+        # Keep the structured metric catalog consistent with the skill reload
+        # (never raises; a bad catalog edit keeps the previous good one).
+        reload_structured_catalog(settings)
 
     def _needs_clarification(self, contract: dict) -> bool:
         if self._entry_needs_clarification(contract):
