@@ -69,41 +69,69 @@ only happens via the separate confirmation endpoint in
 app/api/routes_alerts.py, which is this pipeline's sibling, not something
 it calls.
 
-Structured metric catalog (app/catalog/, `settings.catalog_path`): an
-additive retrieval aid for the Generator, wired in at exactly two points and
-nowhere else -- the Router, its gate/alert checks and the Output Contract
-are untouched.
+Structured metric catalog (app/catalog/, `settings.catalog_path`), ported
+from `main` and adapted to this Router -> Generator -> Validator -> Executor
+pipeline. It acts at four points; the Output Contract, the alert gates and
+the executor are untouched:
 
-  1. `_build_generator_context` asks app/catalog/runtime.py for ranked
-     candidate metrics for the question, intersected with the metrics of
-     THIS request's (or this dependency stage's) matched references, and
-     `_run_generator` renders them as an advisory prompt block. Because the
-     context is built per stage, root and dependent stages each get
-     candidates scoped to their own references.
-  2. When `catalog_metric_status_validation_enabled` is on (default off),
-     `_validator_kwargs` hands the validator a {metric: catalog_status}
-     lookup so `discovered_pending_review`/`rejected` metrics are rejected.
+  1. Router narrowing (`_run_router`): catalog search trims SKILL.md Section
+     4 to the rows for catalog-suggested references (rows the catalog does
+     not cover are always kept). A miss or low-confidence hit leaves Section
+     4 completely unnarrowed. The Router still makes the routing decision.
+  2. Level 1 (`_build_generator_context`): ranked candidate metrics for the
+     question, intersected with the metrics of THIS request's / THIS
+     dependency stage's matched references, are shown to the Generator and
+     enforced by the validator (`candidate_metric_scope`).
+  3. Level 2 / Level 3 fallback (`_run_candidate_cascade`). Level 2: if the
+     Generator reports `unsupported_metric` or picks a real metric outside
+     the Level-1 candidates (`candidate_scope_violation`), retry ONCE with
+     every metric of the matched reference(s). Level 3: if Level 2 still
+     reports `unsupported_metric`, or a confident catalog hit contradicts the
+     routed reference universe entirely, re-run the full catalog-unnarrowed
+     Router and one unconstrained Generator attempt. Level 3 is final.
+     Dependency-aware stages get Level 1 and Level 2 within their OWN
+     references; Level 3 re-routes the whole question, which would discard
+     the dependency context (and could run the dependent part unfiltered),
+     so a stage never re-routes mid-chain (same rule `main` applies to a
+     dependent intent).
+  4. Optional status validation: when `catalog_metric_status_validation_enabled`
+     is on (default off), `_validator_kwargs` hands the validator a
+     {metric: catalog_status} lookup so `discovered_pending_review` /
+     `rejected` metrics are rejected. It stays active at every level.
 
 Markdown references remain authoritative for metric semantics, live label
 discovery remains authoritative for label keys, and a catalog miss, a
 low-confidence hit, or a missing/malformed catalog.json all fall back to the
-exact pre-catalog behavior. This is unrelated to the dashboard catalog
-(app/catalog.json) and the dashboard concept catalog.
+exact pre-catalog behavior ("not in the catalog" never means "unsupported").
+This is unrelated to the dashboard catalog (app/catalog.json) and the
+dashboard concept catalog. Which level answered, and the candidate names, are
+logged (INFO, `catalog_pipeline:`); response shapes are unchanged.
 """
 from __future__ import annotations
 
 import logging
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 
 from app import executor, field_discovery, label_discovery, llm_client, validator
 from app.catalog import runtime as catalog_runtime
+from app.catalog.schema import Catalog
 from app.config import Settings
 from app.skill_index import SkillIndex
 
 logger = logging.getLogger(__name__)
+
+def _resolve_catalog(settings: Settings, catalog: Catalog | None) -> Catalog | None:
+    """Used ONLY at the two public entry points. An explicit `catalog` is an
+    override (tests / future admin paths); otherwise the cached structured
+    catalog is used. The cached loader never raises: a missing/malformed
+    catalog yields None and every catalog-dependent behavior degrades to its
+    pre-catalog equivalent. Everywhere below the entry points, `catalog=None`
+    means "no catalog for this call" (Level 3 relies on exactly that)."""
+    return catalog if catalog is not None else catalog_runtime.get_structured_catalog(settings)
+
 
 INTERNAL_VALIDATION_FAILED_STATUS = "validation_failed"
 # NOTE: this status is NOT part of SKILL.md Section 9's enum. It's a
@@ -175,24 +203,28 @@ class _RoutedRequest:
 
 
 async def run_pipeline(question: str, skill_index: SkillIndex, settings: Settings,
-                        context: PipelineContext | None = None) -> dict:
+                        context: PipelineContext | None = None,
+                        catalog: Catalog | None = None) -> dict:
     context = context or PipelineContext()
+    # `catalog` is an optional explicit override (tests); ordinary callers
+    # never pass it and get the cached structured catalog.
+    catalog = _resolve_catalog(settings, catalog)
 
-    routed = await _route_request(question, skill_index, settings, context)
+    routed = await _route_request(question, skill_index, settings, context, catalog=catalog)
     if routed.terminal_contract is not None:
         return routed.terminal_contract
-    return await _generate_standard_contract(question, routed, skill_index, settings, context)
+    return await _generate_standard_contract(question, routed, skill_index, settings, context, catalog=catalog)
 
 
 async def _route_request(question: str, skill_index: SkillIndex, settings: Settings,
-                         context: PipelineContext) -> _RoutedRequest:
+                         context: PipelineContext, catalog: Catalog | None = None) -> _RoutedRequest:
     """Runs the common Router/gate portion shared by flat and staged paths.
 
     Keeping this before the feature branch is what retains the Router's
     exactly-once property even for a dependency-aware request.
     """
 
-    router_output = await _run_router(question, skill_index, settings, context)
+    router_output = await _run_router(question, skill_index, settings, context, catalog=catalog)
     unresolved_topics = _clean_unresolved_topics(router_output.get("unresolved_topics"))
 
     if (not settings.alert_rule_creation_enabled
@@ -289,22 +321,233 @@ async def _route_request(question: str, skill_index: SkillIndex, settings: Setti
 
 async def _generate_standard_contract(question: str, routed: _RoutedRequest,
                                       skill_index: SkillIndex, settings: Settings,
-                                      context: PipelineContext) -> dict:
-    """The legacy one-shot Generator/Validator path, factored without changing it."""
-    matched = routed.matched
-    generator_context = _build_generator_context(
-        matched, skill_index, settings, question=_catalog_query_text(question, context)
+                                      context: PipelineContext,
+                                      catalog: Catalog | None = None) -> dict:
+    """The one-shot Generator/Validator path for a flat request, run through
+    the Level 1 -> 2 -> 3 catalog candidate cascade (which degrades to a
+    single ordinary attempt whenever the catalog has nothing to say)."""
+    result = await _run_candidate_cascade(
+        question, routed.matched, routed.panic_mode, routed.action_intent, routed.unresolved_topics,
+        skill_index, settings, context, catalog, allow_level3=True,
     )
-    contract = await _run_generator(question, matched, routed.panic_mode, generator_context, skill_index, settings,
-                                     context, action_intent=routed.action_intent)
+    return result.contract
+
+
+# ---- Catalog candidate cascade: Level 1 -> Level 2 -> Level 3 ----------------
+
+
+@dataclass
+class _CascadeResult:
+    """`contract` is the packaged result (the merged contract, or the
+    `validation_failed` safety net). `ctx` is the Level-1 GeneratorContext the
+    stage started from; Level 2 only ever changes `metric_metadata`, so its
+    validator kwargs are identical and callers may reuse them."""
+    contract: dict
+    ctx: GeneratorContext
+
+
+async def _run_generation_attempt(question: str, matched: list[dict], panic_mode: bool, action_intent: str,
+                                  unresolved_topics: list[dict], ctx: GeneratorContext,
+                                  skill_index: SkillIndex, settings: Settings, context: PipelineContext,
+                                  *, candidate_metric_scope: set[str] | None,
+                                  catalog_status_by_metric: dict[str, str] | None = None,
+                                  resolution_ids: list[str] | None = None,
+                                  resolved_dependencies: list[dict] | None = None,
+                                  ) -> tuple[dict, dict, "validator.ValidationResult"]:
+    """One full Generator -> normalize -> alert gates/defaults -> merge
+    unresolved topics -> deterministic validation pass, parameterized only by
+    which GeneratorContext (Level 1 or 2) and which `candidate_metric_scope`
+    to validate against.
+
+    Returns `(contract, merged, validated)`: `contract` is the raw Generator
+    output after normalization (pre-merge; used to read the Generator's OWN
+    reported status), `merged` has unresolved topics folded in, `validated`
+    is `merged`'s ValidationResult, computed once so nothing validates the
+    same contract twice. These are exactly the steps the pre-catalog flat and
+    staged paths already ran, in the same order."""
+    contract = await _run_generator(
+        question, matched, panic_mode, ctx, skill_index, settings, context,
+        action_intent=action_intent, resolution_ids=resolution_ids,
+        resolved_dependencies=resolved_dependencies,
+    )
     contract = _normalize_contract_shape(contract)
     contract = _block_disabled_alert_proposals(contract, settings)
     contract = _apply_alert_rule_defaults(contract, settings)
-
-    return _finalize(
-        contract, routed.unresolved_topics,
-        **_validator_kwargs(generator_context, matched),
+    merged = _merge_unresolved_topics(contract, unresolved_topics)
+    validated = validator.validate_contract(
+        merged, candidate_metric_scope=candidate_metric_scope,
+        **_validator_kwargs(ctx, matched, catalog_status_by_metric),
     )
+    return contract, merged, validated
+
+
+def _contract_reports_unsupported_metric(contract: dict) -> bool:
+    """True if the Generator's OWN output reported `status:
+    "unsupported_metric"` -- for a single-mode contract or ANY entry of a
+    multi-mode one (a multi-metric question where only the second sub-query
+    was outside the Level-1 candidates must still trigger the retry)."""
+    if not isinstance(contract, dict):
+        return False
+    if contract.get("mode") == "multi":
+        return any(isinstance(r, dict) and r.get("status") == "unsupported_metric"
+                   for r in contract.get("results", []))
+    return contract.get("status") == "unsupported_metric"
+
+
+def _should_fallback_to_level2(merged_contract: dict, validated: "validator.ValidationResult") -> bool:
+    """The two allowed Level-2 triggers, and only these -- never mere
+    question ambiguity, never an LLM confidence score:
+
+      1. The Generator itself reported candidate-scope insufficiency via the
+         existing `unsupported_metric` status (a structurally VALID contract,
+         so `validated.passed` is True and it cannot be seen from `validated`).
+      2. Deterministic validation caught the Generator selecting a real,
+         known metric outside this attempt's candidate scope
+         (`validated.candidate_scope_violation`).
+
+    Unresolved-topic entries are always `unmapped`, never
+    `unsupported_metric`, so inspecting the merged contract is safe."""
+    if validated.passed:
+        return _contract_reports_unsupported_metric(merged_contract)
+    return validated.candidate_scope_violation
+
+
+def _build_level2_generator_context(base_ctx: GeneratorContext, matched: list[dict],
+                                    catalog: Catalog | None) -> GeneratorContext:
+    """Level-2 candidates: Router-selected references -> ALL metrics of those
+    references -> metric_metadata. Touches ONLY `metric_metadata` (every other
+    field, including `known_prometheus_metrics` and `labels_by_metric`, is
+    carried over unchanged), so live label discovery and `known_metrics`
+    validation are unaffected. With no catalog, or nothing matching, this
+    degrades to an empty `metric_metadata` -- no candidate block, never an
+    error."""
+    return replace(
+        base_ctx,
+        metric_metadata=catalog_runtime.build_level2_metric_metadata(
+            catalog, matched, base_ctx.known_prometheus_metrics),
+        reference_universe_mismatch=False,
+    )
+
+
+def _candidate_names(ctx: GeneratorContext) -> list[str]:
+    return [m["name"] for m in ctx.metric_metadata]
+
+
+async def _run_candidate_cascade(question: str, matched: list[dict], panic_mode: bool, action_intent: str,
+                                 unresolved_topics: list[dict], skill_index: SkillIndex, settings: Settings,
+                                 context: PipelineContext, catalog: Catalog | None,
+                                 *, resolution_ids: list[str] | None = None,
+                                 resolved_dependencies: list[dict] | None = None,
+                                 allow_level3: bool, stage_label: str = "flat") -> _CascadeResult:
+    """Generator -> Level 1 -> Level 2 -> (Level 3) -> deterministic validator
+    for ONE group of matched references: a whole flat request, or one
+    dependency stage (root or dependent).
+
+    Level 1 is the catalog-narrowed candidate attempt; it only exists when the
+    catalog gave a confident, in-scope answer. With no Level-1 scope (no
+    catalog, catalog miss, low-confidence hit) this is exactly one ordinary
+    attempt, identical to the pre-catalog pipeline. A catalog miss is never
+    treated as "unsupported".
+
+    `allow_level3=False` for dependency stages: Level 3 re-runs the Router over
+    the WHOLE question, which would discard the stage's dependency context.
+    Stages instead stay inside their own references: a reference-universe
+    mismatch drops the Level-1 scope (behaves like a catalog miss) and a
+    Level-2 result is final."""
+    search_text = _catalog_query_text(question, context)
+    ctx = _build_generator_context(matched, skill_index, settings, question=search_text, catalog=catalog)
+    # Computed once and reused by every level (status validation is orthogonal
+    # to Level 1/2/3 and must stay active at all of them).
+    status_lookup = _catalog_status_lookup(settings, catalog)
+
+    if ctx.reference_universe_mismatch:
+        if allow_level3:
+            logger.info(
+                "catalog_pipeline[%s]: reference-universe mismatch for %r -- skipping Level 1/2, "
+                "going directly to Level 3.", stage_label, question,
+            )
+            return _CascadeResult(
+                await _run_level3_fallback(question, skill_index, settings, context, catalog), ctx)
+        logger.info(
+            "catalog_pipeline[%s]: reference-universe mismatch for %r -- stages never re-route; "
+            "continuing without a Level-1 candidate scope.", stage_label, question,
+        )
+        ctx = replace(ctx, metric_metadata=(), reference_universe_mismatch=False)
+
+    level1_scope = {m["name"] for m in ctx.metric_metadata} or None
+    logger.info("catalog_pipeline[%s]: Level 1 candidates for %r: %s", stage_label, question,
+                _candidate_names(ctx) or "none (no confident in-scope catalog hit)")
+    contract, merged, validated = await _run_generation_attempt(
+        question, matched, panic_mode, action_intent, unresolved_topics, ctx, skill_index, settings, context,
+        candidate_metric_scope=level1_scope, catalog_status_by_metric=status_lookup,
+        resolution_ids=resolution_ids, resolved_dependencies=resolved_dependencies,
+    )
+
+    # Only ever considered when Level 1 was actually active: with no
+    # candidate scope there is nothing narrower to fall back FROM, and a retry
+    # would just repeat the same unconstrained attempt.
+    if level1_scope and _should_fallback_to_level2(merged, validated):
+        logger.info(
+            "catalog_pipeline[%s]: Level-1 candidates %s were insufficient for %r (%s) -- retrying "
+            "once with Level 2 (all metrics of the matched reference(s)).",
+            stage_label, sorted(level1_scope), question,
+            "Generator reported unsupported_metric" if validated.passed else "candidate_scope_violation",
+        )
+        level2_ctx = _build_level2_generator_context(ctx, matched, catalog)
+        contract, merged, validated = await _run_generation_attempt(
+            question, matched, panic_mode, action_intent, unresolved_topics, level2_ctx, skill_index,
+            settings, context, candidate_metric_scope=None, catalog_status_by_metric=status_lookup,
+            resolution_ids=resolution_ids, resolved_dependencies=resolved_dependencies,
+        )
+        # Level 3's ONLY trigger: the Generator's own Level-2 output (already
+        # the broadest candidate set this reference universe offers) still
+        # says `unsupported_metric` -- concrete evidence the request needs a
+        # reference universe Level 1/2 never had. An ordinary Level-2
+        # validation failure (fabricated metric, malformed contract...) is
+        # NOT a Level-3 trigger and is returned as-is.
+        if allow_level3 and _contract_reports_unsupported_metric(contract):
+            logger.info(
+                "catalog_pipeline[%s]: Level 2 still insufficient for %r -- falling back to Level 3 "
+                "(full, catalog-unnarrowed routing pass).", stage_label, question,
+            )
+            return _CascadeResult(
+                await _run_level3_fallback(question, skill_index, settings, context, catalog), ctx)
+        logger.info("catalog_pipeline[%s]: answered at Level 2 for %r.", stage_label, question)
+    else:
+        logger.info("catalog_pipeline[%s]: answered at Level 1 for %r.", stage_label, question)
+
+    return _CascadeResult(_package_validated(merged, validated), ctx)
+
+
+async def _run_level3_fallback(question: str, skill_index: SkillIndex, settings: Settings,
+                               context: PipelineContext, catalog: Catalog | None) -> dict:
+    """The final fallback layer, for a FLAT request only. Reuses the existing
+    routing architecture verbatim: `_route_request` with `catalog=None`, so
+    the Router sees SKILL.md's Section 4 completely unnarrowed, exactly as
+    before the catalog existed. It is the pre-catalog implementation invoked
+    again, not a second implementation -- so a fresh gate_stop, the
+    disabled-alert-creation guards, and a genuine no-match are all handled
+    identically to the first routing pass.
+
+    Exactly one routing pass and one Generator attempt, unconditionally final:
+    the attempt gets no candidate scope (`candidates=False`), so there is
+    nothing for it to violate and nothing left to escalate to. Catalog STATUS
+    validation stays active if enabled (`catalog` is still passed for that):
+    Level 3 must not bypass an independent safety check."""
+    routed = await _route_request(question, skill_index, settings, context, catalog=None)
+    if routed.terminal_contract is not None:
+        return routed.terminal_contract
+    ctx = _build_generator_context(
+        routed.matched, skill_index, settings, question=_catalog_query_text(question, context),
+        catalog=catalog, candidates=False,
+    )
+    _, merged, validated = await _run_generation_attempt(
+        question, routed.matched, routed.panic_mode, routed.action_intent, routed.unresolved_topics,
+        ctx, skill_index, settings, context, candidate_metric_scope=None,
+        catalog_status_by_metric=_catalog_status_lookup(settings, catalog),
+    )
+    logger.info("catalog_pipeline[level3]: answered for %r.", question)
+    return _package_validated(merged, validated)
 
 
 # ---- Dependency-aware compound resolution (feature-flagged) -----------------
@@ -322,6 +565,7 @@ async def run_dependency_aware_pipeline(
     skill_index: SkillIndex,
     settings: Settings,
     context: PipelineContext | None = None,
+    catalog: Catalog | None = None,
 ) -> PipelineExecutionResult:
     """Opt-in staged Router -> Generator -> Validator -> Executor flow.
 
@@ -332,7 +576,8 @@ async def run_dependency_aware_pipeline(
     already-executed values before their own narrower generation/execution.
     """
     context = context or PipelineContext()
-    routed = await _route_request(question, skill_index, settings, context)
+    catalog = _resolve_catalog(settings, catalog)
+    routed = await _route_request(question, skill_index, settings, context, catalog=catalog)
     if routed.terminal_contract is not None:
         return PipelineExecutionResult(routed.terminal_contract)
 
@@ -342,10 +587,11 @@ async def run_dependency_aware_pipeline(
         # the legacy one-shot construction path. agent.py adds best-effort
         # deterministic synthesis only after its ordinary executor pass.
         return PipelineExecutionResult(
-            await _generate_standard_contract(question, routed, skill_index, settings, context)
+            await _generate_standard_contract(question, routed, skill_index, settings, context, catalog=catalog)
         )
 
-    return await _run_staged_dependency_plan(question, routed, plan, skill_index, settings, context)
+    return await _run_staged_dependency_plan(question, routed, plan, skill_index, settings, context,
+                                             catalog=catalog)
 
 
 def _dependency_plan_from_matches(matched: list[dict]) -> list[_IntentPlan] | None:
@@ -405,21 +651,21 @@ def _dependency_plan_from_matches(matched: list[dict]) -> list[_IntentPlan] | No
 
 async def _run_staged_dependency_plan(question: str, routed: _RoutedRequest,
                                       plan: list[_IntentPlan], skill_index: SkillIndex,
-                                      settings: Settings, context: PipelineContext) -> PipelineExecutionResult:
+                                      settings: Settings, context: PipelineContext,
+                                      catalog: Catalog | None = None) -> PipelineExecutionResult:
     roots = [intent for intent in plan if not intent.depends_on]
     root_matches = [reference for intent in roots for reference in intent.matched_references]
-    root_ctx = _build_generator_context(
-        root_matches, skill_index, settings, question=_catalog_query_text(question, context)
+    # Root stage: catalog candidates and the Level 1 -> 2 cascade are scoped
+    # to the ROOT references only. No Level 3 (see module docstring).
+    root_stage = await _run_candidate_cascade(
+        question, root_matches, routed.panic_mode, routed.action_intent, [],
+        skill_index, settings, context, catalog,
+        resolution_ids=[intent.intent_id for intent in roots], allow_level3=False,
+        stage_label="root",
     )
-    root_contract = await _run_generator(
-        question, root_matches, routed.panic_mode, root_ctx, skill_index, settings, context,
-        action_intent=routed.action_intent,
-        resolution_ids=[intent.intent_id for intent in roots],
-    )
-    root_contract = _normalize_contract_shape(root_contract)
-    root_contract = _block_disabled_alert_proposals(root_contract, settings)
-    root_contract = _apply_alert_rule_defaults(root_contract, settings)
-    root_contract = _finalize(root_contract, [], **_validator_kwargs(root_ctx, root_matches))
+    root_ctx = root_stage.ctx
+    root_contract = root_stage.contract
+    status_lookup = _catalog_status_lookup(settings, catalog)
     root_entries_by_id = _stage_entries_by_id(root_contract, {intent.intent_id for intent in roots})
     if root_entries_by_id is None:
         return PipelineExecutionResult(_dependency_validation_failure(
@@ -433,7 +679,7 @@ async def _run_staged_dependency_plan(question: str, routed: _RoutedRequest,
         # flow is active; agent.py will preserve the same session behavior as
         # the flat path.
         return PipelineExecutionResult(_finalize(
-            root_visible_contract, [], **_validator_kwargs(root_ctx, root_matches)
+            root_visible_contract, [], **_validator_kwargs(root_ctx, root_matches, status_lookup)
         ))
 
     executed_roots = executor.execute_contract(_contract_for_entries(root_entries), settings)
@@ -450,21 +696,17 @@ async def _run_staged_dependency_plan(question: str, routed: _RoutedRequest,
             completed[intent.intent_id] = _dependency_scope_unavailable_entry(intent)
             continue
 
-        dep_ctx = _build_generator_context(
-            intent.matched_references, skill_index, settings, question=_catalog_query_text(question, context)
-        )
-        dependent_contract = await _run_generator(
-            question, intent.matched_references, routed.panic_mode, dep_ctx, skill_index, settings, context,
-            action_intent=routed.action_intent,
+        # Dependent stage: its OWN references, its OWN candidate set, and its
+        # own Level 1 -> 2 retry; the resolved parent values travel with every
+        # attempt. Never re-routes mid-chain (no Level 3).
+        dep_stage = await _run_candidate_cascade(
+            question, intent.matched_references, routed.panic_mode, routed.action_intent, [],
+            skill_index, settings, context, catalog,
             resolution_ids=[intent.intent_id],
             resolved_dependencies=_dependency_prompt_data(intent.depends_on, parents),
+            allow_level3=False, stage_label=f"dependent:{intent.intent_id}",
         )
-        dependent_contract = _normalize_contract_shape(dependent_contract)
-        dependent_contract = _block_disabled_alert_proposals(dependent_contract, settings)
-        dependent_contract = _apply_alert_rule_defaults(dependent_contract, settings)
-        dependent_contract = _finalize(
-            dependent_contract, [], **_validator_kwargs(dep_ctx, intent.matched_references)
-        )
+        dependent_contract = dep_stage.contract
         stage_entries = _stage_entries_by_id(dependent_contract, {intent.intent_id})
         if stage_entries is None:
             completed[intent.intent_id] = _dependency_validation_failure_entry(intent)
@@ -484,18 +726,19 @@ async def _run_staged_dependency_plan(question: str, routed: _RoutedRequest,
     return PipelineExecutionResult(synthesize_executed_contract(final_contract), already_executed=True)
 
 
-def _validator_kwargs(ctx: GeneratorContext, matched: list[dict]) -> dict:
+def _validator_kwargs(ctx: GeneratorContext, matched: list[dict],
+                      catalog_status_by_metric: dict[str, str] | None = None) -> dict:
     kwargs = {
         "known_metrics": ctx.known_prometheus_metrics,
         "labels_by_metric": ctx.labels_by_metric,
         "known_references": set(ctx.reference_texts) | set(ctx.overview_texts),
         "known_datasources": {(item.get("data_source") or "").strip().lower() for item in matched},
     }
-    if ctx.catalog_status_by_metric:
+    if catalog_status_by_metric:
         # Only present when catalog status validation is enabled AND the
         # catalog loaded; otherwise the validator call is exactly what it
         # was before the structured catalog existed.
-        kwargs["catalog_status_by_metric"] = ctx.catalog_status_by_metric
+        kwargs["catalog_status_by_metric"] = catalog_status_by_metric
     return kwargs
 
 
@@ -810,6 +1053,15 @@ def _finalize(contract: dict, unresolved_topics: list[dict], **validator_kwargs)
     defense-in-depth check as everything else, at negligible cost."""
     merged = _merge_unresolved_topics(contract, unresolved_topics)
     result = validator.validate_contract(merged, **validator_kwargs)
+    return _package_validated(merged, result)
+
+
+def _package_validated(merged: dict, result: "validator.ValidationResult") -> dict:
+    """Turns an already-computed validation result into the contract the
+    pipeline returns: the merged contract if it passed, otherwise the
+    pipeline-level `validation_failed` safety-net contract. Split out of
+    `_finalize` so the candidate cascade can inspect the ValidationResult
+    (e.g. `candidate_scope_violation`) before deciding whether to retry."""
     if not result.passed:
         logger.warning("Deterministic validation failed for question contract: %s | contract=%r",
                         result.reason, merged)
@@ -1033,14 +1285,30 @@ def _build_router_instructions(settings: Settings) -> str:
 
 
 async def _run_router(question: str, skill_index: SkillIndex, settings: Settings,
-                       context: PipelineContext) -> dict:
+                       context: PipelineContext, catalog: Catalog | None = None) -> dict:
     section_headers = ["## 3.", "## 4.", "## 7."]
     if settings.alert_rule_creation_enabled:
         # Only loaded into the prompt when the deployment has opted in --
         # see _build_router_instructions' docstring for why this mirrors
         # the same "flag off => zero prompt change" guarantee.
         section_headers.append("## 12.")
-    sections = "\n\n".join(skill_index.section(h) for h in section_headers)
+    section_texts = [skill_index.section(h) for h in section_headers]
+    if catalog is not None:
+        # Router narrowing: replace ONLY the "## 4." routing table, in place,
+        # with a per-question-narrowed version. With catalog=None (no/failed
+        # catalog, or Level 3's deliberate catalog-free pass) this branch never
+        # runs and the Router sees the full, unnarrowed table exactly as it
+        # did before the catalog existed. Searched with the full combined
+        # intent for a clarification follow-up (see _catalog_query_text).
+        idx = section_headers.index("## 4.")
+        try:
+            section_texts[idx] = catalog_runtime.maybe_narrow_section4(
+                section_texts[idx], skill_index, catalog, _catalog_query_text(question, context),
+                min_confident_score=settings.catalog_narrow_min_score,
+            )
+        except Exception:  # noqa: BLE001 - the catalog must never take a request down
+            logger.exception("catalog_routing: narrowing failed; using the full Section 4.")
+    sections = "\n\n".join(section_texts)
     prompt_parts = [f"SKILL.md reference sections:\n\n{sections}", f"\nUser question: {question}"]
     if context.previous_question:
         prompt_parts.append(
@@ -1085,10 +1353,11 @@ class GeneratorContext:
     # block at all. Deliberately does NOT narrow `known_prometheus_metrics`,
     # so label discovery and known_metrics validation are unaffected.
     metric_metadata: tuple[dict[str, str | None], ...] = field(default_factory=tuple)
-    # {metric: catalog_status}; populated only when
-    # `catalog_metric_status_validation_enabled` is True and the catalog
-    # loaded. Empty means the validator does no catalog-status checking.
-    catalog_status_by_metric: dict[str, str] = field(default_factory=dict)
+    # Pipeline-internal orchestration signal ONLY (never rendered into the
+    # prompt): True exactly when a CONFIDENT catalog decision's candidates
+    # share zero overlap with `known_prometheus_metrics`. Level 1/2 cannot
+    # recover that by construction, so a flat request goes straight to Level 3.
+    reference_universe_mismatch: bool = False
 
 
 def _catalog_query_text(question: str, context: PipelineContext) -> str:
@@ -1101,28 +1370,50 @@ def _catalog_query_text(question: str, context: PipelineContext) -> str:
     return question
 
 
-def _apply_structured_catalog(ctx: GeneratorContext, question: str, settings: Settings) -> None:
-    """Fills `ctx.metric_metadata` / `ctx.catalog_status_by_metric` from the
-    structured catalog. Strictly additive and fail-safe: any problem leaves
-    the context exactly as it was before the catalog existed."""
+def _apply_structured_catalog(ctx: GeneratorContext, question: str, settings: Settings,
+                              catalog: Catalog | None, candidates: bool = True) -> None:
+    """Fills `ctx.metric_metadata` and the reference-universe-mismatch signal
+    from the structured catalog. Strictly additive and fail-safe: any problem
+    leaves the context exactly as it was before the catalog existed.
+
+    `candidates=False` (Level 3) skips candidate construction entirely. The
+    catalog STATUS lookup is separate (`_catalog_status_lookup`) and travels
+    to the validator, not through this context."""
+    if catalog is None or not candidates:
+        return
     try:
-        catalog = catalog_runtime.get_structured_catalog(settings)
-        if catalog is None:
-            return
-        ctx.metric_metadata = catalog_runtime.build_metric_metadata(
+        outcome = catalog_runtime.build_level1_outcome(
             catalog, question, ctx.known_prometheus_metrics,
             min_confident_score=settings.catalog_narrow_min_score,
         )
-        if settings.catalog_metric_status_validation_enabled:
-            ctx.catalog_status_by_metric = catalog_runtime.catalog_status_by_metric(catalog)
+        ctx.metric_metadata = outcome.metric_metadata
+        ctx.reference_universe_mismatch = outcome.reference_universe_mismatch
     except Exception:  # noqa: BLE001 - the catalog must never take a request down
         logger.exception("Structured catalog lookup failed; continuing without catalog metadata.")
         ctx.metric_metadata = ()
-        ctx.catalog_status_by_metric = {}
+        ctx.reference_universe_mismatch = False
+
+
+def _catalog_status_lookup(settings: Settings, catalog: Catalog | None) -> dict[str, str] | None:
+    """{metric: catalog_status} for the validator, or None. Only built when
+    `catalog_metric_status_validation_enabled` is on (default off) AND a
+    catalog is available; None makes the validator's status check a no-op,
+    identical to before the structured catalog existed. A bad lookup fails
+    open (None): catalog trouble never manufactures a rejection, and never
+    weakens the existing known_metrics/label validation."""
+    if not settings.catalog_metric_status_validation_enabled or catalog is None:
+        return None
+    try:
+        return catalog_runtime.catalog_status_by_metric(catalog)
+    except Exception:  # noqa: BLE001
+        logger.exception("Catalog status lookup failed; status validation skipped for this request.")
+        return None
 
 
 def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
-                              settings: Settings, question: str = "") -> GeneratorContext:
+                              settings: Settings, question: str = "",
+                              catalog: Catalog | None = None,
+                              candidates: bool = True) -> GeneratorContext:
     ctx = GeneratorContext()
     datasources: set[str] = set()
 
@@ -1171,7 +1462,8 @@ def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
     if "prometheus" in datasources and ctx.known_prometheus_metrics:
         # Scoped to this call's own `matched` references, so each dependency
         # stage gets candidates (and status data) for its own references only.
-        _apply_structured_catalog(ctx, question, settings)
+        _apply_structured_catalog(ctx, question, settings, catalog,
+                                  candidates=candidates)
 
     return ctx
 

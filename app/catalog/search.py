@@ -103,6 +103,41 @@ def _tokenize(text: str) -> set[str]:
     return set(_TOKEN_RE.findall(text.lower()))
 
 
+# Generic English function words. They carry no metric meaning, but they DO
+# appear in the free-prose HELP text of nearly every metric ("the", "of",
+# "is", "in"...), so as query tokens they match every entry on incidental
+# overlap alone: measured on this catalog, "What is the weather in Paris"
+# scored 2.1 and "what time is it in Tokyo" scored 5.25 -- above the weakest
+# genuine questions (3.0) and the narrowing confidence floor (2.0), so no
+# threshold can separate them. Removing them from the QUERY side only (field
+# tokens, weights, the threshold and the ranking formula are unchanged) fixes
+# the cause rather than the symptom, with no query-specific exceptions.
+# Deliberately conservative: only closed-class function words (articles,
+# prepositions, conjunctions, pronouns, auxiliaries, wh-words). Content words
+# that also appear in metric vocabulary -- time, used, free, total, available,
+# rate, per, load, memory, node, up... -- are NOT listed.
+_QUERY_STOPWORDS = frozenset(
+    """
+    a an the and or but nor so yet if then than that this these those
+    of in on at by for with without from to into onto over under about
+    as is are was were be been being am do does did done doing have has had
+    having can could will would shall should may might must
+    what which who whom whose when where why how
+    i me my mine we us our ours you your yours he him his she her hers it its
+    they them their theirs there here
+    not no yes please tell show give get let
+    s t
+    """.split()
+)
+
+
+def _tokenize_query(text: str) -> set[str]:
+    """Query tokens with generic function words removed (see
+    `_QUERY_STOPWORDS`). An all-stopword or empty query yields no tokens and
+    therefore a clean catalog miss."""
+    return _tokenize(text) - _QUERY_STOPWORDS
+
+
 @dataclass(frozen=True)
 class SearchResult:
     entry: CatalogEntry
@@ -161,7 +196,7 @@ def search(
     except via the `statuses` allow-list above, which is a status check,
     not a category/priority filter.
     """
-    query_tokens = _tokenize(query)
+    query_tokens = _tokenize_query(query)
     scored: list[SearchResult] = []
     for entry in catalog.metrics:
         if entry.status not in statuses:

@@ -18,10 +18,13 @@ unchanged.
 
 What the structured catalog is for here (and what it is not):
 
-  * It improves METRIC CANDIDATE RETRIEVAL: given the user's question, a
-    deterministic ranked search (app/catalog/search.py) suggests which
-    metrics are most relevant, and the pipeline shows that short list to the
-    Generator.
+  * It improves ROUTING and METRIC CANDIDATE RETRIEVAL: given the user's
+    question, a deterministic ranked search (app/catalog/search.py)
+    (1) narrows which SKILL.md Section 4 routing rows the Router sees
+    (`maybe_narrow_section4`) and (2) suggests which metrics the Generator
+    should choose from (`build_level1_outcome`). The pipeline backs the
+    Generator restriction with a Level 1 -> Level 2 -> Level 3 fallback
+    cascade (app/pipeline.py) so a catalog ranking miss is recoverable.
   * It is NOT a source of metric semantics. The matched Markdown references
     stay authoritative for what a metric means and how to query it.
   * It is NOT a source of label keys. Live Prometheus label discovery
@@ -55,6 +58,7 @@ from app.catalog import search as catalog_search
 from app.catalog.generator import build_markdown_category_index
 from app.catalog.loader import CatalogLoadError, load_catalog
 from app.catalog.schema import Catalog, CatalogEntry, CatalogSchemaError
+from app.skill_index import ROUTING_ROW_RE
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; avoids importing config at module load
     from app.config import Settings
@@ -169,8 +173,8 @@ class NarrowingDecision:
     """Reference-level narrowing result: which reference_paths the catalog
     suggests. Pure data, independent of SkillIndex/Section 4 text, so
     scripts/evaluate_catalog_retrieval.py and tests can exercise the real
-    decision directly. The fullstack pipeline does not use this to alter the
-    Router; it exists for retrieval measurement."""
+    decision directly; the Router narrowing in `maybe_narrow_section4` acts on
+    exactly this decision."""
     confident: bool
     suggested_paths: frozenset[str]
     top_score: float | None
@@ -230,55 +234,105 @@ def metric_metadata_dict(entry: CatalogEntry) -> dict[str, str | None]:
     return {"name": entry.name, "type": entry.type, "help": entry.help, "unit": entry.unit}
 
 
-def build_metric_metadata(catalog: Catalog, question: str, known_prometheus_metrics: set[str],
-                          min_confident_score: float) -> tuple[dict[str, str | None], ...]:
+@dataclass(frozen=True)
+class Level1Outcome:
+    """Result of the Level-1 (catalog-narrowed Generator candidates) lookup.
+
+    An empty `metric_metadata` has two importantly different causes:
+
+      * a catalog miss / low-confidence hit / non-Prometheus request: Level 1
+        simply had no information. `reference_universe_mismatch=False`; the
+        request behaves exactly as if no catalog existed.
+      * a CONFIDENT catalog hit whose candidates share ZERO overlap with the
+        metrics of the references the Router matched: the catalog has an
+        opinion and it contradicts the routed reference universe.
+        `reference_universe_mismatch=True`. Broadening candidates inside that
+        same universe (Level 2) can never recover this, so the pipeline goes
+        straight to Level 3 (a fresh, catalog-unnarrowed routing pass).
+    """
+    metric_metadata: tuple[dict[str, str | None], ...] = ()
+    reference_universe_mismatch: bool = False
+
+
+def build_level1_outcome(catalog: Catalog, question: str, known_prometheus_metrics: set[str],
+                         min_confident_score: float) -> Level1Outcome:
     """Ranked candidate metadata for ONE request/stage.
 
     Candidates are intersected with `known_prometheus_metrics` -- the metrics
     of the reference(s) this specific request or dependency stage actually
     opened. That intersection is the scope boundary: a catalog hit for a
-    metric outside those references (another exporter, another stage's
-    domain) is dropped, never shown. Returns () on a catalog miss, a
-    low-confidence hit, or no in-scope overlap; the caller then keeps its
-    existing, unnarrowed behavior.
+    metric outside those references is never shown to the Generator.
     """
     if not known_prometheus_metrics:
-        return ()
+        return Level1Outcome()
     decision = catalog_metric_candidates(catalog, question, min_confident_score)
     if not decision.confident:
         logger.info(
-            "Catalog: no confident candidates for question %r (top_score=%s, min=%s); "
-            "Generator prompt gets no catalog block.",
+            "catalog_candidates: no confident candidates for question %r (top_score=%s, min=%s); "
+            "Generator prompt gets no candidate block.",
             question, decision.top_score, min_confident_score,
         )
-        return ()
+        return Level1Outcome()
     in_scope = tuple(e for e in decision.candidates if e.name in known_prometheus_metrics)
     if not in_scope:
         logger.info(
-            "Catalog: confident candidates for question %r were all outside this request's "
-            "matched references (top_score=%s); ignoring them.", question, decision.top_score,
+            "catalog_candidates: confident candidates for question %r were entirely outside this "
+            "request's matched references (top_score=%s) -- reference-universe mismatch.",
+            question, decision.top_score,
         )
+        return Level1Outcome(reference_universe_mismatch=True)
+    return Level1Outcome(metric_metadata=tuple(metric_metadata_dict(e) for e in in_scope))
+
+
+def build_metric_metadata(catalog: Catalog, question: str, known_prometheus_metrics: set[str],
+                          min_confident_score: float) -> tuple[dict[str, str | None], ...]:
+    """Candidate metadata only (see `build_level1_outcome` for the full result)."""
+    return build_level1_outcome(catalog, question, known_prometheus_metrics,
+                                min_confident_score).metric_metadata
+
+
+def build_level2_metric_metadata(catalog: Catalog | None, matched: list[dict],
+                                 known_prometheus_metrics: set[str]) -> tuple[dict[str, str | None], ...]:
+    """Level-2 candidates: every catalog metric belonging to the matched
+    reference(s), restricted to `known_prometheus_metrics` as a consistency
+    cross-check (a metric absent from the Metric Directory this request
+    opened is never offered, even if catalog.json lists it under that
+    reference). Returns () if there is no catalog or nothing matches -- i.e.
+    behaviourally identical to no catalog for the retry, never an error."""
+    if catalog is None:
         return ()
-    return tuple(metric_metadata_dict(e) for e in in_scope)
+    by_name: dict[str, dict[str, str | None]] = {}
+    for m in matched:
+        reference_path = m.get("reference_path")
+        if not reference_path:
+            continue
+        for entry in catalog.by_reference_path(reference_path):
+            if entry.name in known_prometheus_metrics and entry.name not in by_name:
+                by_name[entry.name] = metric_metadata_dict(entry)
+    return tuple(by_name.values())
 
 
 def format_metric_metadata_for_prompt(metric_metadata: tuple[dict[str, str | None], ...]) -> str:
-    """Renders candidate metadata as a clearly scoped, advisory Generator
-    prompt block. Advisory on purpose: the list is a retrieval aid, so a
-    metric that is documented in the opened references but absent from the
-    list is still valid -- a catalog ranking miss must not turn a supported
-    metric into `unsupported_metric`."""
+    """Renders candidate metadata as a clearly scoped Generator prompt block.
+
+    Identity/description only, layered ON TOP of the Markdown references
+    (never a replacement for them and never authoritative for query
+    semantics). Wording follows `main`: the list is the set of metrics
+    currently eligible for this attempt, and if none fits the Generator
+    answers `unsupported_metric` -- which the pipeline treats as the signal
+    to retry once with every metric of the matched reference(s) (Level 2),
+    so a narrow candidate list never makes a supported metric unsupported."""
     lines = [
-        "Catalog-ranked candidate metrics for this question, most relevant first "
-        "(structured identity metadata only: name, Prometheus type, unit, HELP text). "
-        "These were already limited to metrics documented in the reference(s) opened "
-        "above. This list is a retrieval aid, not a restriction and not a source of "
-        "semantics: the matched reference Markdown remains authoritative for what each "
-        "metric means, Use-when guidance, confusable-metric distinctions, query "
-        "construction and label keys. Prefer a listed candidate when the Markdown "
-        "confirms it fits the question; if the Markdown shows another metric documented "
-        "in the opened references is the better fit, follow the Markdown. Never use a "
-        "metric that is not documented in the opened references:",
+        "Catalog-identified candidate metrics for this question (structured basic "
+        "identity metadata only -- name, Prometheus type, HELP text, and unit). "
+        "These are the metrics currently eligible for selection for this question. "
+        "This is descriptive/identity information ONLY -- it is not a substitute for "
+        "the matched reference Markdown above, which remains authoritative for "
+        "Use-when guidance, confusable-metric distinctions, query construction, and "
+        "all other semantic interpretation. If, after consulting the Markdown above, "
+        "none of these candidates is actually the right metric for this question, "
+        "respond with status 'unsupported_metric' rather than selecting a metric "
+        "outside this list:",
     ]
     for m in metric_metadata:
         unit = m["unit"] if m["unit"] else "n/a"
@@ -290,3 +344,79 @@ def catalog_status_by_metric(catalog: Catalog) -> dict[str, str]:
     """{metric_name: catalog_status}: the minimal interface the validator
     needs, instead of threading the whole Catalog through validation."""
     return {m.name: m.status for m in catalog.metrics}
+
+
+# ---- Router narrowing of SKILL.md Section 4 -------------------------------------
+
+
+def catalog_covered_reference_paths(catalog: Catalog) -> set[str]:
+    """Every reference_path the catalog has at least one entry for. Section 4
+    rows outside this set (overview.md, *-fundamentals.md, execution-contract,
+    OpenSearch/log rows, any future domain the catalog does not cover yet) are
+    rows the catalog has no opinion about, so they are always kept."""
+    return {m.reference_path for m in catalog.metrics if m.reference_path}
+
+
+def narrow_section4_text(section4_text: str, allowed_reference_paths: set[str]) -> str:
+    """Filters SKILL.md's Section 4 table down to the data rows whose linked
+    reference_path is in `allowed_reference_paths`. Every non-data-row line
+    (headers, intro paragraph, separator row, trailing guidance) is preserved
+    byte-for-byte, and kept rows are the ORIGINAL markdown lines (matched with
+    skill_index.ROUTING_ROW_RE, the regex SkillIndex itself parses Section 4
+    with), so every kept row is identical to what the Router always saw."""
+    kept_lines: list[str] = []
+    for line in section4_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            kept_lines.append(line)
+            continue
+        if stripped.startswith("|---") or stripped.startswith("| ---"):
+            kept_lines.append(line)
+            continue
+        if stripped.lower().startswith("| route when"):
+            kept_lines.append(line)
+            continue
+        m = ROUTING_ROW_RE.match(stripped)
+        if not m:
+            # Not a recognizable routing row: keep rather than risk silently
+            # dropping content this function does not understand.
+            kept_lines.append(line)
+            continue
+        if m.group("link_path").strip() in allowed_reference_paths:
+            kept_lines.append(line)
+        # else: a catalog-covered domain row the catalog did not suggest.
+    return "\n".join(kept_lines)
+
+
+def maybe_narrow_section4(section4_text: str, skill_index, catalog: Catalog, question: str,
+                          min_confident_score: float) -> str:
+    """Narrows Section 4 to catalog-suggested rows for this question, with
+    three independent safety nets, any one of which alone guarantees "never
+    narrow away something that might matter":
+
+      1. Only rows whose reference_path the catalog covers can be dropped.
+         Every other row is always kept (the catalog has no opinion on them).
+      2. A catalog MISS returns `section4_text` unchanged. A miss is never
+         converted into "unsupported".
+      3. A LOW-CONFIDENCE hit (best score below `min_confident_score`) is
+         treated exactly like a miss.
+
+    The Router still decides; the catalog only trims what it is shown.
+    """
+    decision = catalog_narrowing_candidates(catalog, question, min_confident_score)
+    if not decision.confident:
+        logger.info(
+            "catalog_routing: no confident candidates for question %r (top_score=%s, min=%s); "
+            "using the full, unnarrowed Section 4.",
+            question, decision.top_score, min_confident_score,
+        )
+        return section4_text
+    uncovered = set(skill_index.reference_paths()) - catalog_covered_reference_paths(catalog)
+    allowed = set(decision.suggested_paths) | uncovered
+    narrowed = narrow_section4_text(section4_text, allowed)
+    logger.info(
+        "catalog_routing: narrowed Section 4 for question %r -- catalog-suggested=%s, "
+        "always-kept (uncovered)=%s, top_score=%s",
+        question, sorted(decision.suggested_paths), sorted(uncovered), decision.top_score,
+    )
+    return narrowed

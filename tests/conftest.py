@@ -30,4 +30,14 @@ def settings(skills_root):
         skills_root=skills_root,
         prometheus_url="http://localhost:9090",
         opensearch_url="http://localhost:9600",
+        # The structured metric catalog participates in the normal pipeline by
+        # default (Router narrowing + Level 1/2/3), so ordinary tests that use
+        # mocked Router/Generator responses and do not care about it would
+        # otherwise pick up the real, committed app/catalog/catalog.json and
+        # get catalog-driven retries layered onto their canned LLM replies.
+        # Point at a path that can never exist so the catalog degrades to
+        # "unavailable" (logged once) and those tests stay deterministic and
+        # catalog-free. Catalog tests opt in explicitly (see
+        # tests/test_pipeline_catalog_integration.py's `_settings`/`real_catalog`).
+        catalog_path=skills_root.parent / "tests" / "__no_catalog_for_this_fixture__.json",
     )

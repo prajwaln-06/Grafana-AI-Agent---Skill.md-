@@ -189,16 +189,50 @@ def test_candidate_metadata_exposes_only_identity_fields(catalog):
     assert md and set(md[0]) == {"name", "type", "help", "unit"}
 
 
-def test_prompt_block_is_advisory_and_leaks_no_internal_catalog_fields(catalog):
+def test_prompt_block_states_candidates_are_eligible_and_leaks_no_internal_catalog_fields(catalog):
     md = rt.build_metric_metadata(catalog, "GPU temperature",
                                   {"DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_MEMORY_TEMP"}, MIN_SCORE)
     block = rt.format_metric_metadata_for_prompt(md)
     for m in md:
         assert f"- {m['name']} (type: {m['type']}" in block
-    assert "not a restriction" in block
-    assert "reference Markdown remains authoritative" in block
+    # Restriction wording (as on `main`): eligible set, Markdown still authoritative, and the
+    # escape hatch that the pipeline turns into a Level-2 retry.
+    assert "currently eligible for selection" in block
+    assert "respond with status 'unsupported_metric'" in block
+    assert "reference Markdown above, which remains authoritative" in block
     for leaked in ("reference_path", "keywords", "priority", "approved", "dimensions"):
         assert leaked not in block
+
+
+def test_level1_outcome_distinguishes_a_miss_from_a_reference_universe_mismatch(catalog):
+    gpu = {"DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_MEMORY_TEMP"}
+    hit = rt.build_level1_outcome(catalog, "GPU temperature", gpu, MIN_SCORE)
+    assert hit.metric_metadata and hit.reference_universe_mismatch is False
+
+    miss = rt.build_level1_outcome(catalog, "zzz qqq xyzzy", gpu, MIN_SCORE)
+    assert miss.metric_metadata == () and miss.reference_universe_mismatch is False
+
+    # A CONFIDENT catalog hit whose candidates share nothing with the routed universe.
+    mismatch = rt.build_level1_outcome(catalog, "GPU temperature", {"node_load1"}, MIN_SCORE)
+    assert mismatch.metric_metadata == () and mismatch.reference_universe_mismatch is True
+
+    # No Prometheus universe at all (e.g. an OpenSearch-only request): no opinion, never a mismatch.
+    none = rt.build_level1_outcome(catalog, "GPU temperature", set(), MIN_SCORE)
+    assert none.metric_metadata == () and none.reference_universe_mismatch is False
+
+
+def test_level2_candidates_are_the_matched_references_metrics_within_the_known_universe(catalog):
+    cpu_ref = {"reference_path": "references/node-exporter/cpu.md"}
+    mem_ref = {"reference_path": "references/dcgm-exporter/memory.md"}
+    known = {e.name for e in catalog.metrics}
+    names = [m["name"] for m in rt.build_level2_metric_metadata(catalog, [cpu_ref, mem_ref], known)]
+    assert names == [e.name for e in catalog.by_reference_path(cpu_ref["reference_path"])] + \
+        [e.name for e in catalog.by_reference_path(mem_ref["reference_path"])]
+    # Restricted to the opened Metric Directory, deduplicated, tolerant of junk input.
+    assert [m["name"] for m in rt.build_level2_metric_metadata(catalog, [cpu_ref, cpu_ref], {"node_load1"})] \
+        == ["node_load1"]
+    assert rt.build_level2_metric_metadata(None, [cpu_ref], known) == ()
+    assert rt.build_level2_metric_metadata(catalog, [{"no": "path"}], known) == ()
 
 
 def test_prompt_block_renders_missing_unit_as_n_a():
@@ -211,3 +245,68 @@ def test_prompt_block_renders_missing_unit_as_n_a():
 def test_status_lookup_covers_every_catalog_metric(catalog):
     status = rt.catalog_status_by_metric(catalog)
     assert len(status) == 43 and set(status.values()) == {"approved"}
+
+
+# ---- narrowing false positives: measured behaviour on the real catalog -----------------
+
+OFF_TOPIC = [
+    "What is the weather in Paris",
+    "What is the weather in Paris today?",
+    "Tell me a joke",
+    "What is the capital of France?",
+    "Who won the world cup?",
+    "what is the stock price of Apple",
+    "Is it going to rain tomorrow?",
+    "book me a flight to Delhi",
+]
+
+
+@pytest.mark.parametrize("question", OFF_TOPIC)
+def test_off_topic_questions_are_clean_misses_not_confident_narrowing(catalog, question):
+    """Regression for a measured false positive: 'What is the weather in Paris'
+    scored 2.1 (>= the 2.0 floor) purely from function words ('what', 'is',
+    'the', 'in') matching metric HELP prose. With function words ignored on
+    the query side these are true catalog misses (no candidates at all), so
+    the pipeline keeps the full Section 4 and gives the Generator no block."""
+    assert rt.catalog_narrowing_candidates(catalog, question, MIN_SCORE).confident is False
+    assert rt.catalog_metric_candidates(catalog, question, MIN_SCORE).candidates == ()
+    known = {e.name for e in catalog.metrics}
+    out = rt.build_level1_outcome(catalog, question, known, MIN_SCORE)
+    assert out.metric_metadata == () and out.reference_universe_mismatch is False
+
+
+@pytest.mark.parametrize("question, expected_first", [
+    ("What is the CPU utilization?", "node_cpu_seconds_total"),
+    ("How much memory is available?", "node_memory_MemAvailable_bytes"),
+    ("What is the GPU temperature?", "DCGM_FI_DEV_GPU_TEMP"),
+])
+def test_clear_cpu_memory_and_gpu_questions_still_narrow_with_the_right_metric_on_top(
+        catalog, question, expected_first):
+    decision = rt.catalog_metric_candidates(catalog, question, MIN_SCORE)
+    assert decision.confident and decision.top_score >= MIN_SCORE
+    assert decision.candidates[0].name == expected_first
+
+
+def test_multi_metric_question_gets_candidates_for_every_part(catalog):
+    names = {e.name for e in rt.catalog_metric_candidates(
+        catalog, "CPU utilization and GPU temperature", MIN_SCORE).candidates}
+    assert "node_cpu_seconds_total" in names and "DCGM_FI_DEV_GPU_TEMP" in names
+
+
+def test_ambiguous_question_is_confident_but_spans_both_exporters(catalog):
+    decision = rt.catalog_metric_candidates(catalog, "memory usage", MIN_SCORE)
+    exporters = {e.exporter for e in decision.candidates}
+    assert decision.confident and exporters == {"node-exporter", "dcgm-exporter"}
+
+
+def test_every_project_question_still_clears_the_confidence_floor(catalog):
+    """The stopword fix must not cost genuine questions: all 46 questions the
+    retrieval evaluation takes from the vendor document stay confident."""
+    from scripts.evaluate_catalog_retrieval import QUESTION_SET
+
+    weak = []
+    for item in QUESTION_SET:
+        question = item[0] if isinstance(item, tuple) else item.question
+        if not rt.catalog_narrowing_candidates(catalog, question, MIN_SCORE).confident:
+            weak.append(question)
+    assert weak == []

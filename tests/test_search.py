@@ -216,3 +216,29 @@ def test_real_catalog_nvlink_errors_question_retrieves_nvlink_health_metrics():
 def test_real_catalog_unrelated_query_is_a_catalog_miss():
     catalog = _real_catalog()
     assert search(catalog, "quarterly sales revenue forecast") == []
+
+
+# ---- query-side function words ------------------------------------------------------
+
+
+def test_function_words_alone_never_match_anything():
+    from app.catalog.search import _tokenize_query
+
+    assert _tokenize_query("What is the weather in Paris") == {"weather", "paris"}
+    entries = [_entry("node_cpu_seconds_total", help="The total CPU time spent in each mode of the system.")]
+    cat = Catalog(catalog_version="1.0", generated_at="t", metrics=tuple(entries))
+    # Every word of this query occurs in the HELP text above, but they are all function words.
+    assert search(cat, "what is the of in", top_n=10) == []
+
+
+def test_content_words_that_overlap_metric_vocabulary_are_not_treated_as_stopwords():
+    from app.catalog.search import _QUERY_STOPWORDS, _tokenize_query
+
+    for word in ("time", "used", "free", "total", "available", "rate", "per", "load", "memory", "node", "up"):
+        assert word not in _QUERY_STOPWORDS
+    assert {"cpu", "time", "used"} <= _tokenize_query("how much CPU time is used")
+
+
+def test_a_question_made_only_of_function_words_is_a_clean_miss():
+    cat = Catalog(catalog_version="1.0", generated_at="t", metrics=(_entry("node_load1", help="1m load average"),))
+    assert search(cat, "what is it", top_n=5) == []

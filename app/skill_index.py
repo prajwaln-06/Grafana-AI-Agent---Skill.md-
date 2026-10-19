@@ -20,6 +20,7 @@ this module is a thin, generic reader of it.
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -98,11 +99,16 @@ class SkillIndex:
     raw_text: str
     metadata: SkillMetadata
     routing_rows: list[RoutingRow] = field(default_factory=list)
+    # Structured metric catalog consulted by `metric_directory` ONLY when an
+    # exporter overview carries no legacy Metric Directory table (a skill
+    # package migrated to catalog-backed overviews). Distinct from the
+    # dashboard catalog app/catalog.json.
+    catalog_path: Path | None = None
 
     # ---- construction ----------------------------------------------------
 
     @classmethod
-    def load(cls, skills_root: Path) -> "SkillIndex":
+    def load(cls, skills_root: Path, catalog_path: Path | None = None) -> "SkillIndex":
         skill_md_path = skills_root / "SKILL.md"
         if not skill_md_path.exists():
             raise SkillIndexError(
@@ -126,6 +132,7 @@ class SkillIndex:
             raw_text=raw_text,
             metadata=metadata,
             routing_rows=routing_rows,
+            catalog_path=catalog_path or skills_root.parent / "app" / "catalog" / "catalog.json",
         )
         index.validate()
         return index
@@ -277,7 +284,19 @@ class SkillIndex:
         {metric_name: domain_file_reference_path}. Used by label_discovery.py
         to know which metric names to verify labels for -- never used to
         make routing/selection decisions itself; that stays the LLM's job
-        per SKILL.md §6 Step 3, this is purely a lookup aid."""
+        per SKILL.md §6 Step 3, this is purely a lookup aid.
+
+        The legacy table (this skill package's overviews still carry one) and
+        the structured catalog are UNIONED: the catalog only ever ADDS metrics
+        for this exporter, never removes any. That keeps every catalogued
+        metric -- including a vendor-sourced one with no Markdown yet
+        (reference_path None) -- a known metric for label discovery, the
+        validator's known-metric gate and Level-1 candidates, and also covers
+        a skill package migrated to catalog-backed overviews with no table at
+        all. Today the two sets are identical, so this changes nothing for the
+        current package. A missing or invalid catalog contributes nothing
+        (never raises into a request); a catalog metric's status is enforced
+        separately by the opt-in status validation, not here."""
         text = self.read_reference(overview_reference_path)
         overview_dir = "/".join(overview_reference_path.split("/")[:-1])
         metrics: dict[str, str] = {}
@@ -297,7 +316,48 @@ class SkillIndex:
                 if m:
                     metric_name, domain_file = m.group(1), m.group(2)
                     metrics[metric_name] = f"{overview_dir}/{domain_file}" if overview_dir else domain_file
+        if self.catalog_path is None:
+            return metrics
+        exporter = overview_reference_path.split("/")[-2]
+        for name, reference_path in _catalog_metrics_for_exporter(self.catalog_path, exporter).items():
+            metrics.setdefault(name, reference_path)
         return metrics
+
+
+# ---- structured-catalog metric lookup (cached) ---------------------------------
+
+_catalog_metrics_cache: dict[tuple[str, int, int], dict[str, dict[str, str | None]]] = {}
+_catalog_metrics_lock = threading.Lock()
+
+
+def _catalog_metrics_for_exporter(catalog_path: Path, exporter: str) -> dict[str, str | None]:
+    """{metric_name: reference_path | None} for one exporter, from the
+    structured catalog. Parsed once per catalog FILE VERSION (keyed on path,
+    mtime and size), so a request never re-reads the file but an edited
+    catalog is still picked up. Any problem (missing/invalid file) yields {}:
+    the catalog is additive and must never break a request."""
+    try:
+        st = Path(catalog_path).stat()
+        key = (str(catalog_path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    with _catalog_metrics_lock:
+        by_exporter = _catalog_metrics_cache.get(key)
+        if by_exporter is None:
+            try:
+                from app.catalog.loader import load_catalog
+
+                catalog = load_catalog(Path(catalog_path))
+            except Exception:  # noqa: BLE001
+                return {}
+            by_exporter = {}
+            for entry in catalog.metrics:
+                by_exporter.setdefault(entry.exporter, {})[entry.name] = entry.reference_path
+            # Drop stale versions of the same path so the cache cannot grow.
+            for stale in [k for k in _catalog_metrics_cache if k[0] == key[0]]:
+                del _catalog_metrics_cache[stale]
+            _catalog_metrics_cache[key] = by_exporter
+    return dict(by_exporter.get(exporter, {}))
 
 
 # ---- module-level parsing helpers --------------------------------------------
