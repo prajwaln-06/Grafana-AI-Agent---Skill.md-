@@ -648,7 +648,7 @@ def test_alert_rule_proposed_gets_default_folder_and_null_datasource_uid_injecte
         "explanation": "Derived from the verified idle-based CPU utilization expression. Proposal only.",
     }
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
-         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_cpu_seconds_total": []}):
+         patch.object(label_discovery, "discover_labels_for_metrics", return_value={"node_cpu_seconds_total": ["mode"]}):
         result = _run(pipeline.run_pipeline("alert me if CPU exceeds 90% for 5m", skill_index, enabled))
 
     assert result["status"] == "alert_rule_proposed"

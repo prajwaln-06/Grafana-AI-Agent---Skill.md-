@@ -87,6 +87,14 @@ class ValidationResult:
     passed: bool
     reason: str = ""
     warnings: list[str] = field(default_factory=list)
+    # Set True ONLY by `_check_candidate_scope`'s failure path -- never by any
+    # other check. Lets app/pipeline.py's Level-1 -> Level-2 fallback tell
+    # "the Generator picked a real, known metric that just wasn't in THIS
+    # attempt's narrower candidate scope" (retryable with a broader
+    # GeneratorContext) from every other validation failure (a fabricated
+    # metric, a malformed contract, an invented label key...), none of which
+    # a broader candidate scope would ever fix.
+    candidate_scope_violation: bool = False
 
 
 # ---- constants mirroring SKILL.md Section 9's closed enums --------------------
@@ -129,6 +137,7 @@ def validate_contract(
     known_references: set[str] | None = None,
     known_datasources: set[str] | None = None,
     catalog_status_by_metric: dict[str, str] | None = None,
+    candidate_metric_scope: set[str] | None = None,
 ) -> ValidationResult:
     """Validates a full Output Contract response (either `mode: "single"`
     with fields inline, or `mode: "multi"` with a `results` array).
@@ -156,6 +165,12 @@ def validate_contract(
       metric valid that `known_metrics` would reject, and a missing/empty
       lookup (flag off, catalog unavailable, metric not in the catalog) is
       treated exactly as before this parameter existed.
+    candidate_metric_scope: optional set of metric names the Generator was
+      told were its eligible candidates for THIS attempt (Level 1). A
+      selected metric outside it fails with `candidate_scope_violation=True`
+      -- a retryable failure, distinct from fabrication. None/empty (no
+      catalog, catalog miss, Level 2/3) is fail-open: this check passes.
+      Never relaxes `known_metrics`.
     """
     known_metrics = known_metrics or set()
     labels_by_metric = labels_by_metric or {}
@@ -177,10 +192,12 @@ def validate_contract(
             entry, known_metrics=known_metrics, labels_by_metric=labels_by_metric,
             known_references=known_references, known_datasources=known_datasources,
             catalog_status_by_metric=catalog_status_by_metric,
+            candidate_metric_scope=candidate_metric_scope,
         )
         if not result.passed:
             prefix = f"results[{i}]: " if contract.get("mode") == "multi" else ""
-            return ValidationResult(False, f"{prefix}{result.reason}")
+            return ValidationResult(False, f"{prefix}{result.reason}",
+                                    candidate_scope_violation=result.candidate_scope_violation)
         warnings.extend(result.warnings)
 
     return ValidationResult(True, warnings=warnings)
@@ -232,7 +249,8 @@ def _extract_entries(contract: dict) -> list[dict] | ValidationResult:
 
 def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: dict,
                      known_references: set[str], known_datasources: set[str],
-                     catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
+                     catalog_status_by_metric: dict[str, str] | None = None,
+                     candidate_metric_scope: set[str] | None = None) -> ValidationResult:
     status = entry.get("status")
     if status not in _VALID_STATUSES:
         return ValidationResult(False, f"Unknown status {status!r}; must be one of {sorted(_VALID_STATUSES)}.")
@@ -240,7 +258,8 @@ def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: d
     if status in _EXECUTABLE_STATUSES:
         return _validate_ok_entry(entry, known_metrics=known_metrics, labels_by_metric=labels_by_metric,
                                    known_references=known_references, known_datasources=known_datasources,
-                                   catalog_status_by_metric=catalog_status_by_metric)
+                                   catalog_status_by_metric=catalog_status_by_metric,
+                                   candidate_metric_scope=candidate_metric_scope)
     if status == "ambiguous_metric":
         return _validate_ambiguous(entry)
     if status == "unsupported_metric":
@@ -254,9 +273,43 @@ def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: d
     if status == "alert_rule_proposed":
         return _validate_alert_rule_proposed(entry, known_references=known_references,
                                               known_datasources=known_datasources,
-                                              catalog_status_by_metric=catalog_status_by_metric)
+                                              known_metrics=known_metrics,
+                                              labels_by_metric=labels_by_metric,
+                                              catalog_status_by_metric=catalog_status_by_metric,
+                                              candidate_metric_scope=candidate_metric_scope)
     return ValidationResult(False, f"No validation rule implemented for status {status!r} -- this is a gap in "
                                     f"validator.py, not necessarily a bad contract; treat as fail-safe.")
+
+
+def _check_candidate_scope(metrics_to_check: list[str],
+                            candidate_metric_scope: set[str] | None) -> ValidationResult:
+    """Deterministic enforcement of `GeneratorContext.metric_metadata` as a
+    candidate-selection boundary for THIS generation attempt: if the Generator
+    was told its eligible candidates were {A, B}, it must not successfully
+    select C even though C is a perfectly real, `known_metrics`-valid metric.
+
+    A separate check from `known_metrics` (exists in a Metric Directory this
+    request opened?) and from `_check_catalog_status` (is its catalog status
+    usable?) so the pipeline's fallback can tell which one failed: only a
+    candidate-scope failure is Level-2-retryable; a fabricated or
+    pending/rejected metric never is, however much broader the scope gets.
+
+    Fail-open on an absent/empty scope (Level 2/3, no catalog, catalog miss or
+    low-confidence hit): there is nothing narrower than `known_metrics`, so
+    this check passes -- catalog unavailability never manufactures a rejection.
+    """
+    if not candidate_metric_scope:
+        return ValidationResult(True)
+    for metric_name in metrics_to_check:
+        if metric_name not in candidate_metric_scope:
+            return ValidationResult(
+                False,
+                f"metric {metric_name!r} is not in the candidate scope this generation "
+                f"attempt was given ({sorted(candidate_metric_scope)}) -- candidate-scope "
+                f"enforcement (GeneratorContext.metric_metadata).",
+                candidate_scope_violation=True,
+            )
+    return ValidationResult(True)
 
 
 def _check_catalog_status(metrics_to_check: list[str],
@@ -321,7 +374,10 @@ def _validate_declined(entry: dict) -> ValidationResult:
 
 def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
                                    known_datasources: set[str],
-                                   catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
+                                   known_metrics: set[str] | None = None,
+                                   labels_by_metric: dict | None = None,
+                                   catalog_status_by_metric: dict[str, str] | None = None,
+                                   candidate_metric_scope: set[str] | None = None) -> ValidationResult:
     """SKILL.md Section 12 / Section 9's `alert_rule_proposed` status.
 
     This result is NEVER auto-executed -- it's deliberately absent from
@@ -400,12 +456,60 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
                 f"the condition to be derived from that metric's own verified base expression.",
             )
 
-    # Same catalog-status policy as the ordinary query path (one shared
-    # check, so the two paths cannot disagree about pending/rejected metrics).
+    # Same Principle 1 / Step 3g non-fabrication check the ordinary query path
+    # (`_validate_prometheus_entry`) applies: an alert proposal's metric must
+    # exist in a Metric Directory this request opened. Previously skipped for
+    # alert proposals, so a fabricated metric name could pass. Guarded by
+    # `if known_metrics:` for the same reason as the ordinary path: an empty
+    # set means no Metric Directory was opened to check against (or an alert
+    # entry is validated in isolation), and this module prefers "cannot
+    # confirm" over a false rejection there.
+    if known_metrics:
+        for metric_name in [m for m in [name, *source_metrics] if m]:
+            if metric_name not in known_metrics:
+                return ValidationResult(
+                    False,
+                    f"measurement_used references {metric_name!r}, which is not in any Metric "
+                    f"Directory this request opened ({sorted(known_metrics)}) -- looks fabricated. "
+                    f"Alert-rule proposals are held to the same non-fabrication check as ordinary "
+                    f"query results (Section 5 Principle 1 / Section 12.4).",
+                )
+
+    # Same candidate-scope and catalog-status policy as the ordinary query
+    # path (shared checks, so the two paths cannot disagree).
+    scope_result = _check_candidate_scope([m for m in [name, *source_metrics] if m],
+                                          candidate_metric_scope)
+    if not scope_result.passed:
+        return scope_result
     status_result = _check_catalog_status([m for m in [name, *source_metrics] if m],
                                           catalog_status_by_metric or {})
     if not status_result.passed:
         return status_result
+
+    # Principle 9 (keys), ported from `main`: the alert condition is built from
+    # the same metric as an ordinary query, so an invented label key in it is
+    # rejected exactly like the read-query path. Fail-open: only enforced when
+    # at least one in-play metric has a confirmed (non-None) key list.
+    if labels_by_metric:
+        used_labels = _extract_promql_label_keys(condition_query)
+        if used_labels:
+            in_play = [m for m in [name, *source_metrics] if m]
+            confirmed_keys: set[str] = set()
+            any_confirmed_source = False
+            for metric_name in in_play:
+                keys_for_metric = labels_by_metric.get(metric_name)
+                if keys_for_metric is not None:
+                    any_confirmed_source = True
+                    confirmed_keys.update(keys_for_metric)
+            if any_confirmed_source:
+                invented = used_labels - confirmed_keys
+                if invented:
+                    return ValidationResult(
+                        False,
+                        f"alert_rule.condition_query uses label key(s) {sorted(invented)} which are not "
+                        f"among the runtime-confirmed keys for {in_play} ({sorted(confirmed_keys)}) "
+                        f"-- Principle 9 violation (invented label key in an alert condition).",
+                    )
 
     # Section 12.4/12.5: threshold and comparison direction are never
     # supplied by a reference file and are never invented -- they must
@@ -461,7 +565,8 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
 
 def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: dict,
                         known_references: set[str], known_datasources: set[str],
-                        catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
+                        catalog_status_by_metric: dict[str, str] | None = None,
+                        candidate_metric_scope: set[str] | None = None) -> ValidationResult:
     status = entry["status"]
     warnings: list[str] = []
 
@@ -509,7 +614,8 @@ def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric
 
     if data_source == "prometheus":
         result = _validate_prometheus_entry(entry, query, name, source_metrics, known_metrics, labels_by_metric,
-                                            catalog_status_by_metric=catalog_status_by_metric)
+                                            catalog_status_by_metric=catalog_status_by_metric,
+                                            candidate_metric_scope=candidate_metric_scope)
         if not result.passed:
             return result
         warnings.extend(result.warnings)
@@ -532,7 +638,8 @@ def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric
 
 def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: list[str],
                                 known_metrics: set[str], labels_by_metric: dict,
-                                catalog_status_by_metric: dict[str, str] | None = None) -> ValidationResult:
+                                catalog_status_by_metric: dict[str, str] | None = None,
+                                candidate_metric_scope: set[str] | None = None) -> ValidationResult:
     # Section 6 Step 7 sanity pass: shape matches data source.
     if not isinstance(query, str) or not query.strip():
         return ValidationResult(False, "data_source is 'prometheus' but 'query' is not a non-empty PromQL string.")
@@ -554,6 +661,13 @@ def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: li
                     f"measurement_used.name is {metric_name!r} but that metric name does not "
                     f"appear anywhere in the query string {query!r}.",
                 )
+
+    # Candidate-scope enforcement (see _check_candidate_scope): independent of
+    # known_metrics above and of catalog status below, so the pipeline can
+    # tell a retryable scope miss from a fabricated/pending/rejected metric.
+    scope_result = _check_candidate_scope(metrics_to_check, candidate_metric_scope)
+    if not scope_result.passed:
+        return scope_result
 
     # Structured-catalog status (opt-in; empty lookup => no-op). Runs AFTER
     # the Metric Directory membership check above: it only ever adds a
