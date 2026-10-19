@@ -19,7 +19,17 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # --- LLM ---
-    gemini_api_key: str = Field(..., description="Google Gemini API key.")
+    llm_provider: str = Field(
+        default="gemini_api",
+        description="'gemini_api' (Gemini Developer API / AI Studio, GEMINI_API_KEY) or "
+                    "'vertex' (Vertex AI; must be selected explicitly).",
+    )
+    gemini_api_key: str | None = Field(
+        default=None, description="Gemini API (AI Studio) key. Required for llm_provider=gemini_api."
+    )
+    vertex_project: str | None = Field(default=None, description="GCP project for Vertex AI (ADC auth).")
+    vertex_location: str | None = Field(default=None, description="Vertex AI location; 'global' if unset.")
+    vertex_api_key: str | None = Field(default=None, description="Vertex AI express-mode API key.")
     gemini_model: str = Field(default="gemini-3.5-flash-lite")
 
     # --- Skill package ---

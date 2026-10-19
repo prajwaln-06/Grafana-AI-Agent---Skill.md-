@@ -145,25 +145,14 @@ def get_adk_agent() -> LlmAgent:
 
         if selected_model is None:
             model_name = settings.gemini_model if settings.gemini_model != "gemini-3.7-flash" else "gemini-2.5-flash"
-            api_key = settings.gemini_api_key
-            location = getattr(settings, "vertex_location", "global")
-            project = getattr(settings, "vertex_project", "project-8d47da29-7cf0-45f0-b55")
-
-            if api_key.startswith("AQ.") or os.environ.get("VERTEXAI", "").lower() in ("true", "1"):
-                client_kwargs = {
-                    "vertexai": True,
-                    "api_key": api_key,
-                    "location": location,
-                    "project": project,
-                }
-            else:
-                client_kwargs = {"api_key": api_key}
-
+            from app import llm_provider
+            client_kwargs = llm_provider.build_client_kwargs(settings)
             selected_model = Gemini(
                 model=model_name,
                 client_kwargs=client_kwargs,
             )
-            logger.info("Initialized ADK LlmAgent with Vertex AI model=%s", model_name)
+            logger.info("Initialized ADK LlmAgent with %s model=%s",
+                        llm_provider.describe_provider(settings), model_name)
 
         _agent_instance = LlmAgent(
             model=selected_model,
