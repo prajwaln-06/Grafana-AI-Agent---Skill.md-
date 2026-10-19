@@ -162,11 +162,6 @@ cd ui && npm run build
 | `GEMINI_API_KEY` | *(Required for `gemini_api`)* | Gemini Developer API key; never sent to Vertex AI |
 | `VERTEX_PROJECT` / `VERTEX_LOCATION` | *(none)* / `global` | Vertex AI project (ADC auth); only with `LLM_PROVIDER=vertex` |
 | `VERTEX_API_KEY` | *(none)* | Vertex express-mode key (alternative to `VERTEX_PROJECT`) |
-
-> **Known issue (deferred):** model-name defaults are inconsistent. `Settings.gemini_model` defaults to
-> `gemini-3.5-flash-lite`, `.env.example` sets `GEMINI_MODEL=gemini-3.7-flash`, and the ADK agent
-> (`app/adk_agent.py`) silently remaps `gemini-3.7-flash` to `gemini-2.5-flash`, so the ADK path and the
-> direct Router/Generator client can run different models. To be resolved separately.
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Model used for Router and Generator passes |
 | `PROMETHEUS_URL` | `http://localhost:9090` | Prometheus HTTP endpoint |
 | `GRAFANA_URL` | `http://localhost:3000` | Grafana OSS endpoint |
@@ -177,6 +172,11 @@ cd ui && npm run build
 | `CATALOG_PATH` | `app/catalog/catalog.json` | Structured Prometheus metric catalog (**not** the dashboard catalog `app/catalog.json`) |
 | `CATALOG_NARROW_MIN_SCORE` | `2.0` | Minimum catalog search score before ranked candidates are shown to the Generator |
 | `CATALOG_METRIC_STATUS_VALIDATION_ENABLED` | `false` | Reject metrics whose catalog status is `discovered_pending_review` / `rejected` |
+
+> **Known issue (deferred):** model-name defaults are inconsistent. `Settings.gemini_model` defaults to
+> `gemini-3.5-flash-lite`, `.env.example` sets `GEMINI_MODEL=gemini-3.7-flash`, and the ADK agent
+> (`app/adk_agent.py`) silently remaps `gemini-3.7-flash` to `gemini-2.5-flash`, so the ADK path and the
+> direct Router/Generator client can run different models. To be resolved separately.
 
 ---
 
