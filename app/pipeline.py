@@ -420,11 +420,18 @@ def _build_level2_generator_context(base_ctx: GeneratorContext, matched: list[di
     carried over unchanged), so live label discovery and `known_metrics`
     validation are unaffected. With no catalog, or nothing matching, this
     degrades to an empty `metric_metadata` -- no candidate block, never an
-    error."""
+    error.
+
+    Level 2 broadens Level 1, it never replaces it: any Level-1 candidate the
+    per-file lookup does not cover (e.g. a vendor-only metric with no
+    reference_path) is carried over, so Level 1 is always a subset of Level 2."""
+    by_name = {m["name"]: m for m in catalog_runtime.build_level2_metric_metadata(
+        catalog, matched, base_ctx.known_prometheus_metrics)}
+    for candidate in base_ctx.metric_metadata:
+        by_name.setdefault(candidate["name"], candidate)
     return replace(
         base_ctx,
-        metric_metadata=catalog_runtime.build_level2_metric_metadata(
-            catalog, matched, base_ctx.known_prometheus_metrics),
+        metric_metadata=tuple(by_name.values()),
         reference_universe_mismatch=False,
     )
 
@@ -1371,10 +1378,14 @@ def _catalog_query_text(question: str, context: PipelineContext) -> str:
 
 
 def _apply_structured_catalog(ctx: GeneratorContext, question: str, settings: Settings,
-                              catalog: Catalog | None, candidates: bool = True) -> None:
+                              catalog: Catalog | None, candidates: bool = True,
+                              matched: list[dict] | None = None) -> None:
     """Fills `ctx.metric_metadata` and the reference-universe-mismatch signal
     from the structured catalog. Strictly additive and fail-safe: any problem
     leaves the context exactly as it was before the catalog existed.
+
+    `matched` scopes Level-1 candidates to the Router-selected reference
+    file(s) (see `catalog_runtime.build_level1_outcome`).
 
     `candidates=False` (Level 3) skips candidate construction entirely. The
     catalog STATUS lookup is separate (`_catalog_status_lookup`) and travels
@@ -1385,6 +1396,7 @@ def _apply_structured_catalog(ctx: GeneratorContext, question: str, settings: Se
         outcome = catalog_runtime.build_level1_outcome(
             catalog, question, ctx.known_prometheus_metrics,
             min_confident_score=settings.catalog_narrow_min_score,
+            matched=matched,
         )
         ctx.metric_metadata = outcome.metric_metadata
         ctx.reference_universe_mismatch = outcome.reference_universe_mismatch
@@ -1463,7 +1475,7 @@ def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
         # Scoped to this call's own `matched` references, so each dependency
         # stage gets candidates (and status data) for its own references only.
         _apply_structured_catalog(ctx, question, settings, catalog,
-                                  candidates=candidates)
+                                  candidates=candidates, matched=matched)
 
     return ctx
 

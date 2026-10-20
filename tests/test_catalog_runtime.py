@@ -235,6 +235,104 @@ def test_level2_candidates_are_the_matched_references_metrics_within_the_known_u
     assert rt.build_level2_metric_metadata(catalog, [{"no": "path"}], known) == ()
 
 
+# ---- Level 1 scoped to the Router-matched reference file(s) ----------------------
+#
+# Regression: the query word "node" scores EVERY node_* metric (name + keyword +
+# exporter match), and Level 1 used to be intersected only with the whole
+# exporter's directory, so "CPU utilization on node X" offered 16 metrics
+# (incl. node_memory_* / node_filesystem_*) while Level 2 (the matched file) had 6.
+
+_CPU = {"reference_path": "references/node-exporter/cpu.md"}
+_NODE_CPU_QUERY = "What is the current CPU utilization on node X?"
+_CPU_FILE = {"node_cpu_seconds_total", "node_context_switches_total", "node_intr_total",
+             "node_load1", "node_load5", "node_load15"}
+
+
+def _node_exporter_directory(catalog):
+    return {e.name for e in catalog.by_exporter("node-exporter")}
+
+
+def test_level1_without_matched_keeps_the_exporter_wide_behavior(catalog):
+    known = _node_exporter_directory(catalog)
+    assert len(known) == 16
+    wide = rt.build_level1_outcome(catalog, _NODE_CPU_QUERY, known, MIN_SCORE)
+    assert len(wide.metric_metadata) == 16
+
+
+def test_level1_is_scoped_to_the_matched_reference_file(catalog):
+    known = _node_exporter_directory(catalog)
+    scoped = rt.build_level1_outcome(catalog, _NODE_CPU_QUERY, known, MIN_SCORE, matched=[_CPU])
+    names = [m["name"] for m in scoped.metric_metadata]
+    assert names[0] == "node_cpu_seconds_total"
+    assert set(names) == _CPU_FILE
+    assert not any(n.startswith(("node_memory_", "node_filesystem_")) for n in names)
+    assert scoped.reference_universe_mismatch is False
+    # build_metric_metadata forwards the scope.
+    assert {m["name"] for m in rt.build_metric_metadata(catalog, _NODE_CPU_QUERY, known, MIN_SCORE,
+                                                        matched=[_CPU])} == _CPU_FILE
+
+
+@pytest.mark.parametrize("question,refs", [
+    (_NODE_CPU_QUERY, ["references/node-exporter/cpu.md"]),
+    (_NODE_CPU_QUERY, ["references/node-exporter/memory.md"]),
+    ("How much memory is available on node X?", ["references/node-exporter/memory.md"]),
+    ("How much disk space is available on node X?", ["references/node-exporter/filesystem.md"]),
+    ("How much GPU memory is used on each GPU?", ["references/dcgm-exporter/memory.md"]),
+    ("What is the GPU temperature?", ["references/dcgm-exporter/thermal.md"]),
+    ("Is there any ECC error on the GPUs?", ["references/dcgm-exporter/reliability.md"]),
+    ("Show NVLink bandwidth over the last hour", ["references/dcgm-exporter/interconnect.md"]),
+    ("cpu and memory utilization on node X",
+     ["references/node-exporter/cpu.md", "references/node-exporter/memory.md"]),
+])
+def test_level1_is_a_subset_of_the_matched_files_and_of_level2(catalog, question, refs):
+    matched = [{"reference_path": r} for r in refs]
+    exporter = catalog.by_reference_path(refs[0])[0].exporter
+    known = {e.name for e in catalog.by_exporter(exporter)}
+    level1 = {m["name"] for m in rt.build_level1_outcome(catalog, question, known, MIN_SCORE,
+                                                         matched=matched).metric_metadata}
+    file_metrics = {e.name for r in refs for e in catalog.by_reference_path(r)}
+    level2 = {m["name"] for m in rt.build_level2_metric_metadata(catalog, matched, known)}
+    assert level1, "expected a confident, non-empty Level-1 candidate set"
+    assert level1 <= file_metrics
+    assert level1 <= level2 <= known
+
+
+def test_level1_has_no_scope_when_candidates_exist_only_in_another_file(catalog):
+    """A memory question routed to cpu.md: the catalog's confident candidates
+    are in memory.md, none in cpu.md. Not a mismatch (the exporter overlaps),
+    just no usable Level-1 scope: fail open like a catalog miss."""
+    known = _node_exporter_directory(catalog)
+    assert rt.build_level1_outcome(catalog, "free swap memory", known, MIN_SCORE).metric_metadata  # exporter-wide has hits
+    outcome = rt.build_level1_outcome(catalog, "free swap memory", known, MIN_SCORE, matched=[_CPU])
+    assert outcome.metric_metadata == ()
+    assert outcome.reference_universe_mismatch is False
+
+
+def test_level1_mismatch_signal_is_unchanged_by_the_scope(catalog):
+    """Zero overlap with the opened exporter directory is still a mismatch."""
+    outcome = rt.build_level1_outcome(catalog, "GPU temperature", {"node_cpu_seconds_total", "node_load1"},
+                                      MIN_SCORE, matched=[_CPU])
+    assert outcome.metric_metadata == () and outcome.reference_universe_mismatch is True
+
+
+def test_level1_keeps_a_vendor_only_metric_of_the_same_exporter(catalog):
+    """A metric with no reference_path has no file to be scoped to; it must
+    stay eligible for any matched file of its exporter (never silently dropped)."""
+    from dataclasses import replace as dc_replace
+    from app.catalog.schema import Catalog
+
+    vendor_only = dc_replace(catalog.get("node_load1"), name="node_vendor_only_total", reference_path=None)
+    augmented = Catalog(catalog_version=catalog.catalog_version, generated_at=catalog.generated_at,
+                        metrics=catalog.metrics + (vendor_only,))
+    known = _node_exporter_directory(augmented)
+    assert "node_vendor_only_total" in known
+    assert "node_vendor_only_total" in rt.matched_reference_metric_names(augmented, [_CPU], known)
+    # ... but not for a different exporter's file.
+    dcgm_known = {e.name for e in augmented.by_exporter("dcgm-exporter")}
+    assert "node_vendor_only_total" not in rt.matched_reference_metric_names(
+        augmented, [{"reference_path": "references/dcgm-exporter/memory.md"}], dcgm_known | {"node_vendor_only_total"})
+
+
 def test_prompt_block_renders_missing_unit_as_n_a():
     block = rt.format_metric_metadata_for_prompt(
         ({"name": "m", "type": "gauge", "help": "h", "unit": None},)

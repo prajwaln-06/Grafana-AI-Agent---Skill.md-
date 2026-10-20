@@ -444,7 +444,7 @@ def test_dependent_stage_retries_at_level2_within_its_own_reference_and_never_re
         dep_ctx = pipeline._build_generator_context([_matched(DCGM_MEM_REF)], skill_index, cat_settings,
                                                     question=_DEP_QUESTION, catalog=catalog)
     outside = sorted(dep_ctx.known_prometheus_metrics - {m["name"] for m in dep_ctx.metric_metadata})
-    assert outside, "need a memory.md metric outside the Level-1 candidates for this scenario"
+    assert outside, "need a known metric outside the Level-1 candidates for this scenario"
 
     # 1: root. 2: dependent Level 1 (picks a metric outside the candidates -> scope violation).
     # 3: dependent Level 2 (same pick is now accepted).
@@ -457,7 +457,9 @@ def test_dependent_stage_retries_at_level2_within_its_own_reference_and_never_re
     assert _count(calls, "router") == 1                     # a stage never re-routes (no Level 3)
     assert _count(calls, "generator") == 3
     dep_l1, dep_l2 = _generator_prompts(calls)[1], _generator_prompts(calls)[2]
-    assert set(_block_names(dep_l1)) != set(_block_names(dep_l2))     # Level 2 is a different, reference-based set
+    # Level 1 is scoped to the stage's own reference file, so it is a subset of Level 2 (all of that
+    # file's metrics) -- equal here, because this question already matches every metric of the file.
+    assert set(_block_names(dep_l1)) <= set(_block_names(dep_l2))
     assert set(_block_names(dep_l2)) == _level2_expected_names(catalog, DCGM_MEM_REF,
                                                               dep_ctx.known_prometheus_metrics)
     assert all(n.startswith("DCGM_") for n in _block_names(dep_l2))   # still scoped to ITS reference

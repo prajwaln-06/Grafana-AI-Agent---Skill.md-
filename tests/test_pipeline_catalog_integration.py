@@ -1483,3 +1483,197 @@ def test_alert_path_candidate_scope_violation_also_falls_back_to_level2(skill_in
     assert mock.call_count == 3
     assert result.get("status") == "alert_rule_proposed"
     assert result["measurement_used"]["name"] == "node_load1"
+
+
+# ---- Level-1 reference scoping: Level 1 within the Router-selected file(s), Level 1 <= Level 2 ----
+#
+# Regression for the "node" scope-word problem: "What is the current CPU
+# utilization on node X?" scores EVERY node_* metric (name + keyword +
+# exporter match on "node"), and Level 1 used to intersect only with the whole
+# exporter's Metric Directory, so 16 metrics -- including node_memory_* and
+# node_filesystem_* -- were offered for a CPU question while Level 2 (the
+# matched file's metrics) had only 6. Level 1 is now drawn from the matched
+# reference file(s), so it is always a subset of Level 2.
+
+_CPU_REF = "references/node-exporter/cpu.md"
+_CPU_FILE_METRICS = {
+    "node_cpu_seconds_total", "node_context_switches_total", "node_intr_total",
+    "node_load1", "node_load5", "node_load15",
+}
+_CPU_NODE_QUERY = "What is the current CPU utilization on node X?"
+_CANDIDATE_BLOCK_HEADER = "Catalog-identified candidate metrics"
+
+
+def _matched_refs(*reference_paths):
+    return [{"reference_path": p, "data_source": "prometheus"} for p in reference_paths]
+
+
+def _scoped_context(catalog, skill_index, skills_root, question, *reference_paths):
+    matched = _matched_refs(*reference_paths)
+    with patch("app.label_discovery.discover_labels_for_metrics", return_value={}):
+        ctx = pipeline._build_generator_context(
+            matched, skill_index, _settings(skills_root), question=question, catalog=catalog,
+        )
+    return matched, ctx
+
+
+def _names(ctx):
+    return [m["name"] for m in ctx.metric_metadata]
+
+
+def _file_metric_names(catalog, *reference_paths):
+    return {e.name for p in reference_paths for e in catalog.by_reference_path(p)}
+
+
+def _block_metric_names(prompt):
+    """Metric names listed in the catalog candidate block of a Generator prompt."""
+    import re
+
+    if _CANDIDATE_BLOCK_HEADER not in prompt:
+        return []
+    block = prompt.split(_CANDIDATE_BLOCK_HEADER, 1)[1].split("User question:", 1)[0]
+    return re.findall(r"^- (\S+) \(type: ", block, flags=re.MULTILINE)
+
+
+def test_cpu_node_query_level1_is_limited_to_the_cpu_reference(skill_index, skills_root, real_catalog,
+                                                              production_catalog):
+    for catalog in (production_catalog, real_catalog):
+        _, ctx = _scoped_context(catalog, skill_index, skills_root, _CPU_NODE_QUERY, _CPU_REF)
+        names = _names(ctx)
+        assert names[0] == "node_cpu_seconds_total"
+        assert set(names) == _CPU_FILE_METRICS
+        # Unrelated metrics from OTHER reference files of the same exporter are excluded ...
+        assert not any(n.startswith(("node_memory_", "node_filesystem_", "DCGM_")) for n in names)
+        # ... while the validator's / label discovery's universe is still the whole exporter.
+        assert "node_memory_MemFree_bytes" in ctx.known_prometheus_metrics
+        assert "node_filesystem_size_bytes" in ctx.known_prometheus_metrics
+        assert len(ctx.known_prometheus_metrics) == 16
+        assert ctx.reference_universe_mismatch is False
+
+
+def test_scope_word_node_does_not_change_which_file_the_candidates_come_from(skill_index, skills_root,
+                                                                            production_catalog):
+    _, with_node = _scoped_context(production_catalog, skill_index, skills_root, _CPU_NODE_QUERY, _CPU_REF)
+    _, without_node = _scoped_context(production_catalog, skill_index, skills_root,
+                                      "What is the current CPU utilization?", _CPU_REF)
+    assert _names(without_node)[0] == _names(with_node)[0] == "node_cpu_seconds_total"
+    assert set(_names(without_node)) <= set(_names(with_node)) <= _CPU_FILE_METRICS
+
+
+_SCOPING_CASES = [
+    (_CPU_NODE_QUERY, ("references/node-exporter/cpu.md",)),
+    (_CPU_NODE_QUERY, ("references/node-exporter/memory.md",)),
+    (_CPU_NODE_QUERY, ("references/node-exporter/filesystem.md",)),
+    ("What is the 5 minute load average on node X?", ("references/node-exporter/cpu.md",)),
+    ("How much memory is available on node X?", ("references/node-exporter/memory.md",)),
+    ("How much disk space is available on node X?", ("references/node-exporter/filesystem.md",)),
+    ("How much GPU memory is used on each GPU?", ("references/dcgm-exporter/memory.md",)),
+    ("What is the GPU temperature?", ("references/dcgm-exporter/thermal.md",)),
+    ("Is there any ECC error on the GPUs?", ("references/dcgm-exporter/reliability.md",)),
+    ("Show NVLink bandwidth over the last hour", ("references/dcgm-exporter/interconnect.md",)),
+    # Multi-reference match: scope and Level 2 are both the union.
+    ("cpu and memory utilization on node X",
+     ("references/node-exporter/cpu.md", "references/node-exporter/memory.md")),
+]
+
+
+@pytest.mark.parametrize("question,refs", _SCOPING_CASES, ids=[f"{q[:38]}|{len(r)}ref" for q, r in _SCOPING_CASES])
+def test_level1_is_scoped_to_matched_files_and_is_a_subset_of_level2(skill_index, skills_root,
+                                                                    production_catalog, question, refs):
+    """The architectural invariant: Level 1 candidates come from the
+    Router-selected reference file(s), and Level 2 (all metrics of those
+    files) is always a superset, never wider than known_prometheus_metrics."""
+    matched, ctx = _scoped_context(production_catalog, skill_index, skills_root, question, *refs)
+    level1 = set(_names(ctx))
+    level2 = {m["name"] for m in pipeline._build_level2_generator_context(ctx, matched, production_catalog)
+              .metric_metadata}
+
+    assert level1, "expected a confident, non-empty Level-1 candidate set for this question"
+    assert level1 <= _file_metric_names(production_catalog, *refs)
+    assert level1 <= level2
+    assert level2 <= ctx.known_prometheus_metrics
+    assert level2 == _file_metric_names(production_catalog, *refs) & ctx.known_prometheus_metrics
+
+
+def test_level2_keeps_level1_candidates_that_have_no_reference_path(vendor_only_catalog_and_skill_index,
+                                                                    skills_root):
+    """A vendor-only metric (no Markdown file, reference_path=None) stays
+    eligible at Level 1 (scoped to its exporter) and Level 2 must carry it
+    over, or Level 1 would not be a subset of Level 2."""
+    augmented, _path, vendor_skill_index, vendor_entry = vendor_only_catalog_and_skill_index
+    matched = _matched_refs(_CPU_REF)
+    fake_decision = catalog_runtime.MetricCandidateDecision(confident=True, candidates=(vendor_entry,),
+                                                            top_score=9.0)
+
+    with patch("app.label_discovery.discover_labels_for_metrics", return_value={}), \
+         patch("app.catalog.runtime.catalog_metric_candidates", return_value=fake_decision):
+        ctx = pipeline._build_generator_context(matched, vendor_skill_index, _settings(skills_root),
+                                                question="vendor only test metric", catalog=augmented)
+    level2 = pipeline._build_level2_generator_context(ctx, matched, augmented)
+
+    assert vendor_entry.name in _names(ctx)
+    assert vendor_entry.name in {m["name"] for m in level2.metric_metadata}
+    assert set(_names(ctx)) <= {m["name"] for m in level2.metric_metadata}
+    # And the rest of Level 2 is still the matched file's metrics.
+    assert _CPU_FILE_METRICS <= {m["name"] for m in level2.metric_metadata}
+
+
+# ---- fallback behavior with scoped Level 1 ----------------------------------------
+
+
+def test_candidates_only_in_another_file_fail_open_without_retry_or_level3(skill_index, skills_root,
+                                                                           production_catalog):
+    """The catalog ranks metrics of a file the Router did NOT pick (a
+    memory question routed to cpu.md). Level 1 has no usable scope: no
+    candidate block, not a reference-universe mismatch, and exactly the
+    ordinary 2 LLM calls -- no Level 2, no Level 3."""
+    settings = _settings(skills_root)
+    _, ctx = _scoped_context(production_catalog, skill_index, skills_root, "free swap memory", _CPU_REF)
+    assert ctx.metric_metadata == ()
+    assert ctx.reference_universe_mismatch is False
+
+    gen_resp = MagicMock(parsed=_ok_entry_for("node_memory_SwapFree_bytes"))
+    with patch.object(llm_client, "call_llm_json", side_effect=[_router_resp(), gen_resp]) as mock, \
+         patch("app.label_discovery.discover_labels_for_metrics", return_value={}):
+        result = _run(pipeline.run_pipeline("free swap memory", skill_index, settings, catalog=production_catalog))
+
+    assert mock.call_count == 2
+    assert result["status"] == "ok"
+    assert _CANDIDATE_BLOCK_HEADER not in mock.call_args_list[1].kwargs["prompt"]
+
+
+def test_level2_retry_prompt_is_a_superset_of_the_level1_prompt(skill_index, skills_root, production_catalog):
+    settings = _settings(skills_root)
+    attempt1 = MagicMock(parsed=_unsupported_metric_entry())
+    attempt2 = MagicMock(parsed=_ok_entry_for("node_load1"))
+
+    with patch.object(llm_client, "call_llm_json", side_effect=[_router_resp(), attempt1, attempt2]) as mock, \
+         patch("app.label_discovery.discover_labels_for_metrics", return_value={}):
+        result = _run(pipeline.run_pipeline(_CPU_NODE_QUERY, skill_index, settings, catalog=production_catalog))
+
+    assert mock.call_count == 3          # Router + Level 1 + Level 2, no Level 3
+    assert result["status"] == "ok"
+    level1_block = set(_block_metric_names(mock.call_args_list[1].kwargs["prompt"]))
+    level2_block = set(_block_metric_names(mock.call_args_list[2].kwargs["prompt"]))
+    assert level1_block == _CPU_FILE_METRICS
+    assert level1_block <= level2_block
+    assert not any(n.startswith(("node_memory_", "node_filesystem_")) for n in level1_block | level2_block)
+
+
+def test_picking_a_metric_from_another_file_is_now_a_scope_violation_that_retries_at_level2(
+        skill_index, skills_root, production_catalog):
+    """With the exporter-wide Level 1, a memory metric for a CPU question
+    sat inside the candidate scope and was accepted without any retry. With
+    Level 1 scoped to cpu.md it is a candidate-scope violation, so the
+    existing Level-2 fallback runs once and the Generator recovers."""
+    settings = _settings(skills_root)
+    attempt1 = MagicMock(parsed=_ok_entry_for("node_memory_MemFree_bytes"))   # known, other file
+    attempt2 = MagicMock(parsed=_ok_entry_for("node_cpu_seconds_total"))
+
+    with patch.object(llm_client, "call_llm_json", side_effect=[_router_resp(), attempt1, attempt2]) as mock, \
+         patch("app.label_discovery.discover_labels_for_metrics", return_value={}):
+        result = _run(pipeline.run_pipeline(_CPU_NODE_QUERY, skill_index, settings, catalog=production_catalog))
+
+    assert mock.call_count == 3
+    assert result["status"] == "ok"
+    assert result["measurement_used"]["name"] == "node_cpu_seconds_total"

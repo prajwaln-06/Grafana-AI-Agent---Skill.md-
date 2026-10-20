@@ -254,14 +254,58 @@ class Level1Outcome:
     reference_universe_mismatch: bool = False
 
 
+def matched_reference_metric_names(catalog: Catalog, matched: list[dict],
+                                   known_prometheus_metrics: set[str]) -> set[str]:
+    """The metrics belonging to the Router-matched reference file(s): every
+    catalog entry whose `reference_path` is one of them, plus any metric of
+    the SAME exporter that has no `reference_path` at all (a vendor-only
+    metric has no Markdown file to be scoped to, so exporter level is the
+    narrowest scope it has -- excluding it would silently drop it from
+    Level 1). Restricted to `known_prometheus_metrics`, like Level 2.
+
+    Deliberately narrower than `known_prometheus_metrics`, which is the
+    whole exporter's Metric Directory and stays the validator's / label
+    discovery's universe. Level 1 candidates are drawn from this set and
+    Level 2 is a superset of it (`pipeline._build_level2_generator_context`)."""
+    names: set[str] = set()
+    exporters: set[str] = set()
+    for m in matched:
+        reference_path = m.get("reference_path")
+        if not reference_path:
+            continue
+        for entry in catalog.by_reference_path(reference_path):
+            exporters.add(entry.exporter)
+            if entry.name in known_prometheus_metrics:
+                names.add(entry.name)
+    for exporter in exporters:
+        for entry in catalog.by_exporter(exporter):
+            if entry.reference_path is None and entry.name in known_prometheus_metrics:
+                names.add(entry.name)
+    return names
+
+
 def build_level1_outcome(catalog: Catalog, question: str, known_prometheus_metrics: set[str],
-                         min_confident_score: float) -> Level1Outcome:
+                         min_confident_score: float, matched: list[dict] | None = None) -> Level1Outcome:
     """Ranked candidate metadata for ONE request/stage.
 
     Candidates are intersected with `known_prometheus_metrics` -- the metrics
-    of the reference(s) this specific request or dependency stage actually
-    opened. That intersection is the scope boundary: a catalog hit for a
-    metric outside those references is never shown to the Generator.
+    of the exporter overview(s) this specific request or dependency stage
+    actually opened. That intersection is the outer scope boundary: a catalog
+    hit for a metric outside it is never shown to the Generator, and a
+    confident hit with ZERO overlap is a reference-universe mismatch.
+
+    When `matched` is given, Level 1 is additionally scoped to the metrics of
+    those Router-matched reference file(s) (`matched_reference_metric_names`),
+    not the whole exporter's directory: a generic query word such as "node"
+    scores every `node_*` metric of the exporter, and without this scope the
+    filesystem/memory metrics would be offered for a CPU question. That keeps
+    Level 1 a subset of Level 2 by construction. The mismatch signal is
+    unchanged (still zero overlap with `known_prometheus_metrics`). If
+    candidates exist in the exporter but none in the matched file(s), the
+    Router's file simply is not the one the catalog ranked: Level 1 has no
+    usable scope, so this returns an empty, non-mismatch outcome (no candidate
+    block, no Level 1/2 machinery -- the same fail-open as a catalog miss)
+    rather than escalating. `matched=None` keeps the exporter-wide behavior.
     """
     if not known_prometheus_metrics:
         return Level1Outcome()
@@ -281,14 +325,27 @@ def build_level1_outcome(catalog: Catalog, question: str, known_prometheus_metri
             question, decision.top_score,
         )
         return Level1Outcome(reference_universe_mismatch=True)
+    if matched is not None:
+        reference_scope = matched_reference_metric_names(catalog, matched, known_prometheus_metrics)
+        in_reference = tuple(e for e in in_scope if e.name in reference_scope)
+        if not in_reference:
+            logger.info(
+                "catalog_candidates: candidates for question %r exist in the exporter but none in the "
+                "Router-matched reference(s) %s (top_score=%s); no Level-1 scope for this request "
+                "(fail-open: no candidate block).",
+                question, [m.get("reference_path") for m in matched], decision.top_score,
+            )
+            return Level1Outcome()
+        in_scope = in_reference
     return Level1Outcome(metric_metadata=tuple(metric_metadata_dict(e) for e in in_scope))
 
 
 def build_metric_metadata(catalog: Catalog, question: str, known_prometheus_metrics: set[str],
-                          min_confident_score: float) -> tuple[dict[str, str | None], ...]:
+                          min_confident_score: float,
+                          matched: list[dict] | None = None) -> tuple[dict[str, str | None], ...]:
     """Candidate metadata only (see `build_level1_outcome` for the full result)."""
     return build_level1_outcome(catalog, question, known_prometheus_metrics,
-                                min_confident_score).metric_metadata
+                                min_confident_score, matched=matched).metric_metadata
 
 
 def build_level2_metric_metadata(catalog: Catalog | None, matched: list[dict],
