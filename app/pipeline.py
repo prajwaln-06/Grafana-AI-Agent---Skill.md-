@@ -152,8 +152,10 @@ Exactly one retry is allowed: if the Generator reports `unsupported_metric`
 for that candidate set, or the Validator catches an out-of-scope
 selection, `run_pipeline` retries once with a Level-2 `GeneratorContext`
 (every metric belonging to the Router-matched reference(s), via
-`Catalog.by_reference_path()` -- `_build_level2_generator_context`), never
-narrower than `known_prometheus_metrics`. See `_run_generation_attempt`,
+`Catalog.by_reference_path()` -- `_build_level2_generator_context`), always a
+superset of the Level-1 candidates (which are themselves scoped to those
+same reference file(s)) and never broader than `known_prometheus_metrics`.
+See `_run_generation_attempt`,
 `_should_fallback_to_level2`, and `_build_level2_generator_context` for the
 full orchestration; none of this touches the Router or the Generator's own
 prompt-construction responsibility for query semantics.
@@ -1482,6 +1484,12 @@ def _build_level2_generator_context(base_ctx: "GeneratorContext", matched: list[
             if entry.name in base_ctx.known_prometheus_metrics and entry.name not in by_name:
                 by_name[entry.name] = _metric_metadata_dict(entry)
 
+    # Level 2 broadens Level 1, it never replaces it: carry over any Level-1
+    # candidate the per-file lookup above does not cover (e.g. a vendor-only
+    # metric with no reference_path), so Level 1 is always a subset of Level 2.
+    for candidate in base_ctx.metric_metadata:
+        by_name.setdefault(candidate["name"], candidate)
+
     return replace(base_ctx, metric_metadata=tuple(by_name.values()))
 
 
@@ -2034,15 +2042,47 @@ def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
         # this branch never runs and `metric_metadata` stays `()`, exactly
         # the pre-catalog/Level-3 behavior.
         outcome = _build_metric_metadata(catalog, question, ctx.known_prometheus_metrics,
-                                          min_confident_score=settings.catalog_narrow_min_score)
+                                          min_confident_score=settings.catalog_narrow_min_score,
+                                          matched=matched)
         ctx.metric_metadata = outcome.metric_metadata
         ctx.reference_universe_mismatch = outcome.reference_universe_mismatch
 
     return ctx
 
 
+def _matched_reference_metric_names(catalog: Catalog, matched: list[dict],
+                                    known_prometheus_metrics: set[str]) -> set[str]:
+    """The metrics belonging to the Router-matched reference file(s): every
+    catalog entry whose `reference_path` is one of them, plus any metric of
+    the SAME exporter that has no `reference_path` at all (a vendor-only
+    metric has no Markdown file to be scoped to, so exporter level is the
+    narrowest scope it has -- excluding it would silently drop it from
+    Level 1). Restricted to `known_prometheus_metrics`, like Level 2.
+
+    Deliberately narrower than `known_prometheus_metrics`, which is the
+    whole exporter's Metric Directory and stays the validator's / label
+    discovery's universe. Level 1 candidates are drawn from this set and
+    Level 2 is a superset of it (`_build_level2_generator_context`)."""
+    names: set[str] = set()
+    exporters: set[str] = set()
+    for m in matched:
+        reference_path = m.get("reference_path")
+        if not reference_path:
+            continue
+        for entry in catalog.by_reference_path(reference_path):
+            exporters.add(entry.exporter)
+            if entry.name in known_prometheus_metrics:
+                names.add(entry.name)
+    for exporter in exporters:
+        for entry in catalog.by_exporter(exporter):
+            if entry.reference_path is None and entry.name in known_prometheus_metrics:
+                names.add(entry.name)
+    return names
+
+
 def _build_metric_metadata(catalog: Catalog, question: str, known_prometheus_metrics: set[str],
-                            min_confident_score: float) -> "Level1Outcome":
+                            min_confident_score: float,
+                            matched: list[dict] | None = None) -> "Level1Outcome":
     """Batch 1 (Phase 2): builds `GeneratorContext.metric_metadata` from a
     confident metric-level catalog decision (`catalog_metric_candidates`),
     restricted to metrics ALSO present in `known_prometheus_metrics` (the
@@ -2075,6 +2115,20 @@ def _build_metric_metadata(catalog: Catalog, question: str, known_prometheus_met
         3 (a fresh, catalog-unnarrowed routing pass) instead of spending a
         Level-1/Level-2 attempt on a reference universe the catalog
         itself contradicts.
+
+    When `matched` is given, Level 1 is additionally scoped to the metrics
+    of those Router-matched reference file(s) (`_matched_reference_metric_
+    names`), not the whole exporter's directory: a generic query word such
+    as "node" scores every `node_*` metric of the exporter, and without
+    this scope the filesystem/memory metrics would be offered for a CPU
+    question. That keeps Level 1 a subset of Level 2 by construction. The
+    mismatch signal above is unchanged (still zero overlap with
+    `known_prometheus_metrics`). If candidates exist in the exporter but
+    none in the matched file(s), the Router's file simply is not the one
+    the catalog ranked: Level 1 has no usable scope, so this returns an
+    empty, non-mismatch outcome (no candidate block, no Level 1/2
+    machinery -- the same fail-open as a catalog miss) rather than
+    escalating. `matched=None` keeps the exporter-wide behavior.
     """
     decision = catalog_metric_candidates(catalog, question, min_confident_score=min_confident_score)
     if not decision.confident:
@@ -2096,6 +2150,19 @@ def _build_metric_metadata(catalog: Catalog, question: str, known_prometheus_met
             question, decision.top_score,
         )
         return Level1Outcome(metric_metadata=(), reference_universe_mismatch=True)
+
+    if matched is not None:
+        reference_scope = _matched_reference_metric_names(catalog, matched, known_prometheus_metrics)
+        in_reference = tuple(e for e in in_scope if e.name in reference_scope)
+        if not in_reference:
+            logger.info(
+                "catalog_generator_candidates: candidates for question %r exist in the exporter but none "
+                "in the Router-matched reference(s) %s (top_score=%s); no Level-1 scope for this request "
+                "(fail-open: no candidate block).",
+                question, [m.get("reference_path") for m in matched], decision.top_score,
+            )
+            return Level1Outcome(metric_metadata=(), reference_universe_mismatch=False)
+        in_scope = in_reference
 
     return Level1Outcome(metric_metadata=tuple(_metric_metadata_dict(e) for e in in_scope),
                           reference_universe_mismatch=False)
