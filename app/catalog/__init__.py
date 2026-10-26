@@ -1,17 +1,40 @@
 """
 app/catalog/
 
-Structured metric registry + retrieval/indexing layer (metric-catalogization
-work, per the frozen catalog architecture). This package is ordinary backend
+Structured metric registry + retrieval layer (metric-catalogization work,
+per the frozen catalog architecture). This package is ordinary backend
 infrastructure -- not an ADK Agent, not an LLM knowledge dump, not a
 replacement for SKILL.md/Router/Generator/Validator.
 
-Phase 1 (current): schema.py + loader.py only -- defines what a catalog
-entry looks like and how to load a catalog.json file into memory. Nothing
-in this package is wired into app/pipeline.py, app/validator.py, or
-app/skill_index.py yet; that begins in later phases (9-13) once catalog
-generation (Phase 2+), reconciliation (Phase 4), and retrieval (Phase 6)
-exist and have been proven in shadow mode (Phase 8).
+It is fully wired into the request path (see app/pipeline.py's module
+docstring). Participation is mandatory to ATTEMPT but never mandatory to
+SUCCEED: a missing or invalid catalog.json makes every catalog-assisted
+step degrade to its pre-catalog behavior rather than fail a request.
+
+Modules, grouped by when they run:
+
+  Build time (producing catalog.json; entry point is
+  scripts/generate_production_catalog.py)
+    vendor_docx.py  DOCX-specific parser: vendor tables -> VendorMetricRecord
+    vendor.py       format-agnostic: VendorMetricRecord -> Catalog
+    generator.py    Markdown-discovery helpers (metric -> reference_path,
+                    metric -> Markdown Category). Also holds a legacy,
+                    NON-production Markdown-sourced catalog generator.
+
+  Load time (once per process)
+    schema.py       CatalogEntry / Catalog data model and validation
+    loader.py       catalog.json -> validated Catalog (fails closed)
+    rules.py        keywords + priority, applied IN MEMORY by
+                    app/pipeline.py::_get_catalog -- not stored in the JSON
+
+  Request time
+    search.py       deterministic scoring/ranking, used by the pipeline for
+                    Router narrowing and Generator Level-1 candidates
+
+  Implemented but not yet scheduled in the runtime
+    reconciler.py   vendor-approved universe vs. live Prometheus status
+                    reconciliation. Covered by tests, but nothing in app/
+                    calls it, so every committed entry is still `approved`.
 """
 
 from app.catalog.schema import (

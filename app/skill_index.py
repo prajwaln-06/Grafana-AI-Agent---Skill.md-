@@ -90,9 +90,18 @@ class SkillMetadata:
 @dataclass
 class SkillIndex:
     """Loaded, parsed view of one skill package. Build once via
-    SkillIndex.load(skills_root); reuse across requests. Nothing here is
-    request-specific -- this is static skill content, not runtime schema
-    (that's label_discovery.py / field_discovery.py's job)."""
+    SkillIndex.load(skills_root, catalog_path); reuse across requests.
+    Nothing here is request-specific -- this is static skill content, not
+    runtime schema (that's label_discovery.py / field_discovery.py's job).
+
+    `catalog_path` (defaults to app/catalog/catalog.json next to the skills
+    root) is used only by metric_directory(): exporter overview.md files no
+    longer carry a Metric Directory table, so an exporter's metric universe
+    -- and therefore app/pipeline.py's known_prometheus_metrics -- is read
+    from the catalog. That is a plain load_catalog() call on every
+    metric_directory() lookup: no caching here, no rules.apply_rules(), and
+    no error handling (a bad catalog.json raises CatalogLoadError from this
+    method). It is independent of pipeline.py's own cached `_get_catalog`."""
 
     skills_root: Path
     raw_text: str

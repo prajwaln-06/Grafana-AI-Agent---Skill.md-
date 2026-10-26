@@ -20,7 +20,8 @@ model call succeeding.
                 datasource coverage" below.
   GENERATOR  -- SKILL.md Section 6 Steps 3-6 (select metric(s), apply
                 Section 8's parameter defaults, construct the query/queries,
-                assemble the mode/results shape).                 Given the full content of every matched reference, its sibling
+                assemble the mode/results shape).
+                Given the full content of every matched reference, its sibling
                 overview.md (for exporter/domain context), the catalog, the
                 relevant *-fundamentals.md file(s),
                 Section 7 (error handling -- needed for panic-mode framing),
@@ -89,6 +90,18 @@ boundary:
                  distinctions, query construction rules, domain
                  guardrails) that Catalog metadata deliberately does not
                  and must not replace.
+
+Catalog lifecycle (how catalog.json reaches this module): produced offline
+by scripts/generate_production_catalog.py from the vendor metric document
+(app/catalog/vendor_docx.py -> vendor.py), with each entry's
+`reference_path` resolved by a metric-NAME join against the skill
+package's Markdown. At first use, `_get_catalog` loads it (loader.py,
+fails closed -> `None` on any error), applies rules.apply_rules() IN
+MEMORY (keywords, priority, Markdown-Category vocabulary -- none of which
+is stored in the JSON), and caches the result for the life of the process.
+app/catalog/reconciler.py (live-Prometheus status reconciliation) is
+implemented but not called from anywhere in the runtime yet, so every
+status in the committed catalog is `approved`.
 
 The normal-request data flow:
 
@@ -1929,8 +1942,10 @@ class GeneratorContext:
     labels_block: str = ""
     attributes_block: str = ""
     # Batch 1 (Phase 2): the Level-1 catalog-narrowed Generator-candidate
-    # set (see app/config.py's `catalog_generator_candidates_enabled` and
-    # `catalog_metric_candidates` above). Each entry is a plain dict with
+    # set (built by `_build_metric_metadata` from `catalog_metric_candidates`
+    # -- unconditional now; the old `catalog_generator_candidates_enabled`
+    # switch no longer exists, see this module's docstring). Each entry is a
+    # plain dict with
     # EXACTLY the four keys `_metric_metadata_dict` produces --
     # name/type/help/unit -- never a CatalogEntry and never any of
     # keywords/priority/status/exporter/reference_path; those stay
@@ -2433,13 +2448,17 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
 #
 # Explicit architectural note (carried over from Batch 2 review): the
 # catalog these functions consume is agnostic to how it was produced.
-# app/catalog/generator.py's Markdown-parsing generator remains the
-# BOOTSTRAP mechanism for the 43 metrics this project already had
-# hand-authored Markdown for; it is not meant to become the permanent
-# gate for onboarding new metrics (see app/catalog/reconciler.py's module
-# docstring for the intended ongoing path). Nothing below cares which
-# mechanism produced app/catalog/catalog.json -- it just loads whatever
-# Catalog document is there.
+# Today app/catalog/catalog.json is generated from the vendor metric
+# document (scripts/generate_production_catalog.py -> app/catalog/
+# vendor_docx.py -> vendor.py). app/catalog/generator.py's Markdown-parsing
+# generator was the original BOOTSTRAP mechanism for the 43 metrics this
+# project already had hand-authored Markdown for, and is now legacy/
+# non-production. Neither is meant to become the permanent gate for
+# onboarding new metrics (see app/catalog/reconciler.py's module docstring
+# for the intended ongoing path, which is implemented but not yet called
+# from the runtime). Nothing below cares which mechanism produced
+# app/catalog/catalog.json -- it just loads whatever Catalog document is
+# there.
 
 _catalog_cache: Catalog | None = None
 _catalog_load_failed_path: str | None = None
@@ -2476,13 +2495,14 @@ def _format_metric_metadata_for_prompt(metric_metadata: tuple[dict[str, str | No
 def _get_catalog(settings: Settings) -> Catalog | None:
     """Lazily loads and caches the catalog from `settings.catalog_path`,
     then applies Phase 5's rules (app/catalog/rules.py) to it in memory
-    before caching. The on-disk catalog.json committed by generator.py
-    (Phase 2) is deliberately left as pure, source-derived bootstrap
-    output -- keywords/priority classification is applied here, at load
-    time, rather than baked into the committed artifact, so the two
-    concerns (what generator.py derived from Markdown vs. what rules.py
-    classified) stay visibly separate and re-running apply_rules() here
-    can never drift from what's actually committed to the repo.
+    before caching. The on-disk catalog.json written by scripts/
+    generate_production_catalog.py (from the vendor metric document) is
+    deliberately left as pure, source-derived output -- keywords/priority
+    classification is applied here, at load time, rather than baked into
+    the committed artifact, so the two concerns (what the vendor source
+    and reference-path join provided vs. what rules.py classified) stay
+    visibly separate and re-running apply_rules() here can never drift
+    from what's actually committed to the repo.
 
     Returns None (never raises) if the file is missing or invalid -- a
     broken or absent catalog.json must degrade every catalog-dependent
@@ -2528,7 +2548,14 @@ def reset_catalog_cache() -> None:
     """Clears the module-level catalog cache. Exists for tests (and for a
     future admin/reload endpoint mirroring SkillIndex's own reload_skill())
     that need a fresh load after catalog.json changes on disk -- ordinary
-    request handling never needs to call this."""
+    request handling never needs to call this.
+
+    NOTE: nothing outside tests calls this today, and
+    ObservabilityQueryBuilderAgent.reload_skill() does NOT call it: that
+    reload re-parses SKILL.md (and SkillIndex.metric_directory re-reads
+    catalog.json on each call), but this process-wide cache -- which drives
+    Router narrowing, Generator candidates, and catalog-status validation --
+    keeps serving the catalog it first loaded until the process restarts."""
     global _catalog_cache, _catalog_load_failed_path
     _catalog_cache = None
     _catalog_load_failed_path = None

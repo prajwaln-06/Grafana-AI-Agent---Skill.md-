@@ -8,13 +8,22 @@ SKILL.md.
 
 This module has exactly one responsibility: turning a catalog.json file on
 disk into a validated Catalog object. It does NOT:
-  - generate catalog content (that's generator.py, Phase 2+)
-  - perform candidate retrieval/ranking (that's search.py, Phase 6)
-  - reconcile against Prometheus/vendor data (that's reconciler.py, Phase 4)
+  - generate catalog content (that's scripts/generate_production_catalog.py,
+    via vendor_docx.py / vendor.py)
+  - perform candidate retrieval/ranking (that's search.py)
+  - apply keyword/priority rules (that's rules.py, applied by the caller)
+  - reconcile against Prometheus/vendor data (that's reconciler.py)
 
-Nothing in app/pipeline.py, app/validator.py, or app/skill_index.py imports
-this module yet. It is introduced now, standalone and fully tested, so that
-later phases have a stable, already-proven loading path to build on.
+Callers of load_catalog():
+  - app/pipeline.py::_get_catalog -- the request path. Catches
+    CatalogLoadError and degrades to "no catalog"; on success it applies
+    rules.apply_rules() in memory and caches the result process-wide.
+  - app/skill_index.py::SkillIndex.metric_directory -- reads the exporter's
+    metric universe from the catalog when an overview.md has no legacy
+    Metric Directory table.
+  - scripts/evaluate_catalog_retrieval.py -- offline retrieval measurement.
+app/validator.py does not import this module; it receives catalog statuses
+as a plain {metric_name: status} dict built by app/pipeline.py.
 """
 
 from __future__ import annotations
@@ -100,16 +109,18 @@ def load_catalog(path: Path) -> Catalog:
 
 
 class CatalogIndex:
-    """Process-wide, load-once-reuse-everywhere wrapper around a loaded
-    Catalog -- mirrors the role SkillIndex plays for SKILL.md, and is
-    meant to sit alongside it once later phases wire catalog search into
-    app/pipeline.py (see app/agent.py's existing skill-index
-    load/reload pattern for the analogous convention this follows).
+    """Load-once wrapper around a loaded Catalog, with a reload() that keeps
+    the previous catalog if the new file is invalid. Mirrors the role
+    SkillIndex plays for SKILL.md.
 
-    Nothing constructs a CatalogIndex in the request path yet in Phase 1 --
-    it exists now so Phase 9/10 (SkillIndex filtered routing, Router
-    integration) has a stable, already-tested object to depend on instead
-    of introducing a new loading convention at the point of first use.
+    NOTE: currently NOT used by the request path. It was introduced in
+    Phase 1 as a stable object for later integration phases to depend on,
+    but app/pipeline.py instead calls load_catalog() directly and keeps its
+    own module-level cache (`_catalog_cache`, see `_get_catalog` and
+    `reset_catalog_cache`). Nothing in app/ constructs a CatalogIndex; it is
+    retained, and covered by tests/test_catalog_loader.py, as a ready-made
+    hot-reload wrapper should the pipeline's global cache ever be replaced
+    with an explicit object.
     """
 
     def __init__(self, catalog: Catalog, path: Path):

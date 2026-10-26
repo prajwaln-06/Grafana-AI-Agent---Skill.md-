@@ -5,7 +5,8 @@ Pure data definitions for the metric catalog: what a catalog entry is, what
 values its fields may take, and how a full catalog.json document is shaped.
 
 No I/O lives here (that's loader.py's job) and no generation/retrieval logic
-lives here (that's generator.py / search.py, later phases). This mirrors
+lives here (generation is vendor.py / generator.py, retrieval is search.py).
+This mirrors
 app/skill_index.py's own separation between parsing structures
 (RoutingRow, SkillMetadata) and the class that reads a file off disk
 (SkillIndex.load).
@@ -80,9 +81,10 @@ class MetricType(str, Enum):
 
 class CatalogStatus(str, Enum):
     """The four states from the frozen catalog-status model (source-of-truth
-    section of the spec). Reconciliation logic (reconciler.py, Phase 4) is
-    what transitions an entry between these; schema.py only defines what the
-    valid values are.
+    section of the spec). Reconciliation logic (reconciler.py) is what
+    transitions an entry between these; schema.py only defines what the
+    valid values are. (reconciler.py is implemented but not yet run by the
+    runtime, so every entry in the committed catalog.json is `approved`.)
 
     approved:                   supported and currently available/usable.
     approved_unavailable:       supported by the approved universe but
@@ -120,9 +122,10 @@ _VALID_PRIORITIES = {p.value for p in Priority}
 # (new exporters, new domains) without a code change, the same way SKILL.md's
 # routing table can gain a new row without app/skill_index.py changing. The
 # one hard rule is that it must be a non-empty string -- "uncategorized" is
-# the explicit fallback value generator.py should use for a metric it
-# couldn't confidently classify (see category-rules discussion, rules.py,
-# Phase 5), never a blank string standing in for "unknown".
+# the explicit fallback value for a metric with no known category --
+# reconciler.py assigns it to runtime-discovered metrics, and rules.py's
+# classify_priority maps it to Priority.REVIEW -- never a blank string
+# standing in for "unknown".
 UNCATEGORIZED = "uncategorized"
 
 
@@ -217,8 +220,9 @@ class CatalogEntry:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Inverse of from_dict; used by generator.py (Phase 2+) to write
-        catalog.json and by tests to round-trip an entry."""
+        """Inverse of from_dict; used by generator.write_catalog() (called
+        by scripts/generate_production_catalog.py) to write catalog.json,
+        and by tests to round-trip an entry."""
         return {
             "name": self.name,
             "type": self.type,
@@ -299,10 +303,9 @@ class Catalog:
     # Candidate ranking/scoring is search.py's job (Phase 6), not schema.py's.
 
     def get(self, name: str) -> CatalogEntry | None:
-        """O(1) exact-name lookup would be nice, but Phase 1 keeps this
-        linear and simple since the current catalog is 43 entries; revisit
-        with an index dict only if Phase 17's scale testing shows it
-        matters at 500-1000 entries."""
+        """Linear scan, deliberately kept simple: the production catalog has
+        43 entries today. Revisit with an index dict only if scale testing
+        shows it matters at 500-1000 entries."""
         for entry in self.metrics:
             if entry.name == name:
                 return entry

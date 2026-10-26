@@ -11,8 +11,9 @@ The question set (QUESTION_SET below) is NOT invented for this harness --
 every (question, expected_metric) pair is copied verbatim from this
 project's own source documentation: the "Typical User Questions" column
 (node-exporter) and "Typical Query Intent" column (DCGM) of
-prometheus_metrics.docx, the same document generator.py's Markdown
-ultimately derives from. Using the project's own already-written intent
+prometheus_metrics.docx -- the vendor metric document, whose table shape
+app/catalog/vendor_docx.py parses to build the production catalog.
+Using the project's own already-written intent
 descriptions as the evaluation set means this harness measures against
 real, pre-existing statements of what each metric is for, not questions
 this script's author picked to make the results look good.
@@ -29,7 +30,9 @@ later doesn't require silently loosening a test to keep it passing.
 
 Usage: `python -m scripts.evaluate_catalog_retrieval` (from the repo
 root) prints a full report; import `evaluate()` to use the numbers
-programmatically (e.g. from a test, or a future shadow-mode dashboard).
+programmatically (e.g. from a test, or a future reporting dashboard). The
+migration-time shadow mode this was originally meant to feed has since been
+removed (see app/pipeline.py's module docstring).
 """
 
 from __future__ import annotations

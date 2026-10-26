@@ -20,12 +20,14 @@ production cutover (see scripts/generate_production_catalog.py):
 
   2. PRODUCTION, ACTIVELY USED: build_markdown_reference_index() and
      build_markdown_category_index() -- both pure Markdown-discovery
-     helpers (metric name -> reference_path, and metric name -> Markdown
-     "Category" text, respectively) that scripts/generate_production_
-     catalog.py and app/pipeline.py::_get_catalog() actually call at
-     production generation time / request time. Neither builds a Catalog
-     on its own; both are joined against vendor-sourced records elsewhere
-     (app/catalog/vendor.py, app/catalog/rules.py).
+     helpers. build_markdown_reference_index() (metric name ->
+     reference_path) is called at generation time, by scripts/generate_
+     production_catalog.py and vendor_docx.py's CLI.
+     build_markdown_category_index() (metric name -> Markdown "Category"
+     text) is called at load time, by app/pipeline.py::_get_catalog().
+     Neither builds a Catalog on its own; both are joined against
+     vendor-sourced records elsewhere (app/catalog/vendor.py,
+     app/catalog/rules.py).
 
 Exporter overview.md files provide navigation and domain context only --
 they do not carry an authoritative Metric Directory table anymore

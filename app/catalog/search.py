@@ -9,10 +9,15 @@ architecture (§2.5 Retrieval):
    Exact scoring weights and Top-N are experimental and must be validated
    rather than guessed."
 
-This module is NOT wired into Router/SkillIndex yet -- that is explicitly
-Phase 9/10 work (Batch 3/4). search() is a standalone function a future
-integration point can call; nothing here assumes it is being called from
-within the request pipeline.
+This module is wired into the request path through app/pipeline.py:
+`catalog_narrowing_candidates` (Router-level Section 4 narrowing) and
+`catalog_metric_candidates` (Generator Level-1 candidates) both call
+search(), with top_n deliberately uncapped for those callers (see
+pipeline.py's `_NARROW_SEARCH_TOP_N`) and a confidence floor
+(`Settings.catalog_narrow_min_score`) applied to the TOP score. search()
+itself remains a pure, standalone function that assumes nothing about the
+pipeline; DEFAULT_TOP_N and DEFAULT_MIN_SCORE below are its own defaults,
+not the values production uses.
 
 Weights below (`_WEIGHTS`, `DEFAULT_MIN_SCORE`) are a documented starting
 point, not a tuned result -- the frozen spec is explicit that these are
