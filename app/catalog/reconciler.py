@@ -19,12 +19,13 @@ runtime-discovered unknown metric to "approved".
 
 `reconcile()` takes `vendor_catalog: Catalog` -- a plain Catalog object --
 and has no idea, and must never need to know, how it was produced. Today
-that Catalog happens to come from generator.py's Markdown-parsing (Phase
-2), because that is the correct BOOTSTRAP mechanism for the 43 metrics
-this project already had fully written, hand-authored Markdown for.
+that Catalog is built from the vendor metric document
+(scripts/generate_production_catalog.py -> vendor_docx.py -> vendor.py).
+It was originally bootstrapped from the project's hand-authored Markdown
+by generator.py (Phase 2); that path is now legacy/non-production.
 
-That is explicitly NOT meant to be the permanent way every future metric
-enters the catalog. Requiring a full "### `metric_name`" Markdown section
+Neither source is meant to be a permanent gate on onboarding new metrics.
+Requiring a full "### `metric_name`" Markdown section
 with Category/Purpose/Type bullets for every new metric before it can be
 catalogued would defeat the point of the hybrid model -- the whole reason
 `discovered_pending_review` exists as a status is to let a metric
@@ -35,9 +36,9 @@ anyone first writing Markdown for it.
 
 So, concretely, two independent paths feed a metric into the catalog:
 
-  1. Markdown-documented, vendor-approved metrics (today's 43) --
-     generator.py (Phase 2) -> vendor_catalog -> reconcile() confirms/
-     denies availability against runtime discovery.
+  1. Vendor-approved metrics (today's 43) -- vendor_docx.py / vendor.py
+     -> vendor_catalog -> reconcile() confirms/denies availability against
+     runtime discovery.
   2. Metrics Prometheus is exposing that are NOT yet in the vendor-
      approved catalog at all -- reconcile() itself builds a minimal entry
      for these directly from runtime discovery (name, type, help), status
@@ -48,12 +49,20 @@ So, concretely, two independent paths feed a metric into the catalog:
      lightweight vendor manifest, or direct curation) or set it to
      "rejected" -- reconcile() itself never performs that promotion.
 
-Phase 2's Markdown generator therefore remains the *migration* path for
-already-documented metrics; path 2 is the intended *ongoing* onboarding
-path for new metrics going forward, and this module is written so that
-replacing path 1's source (e.g. with a lightweight vendor manifest that
-carries only name/type/help/category without Level-2 semantic Markdown)
-requires zero changes here -- reconcile() only ever consumes a Catalog.
+Phase 2's Markdown generator was therefore only the *migration* path for
+already-documented metrics. The production source has since moved to the
+vendor document with zero changes to this module -- exactly the decoupling
+described above. Path 2 is the intended *ongoing* onboarding path for new
+metrics, and reconcile() still only ever consumes a Catalog.
+
+---- Runtime status
+
+reconcile() and the discover_* helpers are implemented and unit-tested
+(tests/test_reconciler.py), but nothing in app/ calls them: no startup hook,
+scheduled job, or endpoint runs reconciliation or persists its result. The
+committed catalog.json therefore contains only `approved` entries (the
+vendor builder's default); `approved_unavailable` and
+`discovered_pending_review` can only appear once this is wired in.
 """
 
 from __future__ import annotations

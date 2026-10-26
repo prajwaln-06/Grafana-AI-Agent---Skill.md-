@@ -146,8 +146,10 @@ class Settings(BaseSettings):
     #     architecture explicitly does not have.
     catalog_path: Path = Field(
         default=Path("app/catalog/catalog.json"),
-        description="Path to the generated metric catalog (see app/catalog/generator.py), "
-                    "always read at pipeline startup for the normal query path (Router-level "
+        description="Path to the generated metric catalog (produced by "
+                    "scripts/generate_production_catalog.py from the vendor metric document; "
+                    "see app/catalog/vendor_docx.py), loaded lazily on first use and cached for "
+                    "the life of the process for the normal query path (Router-level "
                     "narrowing and Generator-level candidate construction; see "
                     "app/pipeline.py's `_get_catalog`). A missing or invalid file at this path "
                     "never crashes the pipeline -- the whole catalog-narrowing/candidate/"

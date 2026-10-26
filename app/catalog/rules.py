@@ -2,11 +2,18 @@
 app/catalog/rules.py
 
 Phase 5: deterministic, rule-based generation of the two catalog fields
-Phase 2/4 deliberately left at their explicit "not yet classified"
-placeholders -- `keywords` (always `()`) and `priority` (always
-`Priority.REVIEW`) -- for every entry, regardless of how that entry
-entered the catalog (Markdown-documented vendor metric, or a runtime-only
-`discovered_pending_review` entry from reconciler.py).
+that every catalog-construction path (vendor.py's
+build_catalog_from_vendor_records, the legacy generator.py path, and
+reconciler.py's runtime-discovered entries) deliberately leaves at their
+explicit "not yet classified" placeholders -- `keywords` (always `()`) and
+`priority` (always `Priority.REVIEW`).
+
+These rules are NOT persisted into catalog.json. app/pipeline.py::
+_get_catalog runs apply_rules() in memory each time it loads the catalog
+(together with the Markdown-Category keyword enrichment from
+generator.build_markdown_category_index()), so the committed file stays
+pure source data. That is why every entry in the committed catalog.json
+shows `"keywords": []` and `"priority": "Review"`.
 
 This module is the frozen architecture's "one source of truth for
 category/priority patterns" (Implementation Rule 4): the priority pattern
@@ -17,10 +24,12 @@ generator.py, reconciler.py, and search.py all treat category/priority as
 data they read or produce via this module, never patterns they duplicate.
 
 Explicitly NOT this module's job:
-  - Assigning `category` for a Markdown-documented metric -- that already
-    comes straight from the domain file's own "- **Category:**" bullet
-    (generator.py, Phase 2), which is more precise, source-derived data
-    that a heuristic here should never override.
+  - Assigning `category`. Since the vendor-source cutover, an entry's
+    category is the vendor document's own Category text, carried verbatim
+    by vendor_docx.py / vendor.py. (The Markdown "- **Category:**" bullet
+    is used here only as extra keyword vocabulary, via `markdown_category`
+    -- never written to CatalogEntry.category.) That is source-derived data
+    a heuristic here should never override.
   - Deciding whether a metric is `approved`/`approved_unavailable`/etc --
     that is reconciler.py's job (Phase 4). This module only ever touches
     `keywords` and `priority`.
