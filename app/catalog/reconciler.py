@@ -48,6 +48,9 @@ So, concretely, two independent paths feed a metric into the catalog:
      however that side is produced by then -- generator.py, a future
      lightweight vendor manifest, or direct curation) or set it to
      "rejected" -- reconcile() itself never performs that promotion.
+     Today that human decision is recorded in app/catalog/reviews.py
+     (scripts/review_catalog.py): an approval joins the approved universe,
+     a rejection is passed back in as reconcile()'s `rejections`.
 
 Phase 2's Markdown generator was therefore only the *migration* path for
 already-documented metrics. The production source has since moved to the
@@ -57,12 +60,13 @@ metrics, and reconcile() still only ever consumes a Catalog.
 
 ---- Runtime status
 
-reconcile() and the discover_* helpers are implemented and unit-tested
-(tests/test_reconciler.py), but nothing in app/ calls them: no startup hook,
-scheduled job, or endpoint runs reconciliation or persists its result. The
-committed catalog.json therefore contains only `approved` entries (the
-vendor builder's default); `approved_unavailable` and
-`discovered_pending_review` can only appear once this is wired in.
+reconcile() and the discover_* helpers are called by run_reconciliation(),
+which is shared by scripts/reconcile_catalog.py / scripts/review_catalog.py
+(offline) and app/catalog/runtime.py (a background refresh, when
+Settings.catalog_runtime_reconciliation_enabled). Nothing here persists a
+result: the committed catalog.json still contains only `approved` entries;
+the reconciled catalog is published in memory by runtime.py, and explicit
+human decisions are persisted separately by reviews.py.
 """
 
 from __future__ import annotations

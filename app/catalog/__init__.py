@@ -31,10 +31,21 @@ Modules, grouped by when they run:
     search.py       deterministic scoring/ranking, used by the pipeline for
                     Router narrowing and Generator Level-1 candidates
 
-  Implemented but not yet scheduled in the runtime
+  Review and runtime lifecycle (Discover -> Pending Review -> Approve or
+  Reject -> Persist -> Reconcile -> Publish -> Query pipeline)
     reconciler.py   vendor-approved universe vs. live Prometheus status
-                    reconciliation. Covered by tests, but nothing in app/
-                    calls it, so every committed entry is still `approved`.
+                    reconciliation, plus an optional DiscoveryScope that
+                    keeps irrelevant metrics out of the review queue.
+    reviews.py      validated, atomically-written reviews.json: explicit
+                    human approve/reject decisions, kept separate from the
+                    vendor catalog.json. Entry points:
+                    scripts/review_catalog.py (decide) and
+                    scripts/reconcile_catalog.py (read-only report).
+    runtime.py      CatalogRuntime: builds the effective catalog from
+                    catalog.json + reviews.json (+ live discovery when
+                    CATALOG_RUNTIME_RECONCILIATION_ENABLED), publishes it as
+                    an immutable snapshot, and refreshes it in a background
+                    thread. This snapshot is what the request path reads.
 """
 
 from app.catalog.schema import (

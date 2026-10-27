@@ -22,6 +22,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:  # annotation only; keeps this module free of catalog imports at load time
+    from app.catalog.schema import Catalog
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 NAME_RE = re.compile(r"^name:\s*(.+)$", re.MULTILINE)
@@ -95,24 +99,36 @@ class SkillIndex:
     runtime schema (that's label_discovery.py / field_discovery.py's job).
 
     `catalog_path` (defaults to app/catalog/catalog.json next to the skills
-    root) is used only by metric_directory(): exporter overview.md files no
-    longer carry a Metric Directory table, so an exporter's metric universe
-    -- and therefore app/pipeline.py's known_prometheus_metrics -- is read
-    from the catalog. That is a plain load_catalog() call on every
-    metric_directory() lookup: no caching here, no rules.apply_rules(), and
-    no error handling (a bad catalog.json raises CatalogLoadError from this
-    method). It is independent of pipeline.py's own cached `_get_catalog`."""
+    root) and `catalog_provider` are used only by metric_directory(): exporter
+    overview.md files no longer carry a Metric Directory table, so an
+    exporter's metric universe -- and therefore app/pipeline.py's
+    known_prometheus_metrics -- is read from the catalog.
+
+    With a `catalog_provider` (the running agent passes one that returns the
+    snapshot app/catalog/runtime.py has published -- the very catalog
+    pipeline._get_catalog returns), the universe is that snapshot restricted
+    to usable statuses, so the two views cannot disagree and a rejected or
+    pending metric is never "known". Without one (tests, scripts) it falls
+    back to a plain load_catalog(catalog_path) on every lookup: no caching, no
+    rules.apply_rules(), no status filtering, and a bad catalog.json raises
+    CatalogLoadError from this method."""
 
     skills_root: Path
     raw_text: str
     metadata: SkillMetadata
     routing_rows: list[RoutingRow] = field(default_factory=list)
     catalog_path: Path | None = None
+    catalog_provider: Callable[[], "Catalog | None"] | None = None
 
     # ---- construction ----------------------------------------------------
 
     @classmethod
-    def load(cls, skills_root: Path, catalog_path: Path | None = None) -> "SkillIndex":
+    def load(
+        cls,
+        skills_root: Path,
+        catalog_path: Path | None = None,
+        catalog_provider: Callable[[], "Catalog | None"] | None = None,
+    ) -> "SkillIndex":
         skill_md_path = skills_root / "SKILL.md"
         if not skill_md_path.exists():
             raise SkillIndexError(
@@ -137,6 +153,7 @@ class SkillIndex:
             metadata=metadata,
             routing_rows=routing_rows,
             catalog_path=catalog_path or skills_root.parent / "app" / "catalog" / "catalog.json",
+            catalog_provider=catalog_provider,
         )
         index.validate()
         return index
@@ -311,11 +328,27 @@ class SkillIndex:
                     metrics[metric_name] = f"{overview_dir}/{domain_file}" if overview_dir else domain_file
         if metrics:
             return metrics
+        exporter = overview_reference_path.split("/")[-2]
+        if self.catalog_provider is not None:
+            from app.catalog.loader import CatalogLoadError
+            from app.catalog.schema import CatalogStatus
+
+            snapshot = self.catalog_provider()
+            if snapshot is None:
+                raise CatalogLoadError(
+                    "No effective metric catalog is available (catalog.json or the "
+                    "review store could not be loaded; see the server log)."
+                )
+            usable = {CatalogStatus.APPROVED.value, CatalogStatus.APPROVED_UNAVAILABLE.value}
+            return {
+                entry.name: entry.reference_path
+                for entry in snapshot.metrics
+                if entry.exporter == exporter and entry.status in usable
+            }
         if self.catalog_path is None:
             return {}
         from app.catalog.loader import load_catalog
 
-        exporter = overview_reference_path.split("/")[-2]
         catalog = load_catalog(self.catalog_path)
         # Every Catalog metric for this exporter, regardless of whether
         # reference_path is None. A vendor-sourced metric with no matching
