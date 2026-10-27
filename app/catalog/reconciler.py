@@ -71,7 +71,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
-from typing import Any
+from typing import Any, Mapping
 
 import requests
 
@@ -89,6 +89,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_SECONDS = 15
 _VALID_TYPES = {t.value for t in MetricType}
 _UNKNOWN_EXPORTER = "unknown"
+# Public alias: the exporter sentinel for a runtime-discovered metric whose
+# exporter nobody has stated yet. app/catalog/reviews.py refuses to accept an
+# approval that still carries it.
+UNKNOWN_EXPORTER = _UNKNOWN_EXPORTER
 
 _session: requests.Session | None = None
 
@@ -293,6 +297,7 @@ def reconcile(
     previous_catalog: Catalog | None = None,
     generated_at: str | None = None,
     discovery_scope: DiscoveryScope | None = None,
+    rejections: Mapping[str, RuntimeMetricInfo] | None = None,
 ) -> ReconciliationReport:
     """Reconciles `vendor_catalog` (see module docstring: the intended,
     approved-universe side of the hybrid model, produced however the
@@ -305,6 +310,16 @@ def reconcile(
     in a refreshed vendor catalog -- otherwise "rejected" would be a
     decision that silently undoes itself on the very next reconciliation
     run, which would make manual curation pointless.
+
+    `rejections`, if given (even as an empty mapping), is the AUTHORITATIVE
+    set of explicit human rejections ({name: stored type/HELP snapshot}, see
+    app/catalog/reviews.py): exactly those names are rejected, and
+    `previous_catalog` is then used only to report availability transitions,
+    never to carry a rejection forward. That is what lets a rejection that a
+    human has cleared actually go away, while one that has not been cleared
+    can never be undone by rediscovery or by the vendor catalog. When
+    `rejections` is None the original behavior applies (a status of rejected
+    in `previous_catalog` is preserved).
 
     Status decisions:
       - vendor-approved metric, previously rejected            -> rejected (preserved)
@@ -347,6 +362,11 @@ def reconcile(
 
     runtime_metadata = runtime_metadata or {}
 
+    def is_rejected(name: str) -> bool:
+        if rejections is not None:
+            return name in rejections
+        return previous_status.get(name) == CatalogStatus.REJECTED.value
+
     reconciled: list[CatalogEntry] = []
     newly_discovered: list[str] = []
     became_unavailable: list[str] = []
@@ -360,7 +380,7 @@ def reconcile(
         prior = previous_status.get(entry.name)
         present = entry.name in runtime_names
 
-        if prior == CatalogStatus.REJECTED.value:
+        if is_rejected(entry.name):
             new_status = CatalogStatus.REJECTED.value
             kept_rejected.append(entry.name)
         elif present:
@@ -380,14 +400,16 @@ def reconcile(
 
     # ---- runtime-only side: discovered_pending_review (path 2) ---------
     for name in sorted(runtime_names - vendor_names):
-        if previous_status.get(name) == CatalogStatus.REJECTED.value:
+        if is_rejected(name):
             kept_rejected.append(name)
+            stored = rejections.get(name) if rejections is not None else None
             reconciled.append(
                 _minimal_entry(
                     name,
                     runtime_metadata.get(name),
                     status=CatalogStatus.REJECTED.value,
-                    fallback_type=_prior_type(previous_catalog, name),
+                    fallback_type=(stored.type if stored else None)
+                    or _prior_type(previous_catalog, name),
                 )
             )
             continue
@@ -445,6 +467,7 @@ def run_reconciliation(
     previous_catalog: Catalog | None = None,
     discovery_scope: DiscoveryScope | None = None,
     generated_at: str | None = None,
+    rejections: Mapping[str, RuntimeMetricInfo] | None = None,
 ) -> ReconciliationReport:
     """Discovery + reconcile() in one call -- the single orchestration entry
     point shared by the offline CLI and (later) the runtime refresh, so the
@@ -479,6 +502,7 @@ def run_reconciliation(
         previous_catalog=previous_catalog,
         generated_at=generated_at,
         discovery_scope=discovery_scope,
+        rejections=rejections,
     )
 
 

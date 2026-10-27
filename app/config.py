@@ -206,6 +206,17 @@ class Settings(BaseSettings):
                     "failure' convention.",
     )
 
+    catalog_reviews_path: Path = Field(
+        default=Path("app/catalog/reviews.json"),
+        description="Path to the human-review store (explicit approve/reject decisions, "
+                    "see app/catalog/reviews.py). Separate from catalog_path: the vendor "
+                    "catalog is never edited by reviews. A MISSING file means 'no decisions "
+                    "yet'; a file that exists but is malformed or self-conflicting makes the "
+                    "runtime refresh fail closed (the previous snapshot stays in place). In a "
+                    "container this must live on a mounted volume shared with whoever runs "
+                    "scripts/review_catalog.py, or decisions are lost on redeploy.",
+    )
+
     # --- Runtime metric discovery scope (app/catalog/reconciler.py) ---
     catalog_discovery_include_patterns: list[str] = Field(
         default_factory=list,

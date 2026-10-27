@@ -33,6 +33,7 @@ def _write_catalog(path, names):
 def _settings(tmp_path, **kw):
     return Settings(
         gemini_api_key="x", catalog_path=tmp_path / "catalog.json",
+        catalog_reviews_path=tmp_path / "reviews.json",
         prometheus_url="http://prom.test:9090", **kw,
     )
 
@@ -139,3 +140,38 @@ def test_report_truncates_long_lists_unless_all_requested(tmp_path):
     _, full = _run(_settings(tmp_path), s, show_all=True)
     assert "and 15 more" in short and "acme_039" not in short
     assert "acme_039" in full
+
+
+def test_report_reflects_persisted_rejections_and_approved_discoveries(tmp_path):
+    _write_catalog(tmp_path / "catalog.json", ["node_load1"])
+    (tmp_path / "reviews.json").write_text(json.dumps({"schema_version": 1, "decisions": [
+        {"name": "node_load1", "decision": "rejected", "decided_at": "2026-10-27T05:00:00Z"},
+        {"name": "acme_ok", "decision": "approved", "decided_at": "2026-10-27T05:00:00Z",
+         "type": "gauge", "category": "Q", "exporter": "node-exporter",
+         "reference_path": "references/node-exporter/cpu.md"},
+    ]}))
+    session = _session(["node_load1", "acme_ok", "acme_new"],
+                       {"acme_new": [{"type": "gauge", "help": "n"}]})
+    code, text = _run(_settings(tmp_path), session)
+    assert code == script.EXIT_OK
+    assert "Review decisions: 1 approved, 1 rejected" in text
+    assert "Preserved rejections: 1" in text and "node_load1" in text
+    assert "Approved metrics available at runtime: 1" in text  # acme_ok, not the rejected vendor metric
+    assert "New discoveries pending review: 1" in text and "acme_new" in text
+
+
+def test_malformed_review_store_exits_2_instead_of_ignoring_decisions(tmp_path):
+    _write_catalog(tmp_path / "catalog.json", ["node_load1"])
+    (tmp_path / "reviews.json").write_text("{broken")
+    code, text = _run(_settings(tmp_path), _session(["node_load1"], {}))
+    assert code == script.EXIT_CONFIG_ERROR and "CONFIGURATION ERROR" in text
+
+
+def test_superseded_approval_record_is_warned_about_not_silently_dropped(tmp_path):
+    _write_catalog(tmp_path / "catalog.json", ["node_load1"])
+    (tmp_path / "reviews.json").write_text(json.dumps({"schema_version": 1, "decisions": [
+        {"name": "node_load1", "decision": "approved", "decided_at": "2026-10-27T05:00:00Z",
+         "type": "gauge", "category": "Q", "exporter": "node-exporter",
+         "reference_path": "references/node-exporter/cpu.md"}]}))
+    code, text = _run(_settings(tmp_path), _session(["node_load1"], {}))
+    assert code == script.EXIT_OK and "superseded by a vendor entry" in text
