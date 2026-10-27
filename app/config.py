@@ -217,6 +217,27 @@ class Settings(BaseSettings):
                     "scripts/review_catalog.py, or decisions are lost on redeploy.",
     )
 
+    catalog_runtime_reconciliation_enabled: bool = Field(
+        default=False,
+        description="When True, the server starts a background thread (app/catalog/runtime.py) "
+                    "that discovers metrics from prometheus_url at startup and every "
+                    "catalog_runtime_refresh_seconds, reconciles them with the vendor catalog and "
+                    "review decisions, and publishes the result as the catalog the query pipeline "
+                    "uses (statuses approved / approved_unavailable / discovered_pending_review / "
+                    "rejected). Also turns on catalog-status validation (see "
+                    "catalog_metric_status_validation_enabled), because the statuses it enforces "
+                    "only exist once this is on. Discovery never runs inside a user request, and a "
+                    "failed discovery keeps the last good snapshot. Defaults to OFF: the pipeline "
+                    "then uses the vendor catalog plus review decisions, with no availability data.",
+    )
+    catalog_runtime_refresh_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        description="Seconds between runtime reconciliation refreshes (only used when "
+                    "catalog_runtime_reconciliation_enabled is True). Each refresh makes two "
+                    "Prometheus API calls (label values + metadata).",
+    )
+
     # --- Runtime metric discovery scope (app/catalog/reconciler.py) ---
     catalog_discovery_include_patterns: list[str] = Field(
         default_factory=list,
