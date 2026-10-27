@@ -70,6 +70,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
+from typing import Any
 
 import requests
 
@@ -145,9 +147,9 @@ def discover_runtime_metadata(
     name, when the running Prometheus/exporters expose it (most exporters,
     including node_exporter and dcgm-exporter, do). Returns None (never
     {}) on any connection/parse failure. If a metric name has metadata
-    from more than one target, the first entry is used -- in practice
-    every target scraping the same exporter reports the same type/HELP for
-    a given metric name, so this is a stable choice, not an arbitrary one.
+    from more than one target, the first entry's HELP is used. If those
+    entries disagree about the TYPE, the type is reported as undetermined
+    (None) instead of picking one -- see the warning logged below.
     """
     url = base_url.rstrip("/") + "/api/v1/metadata"
     try:
@@ -169,8 +171,79 @@ def discover_runtime_metadata(
         first = entries[0] if isinstance(entries, list) else entries
         if not isinstance(first, dict):
             continue
+        reported_types = {
+            e.get("type")
+            for e in (entries if isinstance(entries, list) else [entries])
+            if isinstance(e, dict)
+        }
+        if len(reported_types) > 1:
+            # Prometheus's documented response lists *unique* metadata objects
+            # per metric name across targets, so two targets can disagree.
+            # HELP text disagreeing is harmless, but a disagreement about the
+            # TYPE means this module cannot know which is right -- report it
+            # as undetermined (reconcile() then skips it) rather than letting
+            # "first entry wins" silently pick one.
+            logger.warning(
+                "Prometheus metadata for %r reports conflicting types %s; "
+                "treating its type as undetermined.",
+                name,
+                sorted(str(t) for t in reported_types),
+            )
+            result[name] = RuntimeMetricInfo(type=None, help=first.get("help"))
+            continue
         result[name] = RuntimeMetricInfo(type=first.get("type"), help=first.get("help"))
     return result
+
+
+# ---- discovery scope ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DiscoveryScope:
+    """Explicit, configurable rules for which *runtime-only* metric names are
+    allowed into the review queue (`discovered_pending_review`).
+
+    Why this exists: a Prometheus server also exposes its own and every other
+    scrape target's metrics (go_*, process_*, scrape_*, ...). Without a scope,
+    each of those becomes a pending review item. The rules are shell-style
+    globs (case-sensitive, like Prometheus metric names), supplied by the
+    deployment -- nothing is hard-coded here, and the default (no patterns)
+    is "everything is in scope", i.e. exactly the previous behavior.
+
+      - If `include` is non-empty, a name must match at least one include glob.
+      - A name matching any `exclude` glob is out of scope (exclude wins).
+
+    The scope ONLY limits which previously-unknown metrics get queued for
+    review. It never affects availability of vendor/approved metrics, and it
+    never un-rejects anything: a metric a human rejected stays rejected
+    regardless of scope.
+    """
+
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for label, patterns in (("include", self.include), ("exclude", self.exclude)):
+            for pattern in patterns:
+                if not isinstance(pattern, str) or not pattern.strip():
+                    raise ValueError(
+                        f"DiscoveryScope {label} patterns must be non-empty "
+                        f"strings, got {pattern!r}."
+                    )
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> "DiscoveryScope":
+        return cls(
+            include=tuple(settings.catalog_discovery_include_patterns),
+            exclude=tuple(settings.catalog_discovery_exclude_patterns),
+        )
+
+    def allows(self, name: str) -> bool:
+        if any(fnmatchcase(name, p) for p in self.exclude):
+            return False
+        if self.include and not any(fnmatchcase(name, p) for p in self.include):
+            return False
+        return True
 
 
 # ---- reconciliation -------------------------------------------------------
@@ -205,6 +278,12 @@ class ReconciliationReport:
     became_available_again: tuple[str, ...] = field(default_factory=tuple)
     kept_rejected: tuple[str, ...] = field(default_factory=tuple)
     undetermined_type_skipped: tuple[str, ...] = field(default_factory=tuple)
+    # Runtime-only metrics left out of the review queue by a DiscoveryScope.
+    out_of_scope_skipped: tuple[str, ...] = field(default_factory=tuple)
+    # How many metric names the (successful) runtime discovery returned --
+    # lets a caller tell "discovery succeeded and found nothing" (0) apart
+    # from a discovery failure (which raises ReconciliationSkipped instead).
+    runtime_name_count: int = 0
 
 
 def reconcile(
@@ -213,6 +292,7 @@ def reconcile(
     runtime_metadata: dict[str, RuntimeMetricInfo] | None = None,
     previous_catalog: Catalog | None = None,
     generated_at: str | None = None,
+    discovery_scope: DiscoveryScope | None = None,
 ) -> ReconciliationReport:
     """Reconciles `vendor_catalog` (see module docstring: the intended,
     approved-universe side of the hybrid model, produced however the
@@ -244,6 +324,12 @@ def reconcile(
     `UNCATEGORIZED` and priority is always `Priority.REVIEW` -- Phase 5
     (rules.py) is what may refine these, never this module.
 
+    `discovery_scope`, if given, limits only which *runtime-only, never-
+    rejected* metrics are queued as `discovered_pending_review`; those it
+    excludes are listed in `out_of_scope_skipped`. It is checked before the
+    type check, so out-of-scope names never clutter `undetermined_type_
+    skipped`, and it never changes any vendor/approved/rejected outcome.
+
     Raises ReconciliationSkipped, touching nothing, if `runtime_names` is
     None.
     """
@@ -267,6 +353,7 @@ def reconcile(
     became_available_again: list[str] = []
     kept_rejected: list[str] = []
     undetermined_type_skipped: list[str] = []
+    out_of_scope_skipped: list[str] = []
 
     # ---- vendor-approved side ------------------------------------------
     for entry in vendor_catalog.metrics:
@@ -303,6 +390,10 @@ def reconcile(
                     fallback_type=_prior_type(previous_catalog, name),
                 )
             )
+            continue
+
+        if discovery_scope is not None and not discovery_scope.allows(name):
+            out_of_scope_skipped.append(name)
             continue
 
         info = runtime_metadata.get(name)
@@ -342,6 +433,52 @@ def reconcile(
         became_available_again=tuple(became_available_again),
         kept_rejected=tuple(kept_rejected),
         undetermined_type_skipped=tuple(undetermined_type_skipped),
+        out_of_scope_skipped=tuple(out_of_scope_skipped),
+        runtime_name_count=len(runtime_names),
+    )
+
+
+def run_reconciliation(
+    vendor_catalog: Catalog,
+    base_url: str,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    previous_catalog: Catalog | None = None,
+    discovery_scope: DiscoveryScope | None = None,
+    generated_at: str | None = None,
+) -> ReconciliationReport:
+    """Discovery + reconcile() in one call -- the single orchestration entry
+    point shared by the offline CLI and (later) the runtime refresh, so the
+    two can never disagree about how discovery failure is handled.
+
+    Both discovery requests must succeed. If either returns None, this
+    raises ReconciliationSkipped naming which one failed and returns/changes
+    nothing: a half-successful discovery (names but no metadata, or the
+    reverse) would silently drop every pending discovery or misreport
+    availability, which is partial state this function refuses to produce.
+
+    A *successful* discovery that finds zero names is NOT a failure: it
+    returns a report whose `runtime_name_count` is 0 (and every approved
+    metric becomes approved_unavailable, per reconcile()).
+    """
+    names = discover_runtime_metric_names(base_url, timeout=timeout)
+    if names is None:
+        raise ReconciliationSkipped(
+            f"Metric-name discovery failed against {base_url} "
+            f"(/api/v1/label/__name__/values); nothing was reconciled."
+        )
+    metadata = discover_runtime_metadata(base_url, timeout=timeout)
+    if metadata is None:
+        raise ReconciliationSkipped(
+            f"Metric-metadata discovery failed against {base_url} "
+            f"(/api/v1/metadata); nothing was reconciled."
+        )
+    return reconcile(
+        vendor_catalog,
+        runtime_names=names,
+        runtime_metadata=metadata,
+        previous_catalog=previous_catalog,
+        generated_at=generated_at,
+        discovery_scope=discovery_scope,
     )
 
 

@@ -206,6 +206,26 @@ class Settings(BaseSettings):
                     "failure' convention.",
     )
 
+    # --- Runtime metric discovery scope (app/catalog/reconciler.py) ---
+    catalog_discovery_include_patterns: list[str] = Field(
+        default_factory=list,
+        description="Shell-style globs (case-sensitive), e.g. [\"node_*\", \"DCGM_*\"]. When "
+                    "non-empty, only runtime-discovered metrics matching at least one pattern "
+                    "are queued as 'discovered_pending_review'. Empty (default) = no include "
+                    "restriction. Env var form is a JSON list. Affects ONLY which new, unknown "
+                    "metrics enter the review queue -- never the availability of vendor/"
+                    "approved metrics, and never a human rejection.",
+    )
+    catalog_discovery_exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description="Shell-style globs for runtime-discovered metrics that must never be "
+                    "queued for review, e.g. [\"go_*\", \"process_*\", \"scrape_*\"] to keep "
+                    "Prometheus's own and generic client-library metrics out of the review "
+                    "queue. Exclusion wins over inclusion. Empty (default) = nothing excluded. "
+                    "Nothing is excluded by default because which metrics are noise depends on "
+                    "the deployment.",
+    )
+
     # --- Dependency-aware compound query resolution ---
     dependent_query_resolution_enabled: bool = Field(
         default=False,
