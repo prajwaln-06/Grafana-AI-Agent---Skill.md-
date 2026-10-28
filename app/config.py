@@ -206,6 +206,58 @@ class Settings(BaseSettings):
                     "failure' convention.",
     )
 
+    catalog_reviews_path: Path = Field(
+        default=Path("app/catalog/reviews.json"),
+        description="Path to the human-review store (explicit approve/reject decisions, "
+                    "see app/catalog/reviews.py). Separate from catalog_path: the vendor "
+                    "catalog is never edited by reviews. A MISSING file means 'no decisions "
+                    "yet'; a file that exists but is malformed or self-conflicting makes the "
+                    "runtime refresh fail closed (the previous snapshot stays in place). In a "
+                    "container this must live on a mounted volume shared with whoever runs "
+                    "scripts/review_catalog.py, or decisions are lost on redeploy.",
+    )
+
+    catalog_runtime_reconciliation_enabled: bool = Field(
+        default=False,
+        description="When True, the server starts a background thread (app/catalog/runtime.py) "
+                    "that discovers metrics from prometheus_url at startup and every "
+                    "catalog_runtime_refresh_seconds, reconciles them with the vendor catalog and "
+                    "review decisions, and publishes the result as the catalog the query pipeline "
+                    "uses (statuses approved / approved_unavailable / discovered_pending_review / "
+                    "rejected). Also turns on catalog-status validation (see "
+                    "catalog_metric_status_validation_enabled), because the statuses it enforces "
+                    "only exist once this is on. Discovery never runs inside a user request, and a "
+                    "failed discovery keeps the last good snapshot. Defaults to OFF: the pipeline "
+                    "then uses the vendor catalog plus review decisions, with no availability data.",
+    )
+    catalog_runtime_refresh_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        description="Seconds between runtime reconciliation refreshes (only used when "
+                    "catalog_runtime_reconciliation_enabled is True). Each refresh makes two "
+                    "Prometheus API calls (label values + metadata).",
+    )
+
+    # --- Runtime metric discovery scope (app/catalog/reconciler.py) ---
+    catalog_discovery_include_patterns: list[str] = Field(
+        default_factory=list,
+        description="Shell-style globs (case-sensitive), e.g. [\"node_*\", \"DCGM_*\"]. When "
+                    "non-empty, only runtime-discovered metrics matching at least one pattern "
+                    "are queued as 'discovered_pending_review'. Empty (default) = no include "
+                    "restriction. Env var form is a JSON list. Affects ONLY which new, unknown "
+                    "metrics enter the review queue -- never the availability of vendor/"
+                    "approved metrics, and never a human rejection.",
+    )
+    catalog_discovery_exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description="Shell-style globs for runtime-discovered metrics that must never be "
+                    "queued for review, e.g. [\"go_*\", \"process_*\", \"scrape_*\"] to keep "
+                    "Prometheus's own and generic client-library metrics out of the review "
+                    "queue. Exclusion wins over inclusion. Empty (default) = nothing excluded. "
+                    "Nothing is excluded by default because which metrics are noise depends on "
+                    "the deployment.",
+    )
+
     # --- Dependency-aware compound query resolution ---
     dependent_query_resolution_enabled: bool = Field(
         default=False,

@@ -95,13 +95,18 @@ Catalog lifecycle (how catalog.json reaches this module): produced offline
 by scripts/generate_production_catalog.py from the vendor metric document
 (app/catalog/vendor_docx.py -> vendor.py), with each entry's
 `reference_path` resolved by a metric-NAME join against the skill
-package's Markdown. At first use, `_get_catalog` loads it (loader.py,
-fails closed -> `None` on any error), applies rules.apply_rules() IN
-MEMORY (keywords, priority, Markdown-Category vocabulary -- none of which
-is stored in the JSON), and caches the result for the life of the process.
-app/catalog/reconciler.py (live-Prometheus status reconciliation) is
-implemented but not called from anywhere in the runtime yet, so every
-status in the committed catalog is `approved`.
+package's Markdown. `_get_catalog` does not load it itself: it returns the
+effective catalog published by app/catalog/runtime.py, which combines
+catalog.json with the explicit human decisions in reviews.json (see
+app/catalog/reviews.py), applies rules.apply_rules() IN MEMORY (keywords,
+priority, Markdown-Category vocabulary -- none of which is stored in the
+JSON), and -- when `catalog_runtime_reconciliation_enabled` is on -- is
+refreshed in the background from live Prometheus discovery
+(app/catalog/reconciler.py), so statuses `approved_unavailable`,
+`discovered_pending_review` and `rejected` can reach this module. That
+snapshot is the single catalog cache: `SkillIndex.metric_directory` reads
+the same one. A request only ever reads the latest published snapshot and
+never triggers discovery.
 
 The normal-request data flow:
 
@@ -142,7 +147,9 @@ narrower and more volatile idea layered on top.
 
 Catalog status validation (see app/config.py's `catalog_metric_status_
 validation_enabled` -- kept as a genuine, independent opt-in capability,
-unlike the flags above): when enabled, `_catalog_status_by_metric` hands
+unlike the flags above -- and `_status_validation_active`, which also turns
+it on whenever `catalog_runtime_reconciliation_enabled` is on, since that is
+when pending/rejected statuses actually exist): when active, `_catalog_status_by_metric` hands
 validator.py a small {metric_name: catalog_status} lookup alongside
 `known_metrics`, so a `discovered_pending_review`/`rejected` catalog
 metric can never become a valid query or alert-rule metric even if the
@@ -307,11 +314,9 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from app import executor, field_discovery, label_discovery, llm_client, validator
-from app.catalog import rules as catalog_rules
+from app.catalog import runtime as catalog_runtime
 from app.catalog import search as catalog_search
-from app.catalog.generator import build_markdown_category_index
-from app.catalog.loader import CatalogLoadError, load_catalog
-from app.catalog.schema import Catalog, CatalogSchemaError
+from app.catalog.schema import Catalog, CatalogStatus
 from app.config import Settings
 from app.skill_index import ROUTING_ROW_RE, SkillIndex
 
@@ -456,11 +461,11 @@ async def _resolve_matched_group(question: str, matched: list[dict], panic_mode:
     # handed to the Validator alongside known_metrics -- never the whole
     # Catalog object, and never a replacement for known_metrics itself. Only
     # built (and the catalog only loaded at all, see the gate above) when
-    # settings.catalog_metric_status_validation_enabled is True; otherwise
+    # _status_validation_active(settings) is True; otherwise
     # this stays None and validator.py's catalog-status check is a no-op,
     # identical to before Phase 12 existed.
     catalog_status_by_metric = None
-    if settings.catalog_metric_status_validation_enabled and catalog is not None:
+    if _status_validation_active(settings) and catalog is not None:
         catalog_status_by_metric = _catalog_status_by_metric(catalog)
 
     # known_references/known_datasources/known_metrics/labels_by_metric are
@@ -668,7 +673,7 @@ async def _run_level3_fallback(question: str, skill_index: SkillIndex, settings:
     # stays active here if the deployment has it enabled -- Level 3 must
     # not accidentally bypass an existing, independent safety check.
     catalog_status_by_metric = None
-    if settings.catalog_metric_status_validation_enabled and catalog is not None:
+    if _status_validation_active(settings) and catalog is not None:
         catalog_status_by_metric = _catalog_status_by_metric(catalog)
 
     validator_kwargs = dict(
@@ -1137,7 +1142,7 @@ async def _resolve_dependent_entry(question: str, dep_matched: dict, resolved_en
     known_references = set(generator_context.reference_texts.keys()) | set(generator_context.overview_texts.keys())
     known_datasources = {(dep_matched.get("data_source") or "").strip().lower()}
     catalog_status_by_metric = None
-    if settings.catalog_metric_status_validation_enabled and catalog is not None:
+    if _status_validation_active(settings) and catalog is not None:
         catalog_status_by_metric = _catalog_status_by_metric(catalog)
     candidate_scope = {m["name"] for m in generator_context.metric_metadata} or None
 
@@ -1457,6 +1462,15 @@ def _should_fallback_to_level2(merged_contract: dict, validated) -> bool:
     return validated.candidate_scope_violation
 
 
+# Statuses that must never be offered to the Generator as a query metric
+# (the same set validator.py refuses). `approved_unavailable` is deliberately
+# absent: it stays a valid candidate, per search.py's DEFAULT_STATUSES.
+_UNUSABLE_CATALOG_STATUSES = frozenset({
+    CatalogStatus.DISCOVERED_PENDING_REVIEW.value,
+    CatalogStatus.REJECTED.value,
+})
+
+
 def _build_level2_generator_context(base_ctx: "GeneratorContext", matched: list[dict],
                                      catalog: Catalog | None) -> "GeneratorContext":
     """Batch 2 (Phase 4)'s Level-2 candidate construction:
@@ -1494,6 +1508,8 @@ def _build_level2_generator_context(base_ctx: "GeneratorContext", matched: list[
         if not reference_path:
             continue
         for entry in catalog.by_reference_path(reference_path):
+            if entry.status in _UNUSABLE_CATALOG_STATUSES:
+                continue  # never offer a pending/rejected metric, even if its name is "known"
             if entry.name in base_ctx.known_prometheus_metrics and entry.name not in by_name:
                 by_name[entry.name] = _metric_metadata_dict(entry)
 
@@ -2455,14 +2471,9 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
 # project already had hand-authored Markdown for, and is now legacy/
 # non-production. Neither is meant to become the permanent gate for
 # onboarding new metrics (see app/catalog/reconciler.py's module docstring
-# for the intended ongoing path, which is implemented but not yet called
-# from the runtime). Nothing below cares which mechanism produced
-# app/catalog/catalog.json -- it just loads whatever Catalog document is
-# there.
-
-_catalog_cache: Catalog | None = None
-_catalog_load_failed_path: str | None = None
-
+# for the intended ongoing path, now run by app/catalog/runtime.py). Nothing
+# below cares which mechanism produced app/catalog/catalog.json -- it just
+# consumes whatever effective Catalog the runtime has published.
 
 def _format_metric_metadata_for_prompt(metric_metadata: tuple[dict[str, str | None], ...]) -> str:
     """Renders `GeneratorContext.metric_metadata` as an explicit,
@@ -2493,72 +2504,50 @@ def _format_metric_metadata_for_prompt(metric_metadata: tuple[dict[str, str | No
 
 
 def _get_catalog(settings: Settings) -> Catalog | None:
-    """Lazily loads and caches the catalog from `settings.catalog_path`,
-    then applies Phase 5's rules (app/catalog/rules.py) to it in memory
-    before caching. The on-disk catalog.json written by scripts/
-    generate_production_catalog.py (from the vendor metric document) is
-    deliberately left as pure, source-derived output -- keywords/priority
-    classification is applied here, at load time, rather than baked into
-    the committed artifact, so the two concerns (what the vendor source
-    and reference-path join provided vs. what rules.py classified) stay
-    visibly separate and re-running apply_rules() here can never drift
-    from what's actually committed to the repo.
+    """The effective catalog for this request: the latest snapshot published by
+    app/catalog/runtime.py (vendor catalog.json + review decisions, rules
+    enrichment applied in memory, and -- when runtime reconciliation is
+    enabled -- the last successful live reconciliation).
 
-    Returns None (never raises) if the file is missing or invalid -- a
-    broken or absent catalog.json must degrade every catalog-dependent
-    behavior (Router narrowing, Generator Level-1/2/3 candidates, catalog
-    status validation) to its pre-catalog no-op, never crash a request or
-    block startup, matching the "catalog integration is additive"
-    principle -- catalog participation being MANDATORY (Batch 4) means
-    mandatory to ATTEMPT, never mandatory to SUCCEED. Logs the failure
-    once per distinct path, not on every request, to avoid log-flooding a
-    deployment that has simply not generated a catalog yet."""
-    global _catalog_cache, _catalog_load_failed_path
-    if _catalog_cache is not None:
-        return _catalog_cache
-    path_str = str(settings.catalog_path)
-    if _catalog_load_failed_path == path_str:
-        return None
-    try:
-        loaded = load_catalog(settings.catalog_path)
-    except (CatalogLoadError, CatalogSchemaError, OSError) as e:
-        logger.warning(
-            "Catalog integration (Router narrowing / Generator candidates) disabled: "
-            "failed to load catalog at %s: %s", settings.catalog_path, e,
-        )
-        _catalog_load_failed_path = path_str
-        return None
-    # Batch 2 (Option C): Markdown-Category -> keyword enrichment is
-    # additive vocabulary only (see app/catalog/rules.py's own
-    # docstring) -- computed here, alongside the existing apply_rules()
-    # call, rather than baked into the committed catalog.json, for the
-    # same reason keywords/priority already are: it must never silently
-    # drift from what generate_production_catalog/CatalogEntry.category
-    # actually persisted (Vendor Category), and it must degrade cleanly
-    # (no enrichment, not a crash) if skills_root has no/partial Markdown
-    # -- build_markdown_category_index() already returns {} in that case.
-    markdown_category_index = build_markdown_category_index(settings.skills_root)
-    _catalog_cache = catalog_rules.apply_rules(
-        loaded, markdown_category_index=markdown_category_index
-    )
-    return _catalog_cache
+    Never performs discovery and never waits for it: the first call builds a
+    static snapshot from two small local files, every later call is a plain
+    read of the published reference. This is the ONLY catalog cache in the
+    process (SkillIndex.metric_directory reads the same snapshot), so the
+    Router/Generator/Validator view and the known-metric view cannot disagree.
+
+    Returns None (never raises) if the catalog or review store is missing or
+    invalid and no snapshot was ever published -- a broken input must degrade
+    every catalog-dependent behavior (Router narrowing, Generator Level-1/2/3
+    candidates, catalog status validation) to its pre-catalog no-op, never
+    crash a request or block startup, matching the "catalog integration is
+    additive" principle -- catalog participation being MANDATORY (Batch 4)
+    means mandatory to ATTEMPT, never mandatory to SUCCEED. The failure is
+    logged once by the runtime, not on every request."""
+    return catalog_runtime.get_runtime(settings).catalog()
 
 
 def reset_catalog_cache() -> None:
-    """Clears the module-level catalog cache. Exists for tests (and for a
-    future admin/reload endpoint mirroring SkillIndex's own reload_skill())
-    that need a fresh load after catalog.json changes on disk -- ordinary
-    request handling never needs to call this.
+    """Discards the published catalog snapshot (and stops any refresh worker).
+    For tests: ordinary operation never needs it. To make a new review
+    decision visible, use `CatalogRuntime.request_refresh()` -- the
+    /api/v1/admin/reload-skill endpoint does -- or wait for the next scheduled
+    refresh; resetting would throw away live availability data."""
+    catalog_runtime.reset_runtime()
 
-    NOTE: nothing outside tests calls this today, and
-    ObservabilityQueryBuilderAgent.reload_skill() does NOT call it: that
-    reload re-parses SKILL.md (and SkillIndex.metric_directory re-reads
-    catalog.json on each call), but this process-wide cache -- which drives
-    Router narrowing, Generator candidates, and catalog-status validation --
-    keeps serving the catalog it first loaded until the process restarts."""
-    global _catalog_cache, _catalog_load_failed_path
-    _catalog_cache = None
-    _catalog_load_failed_path = None
+
+def _status_validation_active(settings: Settings) -> bool:
+    """Whether validator.py's catalog-status check runs. On when
+    `catalog_metric_status_validation_enabled` is set, and also whenever
+    runtime reconciliation is enabled: that is the moment
+    `discovered_pending_review` statuses exist, and enforcing them must not
+    depend on a second flag having been remembered. With both off the check
+    stays off, exactly as before; rejected/pending metrics are then still kept
+    out of retrieval (search.py), out of the known-metric directory
+    (SkillIndex.metric_directory) and out of Level-2 candidates."""
+    return bool(
+        settings.catalog_metric_status_validation_enabled
+        or settings.catalog_runtime_reconciliation_enabled
+    )
 
 
 def _catalog_status_by_metric(catalog: Catalog) -> dict[str, str]:

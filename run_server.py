@@ -1,5 +1,7 @@
 import json
 import logging
+from contextlib import asynccontextmanager
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -39,7 +41,33 @@ adk_web_server = ApiServer(
     auto_create_session=True,
 )
 
-app = adk_web_server.get_fast_api_app()
+
+@asynccontextmanager
+async def _catalog_runtime_lifespan(_app: FastAPI):
+    """Starts the background catalog refresh when
+    CATALOG_RUNTIME_RECONCILIATION_ENABLED is true and stops it on shutdown.
+    With the flag off (the default) this does nothing at all. A problem
+    starting the worker is logged and never prevents the server from serving
+    queries -- the pipeline then just has the static catalog."""
+    from app.catalog import runtime as catalog_runtime
+
+    worker_runtime = None
+    settings = get_settings()
+    if settings.catalog_runtime_reconciliation_enabled:
+        try:
+            worker_runtime = catalog_runtime.get_runtime(settings)
+            worker_runtime.start_worker()
+        except Exception:
+            logger.exception("Could not start the catalog refresh worker; continuing without it.")
+            worker_runtime = None
+    try:
+        yield
+    finally:
+        if worker_runtime is not None:
+            worker_runtime.stop_worker()
+
+
+app = adk_web_server.get_fast_api_app(lifespan=_catalog_runtime_lifespan)
 
 
 # Backwards compatible API schemas

@@ -83,8 +83,10 @@ class CatalogStatus(str, Enum):
     """The four states from the frozen catalog-status model (source-of-truth
     section of the spec). Reconciliation logic (reconciler.py) is what
     transitions an entry between these; schema.py only defines what the
-    valid values are. (reconciler.py is implemented but not yet run by the
-    runtime, so every entry in the committed catalog.json is `approved`.)
+    valid values are. (The committed catalog.json only ever contains
+    `approved` entries; the other states exist in the effective catalog
+    app/catalog/runtime.py publishes -- `rejected` from reviews.json, the
+    rest from live reconciliation when it is enabled.)
 
     approved:                   supported and currently available/usable.
     approved_unavailable:       supported by the approved universe but

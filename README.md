@@ -118,6 +118,11 @@ app/
   pipeline.py             Router -> Generator -> Validator orchestration,
                           plus partial-datasource-coverage handling (see
                           pipeline.py's module docstring).
+  catalog/                 Metric catalog. runtime.py publishes the effective
+                          catalog (catalog.json + reviews.json + optional
+                          live Prometheus reconciliation) that the pipeline
+                          reads; reviews.py stores human approve/reject
+                          decisions. See "Reviewing newly discovered metrics".
   config.py                Typed settings (env vars, see .env.example).
 skills/                    The observability-query-builder skill package
                             (SKILL.md + references/). Replace this directory
@@ -190,7 +195,38 @@ adding a brand-new routing row (a new exporter, a new previously-unrouted
 domain file). Editing the *content* of an already-routed reference file
 needs no action at all — it's read fresh from disk every request. See
 `HANDOFF.md`'s "Adding new coverage" section for the full explanation of
-which is which.
+which is which. It also re-reads `reviews.json` into the catalog snapshot
+(waking the refresh worker when runtime reconciliation is on; no Prometheus
+call happens on the request thread).
+
+## Reviewing newly discovered metrics
+
+New metrics Prometheus exposes are never usable automatically: they enter
+the catalog as `discovered_pending_review` and a person must approve or
+reject them. Vendor `catalog.json` is never edited by any of this.
+
+```bash
+python -m scripts.reconcile_catalog            # read-only report (exit 1 = discovery failed)
+python -m scripts.review_catalog list          # pending discoveries
+python -m scripts.review_catalog approve NAME --category CATEGORY \
+    --exporter node-exporter --reference-path references/node-exporter/cpu.md
+python -m scripts.review_catalog reject NAME
+python -m scripts.review_catalog clear NAME    # remove a decision (e.g. lift a rejection)
+```
+
+`approve` needs the category, exporter and an existing domain
+`reference_path` from you (nothing is inferred from the name); the type
+comes from Prometheus. Decisions go to `CATALOG_REVIEWS_PATH` (default
+`app/catalog/reviews.json`; mount it on a volume in a container, or decisions
+are lost on redeploy). A running server picks them up at the next refresh or
+on `POST /api/v1/admin/reload-skill`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `CATALOG_RUNTIME_RECONCILIATION_ENABLED` | `false` | Background live discovery + reconciliation; also enables catalog-status validation |
+| `CATALOG_RUNTIME_REFRESH_SECONDS` | `300` | Refresh interval |
+| `CATALOG_REVIEWS_PATH` | `app/catalog/reviews.json` | Human-decision store |
+| `CATALOG_DISCOVERY_INCLUDE_PATTERNS` / `_EXCLUDE_PATTERNS` | empty | JSON lists of globs limiting which new metrics enter the review queue, e.g. `["go_*","process_*"]` |
 
 ## What's implemented vs. pending
 

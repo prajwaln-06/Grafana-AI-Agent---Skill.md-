@@ -6,6 +6,7 @@ from google.adk.agents.base_agent import BaseAgent
 from google.adk.events.event import Event
 from google.adk.agents.invocation_context import InvocationContext
 
+from app.catalog import runtime as catalog_runtime
 from app.pipeline import ALREADY_EXECUTED_MARKER, PipelineContext, run_pipeline
 from app.config import get_settings
 from app import executor
@@ -14,13 +15,23 @@ from app.skill_index import SkillIndex
 logger = logging.getLogger(__name__)
 
 
+def _catalog_provider(settings):
+    """The SkillIndex's view of the catalog: the same published snapshot the
+    pipeline's `_get_catalog` returns, so known-metric lookups and
+    Router/Generator/Validator catalog use can never disagree."""
+    return lambda: catalog_runtime.get_runtime(settings).catalog()
+
+
 class ObservabilityQueryBuilderAgent(BaseAgent):
     _skill_index: SkillIndex | None = None
 
     def _get_skill_index(self) -> SkillIndex:
         if self._skill_index is None:
             settings = get_settings()
-            self._skill_index = SkillIndex.load(settings.skills_root, settings.catalog_path)
+            self._skill_index = SkillIndex.load(
+                settings.skills_root, settings.catalog_path,
+                catalog_provider=_catalog_provider(settings),
+            )
         return self._skill_index
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
@@ -187,8 +198,19 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
 
     def reload_skill(self) -> None:
         settings = get_settings()
-        new_index = SkillIndex.load(settings.skills_root, settings.catalog_path)
+        new_index = SkillIndex.load(
+            settings.skills_root, settings.catalog_path,
+            catalog_provider=_catalog_provider(settings),
+        )
         self._skill_index = new_index
+        # Also make new review decisions visible. With the background refresh
+        # running this only wakes it (no discovery on this thread); without it,
+        # it re-reads two small local files. A catalog problem is logged by the
+        # runtime and keeps the previous snapshot -- it never fails a skill reload.
+        try:
+            catalog_runtime.get_runtime(settings).request_refresh()
+        except Exception:
+            logger.exception("Catalog refresh after skill reload failed; keeping the previous catalog.")
 
     def _needs_clarification(self, contract: dict) -> bool:
         if self._entry_needs_clarification(contract):

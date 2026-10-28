@@ -502,6 +502,25 @@ rather than a migration switch:
   existing known-metric check. Off by default so a deployment whose
   catalog.json currently has many pending-review entries isn't forced to
   start blocking them immediately.
+- `CATALOG_RUNTIME_RECONCILIATION_ENABLED=true` (default off) starts a
+  background thread (`app/catalog/runtime.py`) that discovers metrics from
+  Prometheus at startup and every `CATALOG_RUNTIME_REFRESH_SECONDS`
+  (default 300), reconciles them with `catalog.json` and the human decisions
+  in `reviews.json`, and publishes the result as the one catalog the pipeline
+  reads (`_get_catalog` and `SkillIndex.metric_directory` share it). It also
+  switches catalog-status validation on, because the statuses it enforces
+  only exist once this is on. Discovery never runs inside a user request; a
+  failed discovery, an unreadable `catalog.json`/`reviews.json` or any
+  refresh error keeps the last good snapshot. Statuses: a vendor/approved
+  metric present at runtime is `approved`, absent is `approved_unavailable`
+  (still a valid query metric); a new metric with a Prometheus-reported type
+  is `discovered_pending_review` (never usable); an explicitly rejected one is
+  `rejected` and stays so across refreshes until `review_catalog clear`.
+  Precedence: rejection > vendor entry > approved review record. Review
+  decisions are written with `scripts/review_catalog.py` (approval requires
+  category, exporter and an existing `reference_path`); `reviews.json` applies
+  to the catalog even with reconciliation off (then without availability
+  data).
 - `ALERT_RULE_CREATION_ENABLED=true` enables optional alert-rule functionality
   only when that workflow is being demonstrated or used. It is unrelated to
   catalog routing.

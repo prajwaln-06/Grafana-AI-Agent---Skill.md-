@@ -114,13 +114,13 @@ class CatalogIndex:
     SkillIndex plays for SKILL.md.
 
     NOTE: currently NOT used by the request path. It was introduced in
-    Phase 1 as a stable object for later integration phases to depend on,
-    but app/pipeline.py instead calls load_catalog() directly and keeps its
-    own module-level cache (`_catalog_cache`, see `_get_catalog` and
-    `reset_catalog_cache`). Nothing in app/ constructs a CatalogIndex; it is
-    retained, and covered by tests/test_catalog_loader.py, as a ready-made
-    hot-reload wrapper should the pipeline's global cache ever be replaced
-    with an explicit object.
+    Phase 1 as a stable object for later integration phases to depend on.
+    The request path instead reads the immutable snapshot published by
+    app/catalog/runtime.py's CatalogRuntime (via pipeline._get_catalog and
+    SkillIndex.metric_directory), which also merges review decisions and
+    live reconciliation -- a CatalogIndex over catalog.json alone could not.
+    Nothing in app/ constructs a CatalogIndex; it is retained, and covered
+    by tests/test_catalog_loader.py.
     """
 
     def __init__(self, catalog: Catalog, path: Path):
