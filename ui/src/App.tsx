@@ -1,5 +1,7 @@
 import { FormEvent, lazy, Suspense, useEffect, useRef, useState } from "react";
 import { fetchHealth, searchObservability } from "./api";
+import { AuthProvider, RequireAuth, useAuth } from "./components/AuthGate";
+import { ProfileMenu } from "./components/ProfileMenu";
 import type { SearchHit, SearchResponse } from "./types";
 
 const QueryExplorerTab = lazy(() => import("./components/QueryExplorerTab"));
@@ -108,6 +110,17 @@ function collectHits(data: SearchResponse): SearchHit[] {
 }
 
 export default function App() {
+  return (
+    <AuthProvider>
+      <RequireAuth>
+        <AppShell />
+      </RequireAuth>
+    </AuthProvider>
+  );
+}
+
+function AppShell() {
+  const { devMode } = useAuth();
   const [searchMode, setSearchMode] = useState<SearchMode>("ai");
   const [theme, setTheme] = useState<ThemeMode>(() => readStoredTheme());
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
@@ -434,6 +447,14 @@ export default function App() {
             />
             {health === "Connected" ? "Connected" : health}
           </div>
+
+          {devMode && (
+            <span className="user-name" title="Authentication is disabled on this deployment">
+              Dev mode (no sign-in)
+            </span>
+          )}
+
+          <ProfileMenu />
         </div>
       </header>
 

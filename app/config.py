@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # --- Backends ---
     prometheus_url: str = Field(default="http://localhost:9090")
-    opensearch_url: str = Field(default="http://localhost:9600")
+    opensearch_url: str = Field(default="http://localhost:9200")
     opensearch_auth_username: str | None = Field(default=None)
     opensearch_auth_password: str | None = Field(default=None)
 
@@ -135,6 +135,130 @@ class Settings(BaseSettings):
                                              "request to this service. Unset (None) means open access "
                                              "-- fine for local dev, set this before deploying anywhere "
                                              "reachable outside your own machine.")
+
+    # --- Authentik OpenID Connect authentication ---
+    # The browser authenticates against Authentik with the OIDC
+    # Authorization Code flow. This service is the OIDC *relying party*: it
+    # redirects the browser to Authentik, validates the returned ID token and
+    # keeps the resulting session in a signed, HttpOnly cookie.
+    #
+    # The client secret and the session signing secret never leave the
+    # backend: they are read from the environment and are never returned to
+    # the browser.
+    #
+    # Authentik establishes identity only. It never assigns application
+    # roles, scopes or permissions: those are the responsibility of a later
+    # authorization layer, which consumes the verified identity exposed on
+    # the request principal.
+    authentik_enabled: bool = Field(
+        default=False,
+        description="Require an authenticated identity on the protected API endpoints. "
+                    "When True, a request must carry a valid application-session cookie "
+                    "that was established through the OIDC Authorization Code flow. When "
+                    "False the service runs in an explicit DEVELOPMENT-ONLY mode with no "
+                    "authentication at all -- never use that mode in production.",
+    )
+    authentik_base_url: str | None = Field(
+        default=None,
+        description="Browser-visible base URL of the Authentik instance, e.g. "
+                    "http://localhost:9000. Used to build the link to Authentik's "
+                    "enrollment (sign-up) and password-change flows. Not a secret.",
+    )
+    authentik_app_slug: str | None = Field(
+        default="grafana-ai-agent",
+        description="Slug of the Authentik application the OIDC provider belongs to. "
+                    "Documented for the operator: the discovery URL embeds it. The "
+                    "application itself does not depend on it at runtime.",
+    )
+    authentik_oidc_discovery_url: str | None = Field(
+        default=None,
+        description="OIDC discovery document of the Authentik provider, e.g. "
+                    "http://localhost:9000/application/o/<application-slug>/"
+                    ".well-known/openid-configuration. Not a secret.",
+    )
+    authentik_oidc_client_id: str | None = Field(
+        default=None,
+        description="OIDC client id of the Authentik application. Required when "
+                    "authentik_enabled is True.",
+    )
+    authentik_oidc_client_secret: str | None = Field(
+        default=None,
+        description="OIDC client secret of the Authentik application (a confidential "
+                    "client). Required when authentik_enabled is True. This value stays "
+                    "on the server and is never sent to the browser.",
+    )
+    authentik_oidc_redirect_uri: str | None = Field(
+        default="http://localhost:5173/api/auth/callback",
+        description="Exact redirect URI registered in the Authentik provider. It must "
+                    "match the URL the browser is sent back to, character for character, "
+                    "including scheme, host, port and path.",
+    )
+    authentik_oidc_scope: str = Field(
+        default="openid profile email",
+        description="Scopes requested in the authorization request. 'openid' is "
+                    "mandatory; 'email' is needed for the profile menu.",
+    )
+    authentik_oidc_pkce: bool = Field(
+        default=True,
+        description="Use PKCE (S256) in the authorization request. The Authentik "
+                    "provider supports it; leaving it on is the safer default.",
+    )
+    authentik_oidc_http_timeout_seconds: float = Field(
+        default=10.0,
+        description="Timeout for the OIDC discovery, JWKS and token requests.",
+    )
+    authentik_session_secret: str | None = Field(
+        default=None,
+        description="Secret used to sign the application-session cookie. Required when "
+                    "authentik_enabled is True. Generate one with: openssl rand -hex 32. "
+                    "Never send this value to the browser.",
+    )
+    authentik_session_max_age_seconds: int = Field(
+        default=3600,
+        description="Lifetime of the application session (the signed, HttpOnly cookie).",
+    )
+    authentik_session_cookie_name: str = Field(
+        default="grafana_ai_session",
+        description="Name of the application-session cookie.",
+    )
+    authentik_session_cookie_secure: bool = Field(
+        default=False,
+        description="Set the Secure flag on the session cookie. Must be True when the "
+                    "application is served over HTTPS; it is False for the local "
+                    "http://localhost development setup.",
+    )
+    authentik_session_cookie_samesite: str = Field(
+        default="lax",
+        description="SameSite attribute of the session cookie. 'lax' is required for the "
+                    "cookie to survive the top-level redirect back from Authentik.",
+    )
+    authentik_enrollment_flow: str = Field(
+        default="default-enrollment-flow",
+        description="Slug of the Authentik enrollment flow used for self-service sign-up. "
+                    "Authentik ships such a flow as the example blueprint "
+                    "'example/flows-enrollment-2-stage.yaml' (designation: enrollment, "
+                    "slug: default-enrollment-flow).",
+    )
+    authentik_signup_url: str | None = Field(
+        default=None,
+        description="Explicit URL of Authentik's enrollment (sign-up) flow. Overrides the URL "
+                    "derived from authentik_base_url and authentik_enrollment_flow. Use this "
+                    "when the flow needs query parameters (for example an invitation link). "
+                    "Not a secret.",
+    )
+    authentik_password_change_flow: str = Field(
+        default="default-password-change",
+        description="Slug of the Authentik flow that lets a signed-in user change their own "
+                    "password (it contains the 'Password change' stage). The flow must be "
+                    "linked to the identity provider's user-settings flow so that it is "
+                    "reachable for an ordinary user.",
+    )
+    authentik_password_change_url: str | None = Field(
+        default=None,
+        description="Explicit URL of Authentik's password-change flow. Overrides the URL "
+                    "derived from authentik_base_url and authentik_password_change_flow. "
+                    "Not a secret.",
+    )
 
     # --- Session store (clarification / multi-turn flow) ---
     session_ttl_seconds: int = Field(default=600)

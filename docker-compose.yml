@@ -1,15 +1,185 @@
-# Runs the agent service only. Prometheus (localhost:9090) and OpenSearch
-# (localhost:9600) are expected to already be running separately -- via
-# your existing simulator/docker-compose setup -- matching how the agent is
-# actually deployed today. `network_mode: host` is used specifically so
-# `http://localhost:9090` / `http://localhost:9600` in .env resolve to your
-# host machine's existing services without any URL changes; if you'd rather
-# put everything in one compose file, replace PROMETHEUS_URL/OPENSEARCH_URL
-# with the other services' compose network hostnames instead and drop
-# network_mode: host.
+# ============================================================================
+# One coherent infrastructure stack for the Grafana AI Agent.
+#
+#   prometheus : :9090  scrapes the 4 simulated nodes (node-00..node-03 on
+#                       container port 9200) plus node-exporter / cAdvisor /
+#                       demo-dataset
+#   grafana    : :3000  OSS with provisioned datasources + dashboards
+#
+# The simulated nodes are NOT published to the host -- Prometheus reaches them
+# over the internal compose network by service name, so host port 9200 stays
+# free.
+#
+# The agent runs locally via ./start.sh (backend :8008, vite dev server
+# :5173) and is reached at http://localhost:5173 -- the one normal
+# application URL. The `agent` service below is the containerized
+# alternative; it keeps `network_mode: host` so the URLs in .env
+# (http://localhost:9090, :3000) resolve to the published host ports
+# with no URL changes. It is behind the "agent" profile and is therefore
+# NOT started by `docker compose up -d`.
+#
+# Authentication is not part of this stack: Authentik runs in its own
+# compose project (see AUTHENTIK_SETUP_GUIDE.md) and the application
+# authenticates against it with OpenID Connect.
+# ============================================================================
+name: grafana-ai-agent
+
 services:
+  # --------------------------------------------------------------------------
+  # Simulated fleet (prom-simulator/Dockerfile) -- 4 heterogeneous nodes.
+  # --------------------------------------------------------------------------
+  node-00:
+    build:
+      context: ./prom-simulator
+      dockerfile: Dockerfile
+    image: prom-simulator-node-00:latest
+    environment:
+      NODE_ID: node-00
+      PORT: "9200"
+      NUM_CPUS: "32"
+      NUM_GPUS: "8"
+    expose:
+      - "9200"
+    restart: unless-stopped
+
+  node-01:
+    build:
+      context: ./prom-simulator
+      dockerfile: Dockerfile
+    image: prom-simulator-node-01:latest
+    environment:
+      NODE_ID: node-01
+      PORT: "9200"
+      NUM_CPUS: "32"
+      NUM_GPUS: "8"
+    expose:
+      - "9200"
+    restart: unless-stopped
+
+  node-02:
+    build:
+      context: ./prom-simulator
+      dockerfile: Dockerfile
+    image: prom-simulator-node-02:latest
+    environment:
+      NODE_ID: node-02
+      PORT: "9200"
+      NUM_CPUS: "64"
+      NUM_GPUS: "4"
+    expose:
+      - "9200"
+    restart: unless-stopped
+
+  node-03:
+    build:
+      context: ./prom-simulator
+      dockerfile: Dockerfile
+    image: prom-simulator-node-03:latest
+    environment:
+      NODE_ID: node-03
+      PORT: "9200"
+      NUM_CPUS: "16"
+      NUM_GPUS: "0"
+    expose:
+      - "9200"
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Metrics backbone
+  # --------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - node-00
+      - node-01
+      - node-02
+      - node-03
+      - node-exporter
+      - cadvisor
+      - demo-metrics
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($$|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    expose:
+      - "9100"
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  demo-metrics:
+    image: python:3.12-slim
+    working_dir: /srv
+    command: ["python3", "demo_metrics_exporter.py"]
+    environment:
+      PORT: "8000"
+      DATASET_PATH: /dataset/demo_business_metrics.csv
+    volumes:
+      - ./scripts/demo_metrics_exporter.py:/srv/demo_metrics_exporter.py:ro
+      - ./dataset:/dataset:ro
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Dashboards
+  # --------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # The agent (optional containerized alternative to ./start.sh).
+  # Host networking keeps the URLs in .env (http://localhost:...) working
+  # unchanged. It sits behind the "agent" profile, so the default
+  # `docker compose up -d` infrastructure startup does NOT start it --
+  # run `docker compose --profile agent up -d` for the containerized agent.
+  # --------------------------------------------------------------------------
   agent:
     build: .
     env_file: .env
     network_mode: host
+    profiles:
+      - agent
     restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

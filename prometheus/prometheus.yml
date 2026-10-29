@@ -18,3 +18,17 @@ scrape_configs:
   - job_name: demo-dataset
     static_configs:
       - targets: ["demo-metrics:8000"]
+
+  # Simulated fleet (prom-simulator). The nodes are reachable by compose
+  # service name on their container port 9200 -- they are not published to
+  # the host.
+  - job_name: simulated_fleet
+    static_configs:
+      - targets: ["node-00:9200"]
+        labels: {node_id: "node-00", cluster: "simulated"}
+      - targets: ["node-01:9200"]
+        labels: {node_id: "node-01", cluster: "simulated"}
+      - targets: ["node-02:9200"]
+        labels: {node_id: "node-02", cluster: "simulated"}
+      - targets: ["node-03:9200"]
+        labels: {node_id: "node-03", cluster: "simulated"}

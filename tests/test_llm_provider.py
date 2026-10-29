@@ -24,9 +24,21 @@ def test_gemini_api_requires_key():
         build_client_kwargs(_s(gemini_api_key=None))
 
 
-def test_vertex_prefixed_key_never_sent_via_gemini_api():
-    with pytest.raises(LLMProviderConfigError, match="LLM_PROVIDER=vertex"):
+def test_cloud_prefixed_key_is_not_rejected_as_a_vertex_key():
+    """Google issues Gemini Developer API keys with the 'AQ.' prefix as well,
+    so the prefix alone must never decide that a key belongs to Vertex AI.
+    Rejecting on it breaks valid Gemini configurations."""
+    key = "AQ.Ab8RNexampleexampleexampleexampleexampleexampleexample"
+    assert build_client_kwargs(_s(gemini_api_key=key)) == {"vertexai": False, "api_key": key}
+
+
+def test_cloud_prefixed_key_is_only_a_warning(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.llm_provider"):
         build_client_kwargs(_s(gemini_api_key="AQ.something"))
+    assert "AQ." in caplog.text
+    assert "LLM_PROVIDER=vertex" in caplog.text
 
 
 def test_vertex_requires_explicit_config_and_never_uses_gemini_key():

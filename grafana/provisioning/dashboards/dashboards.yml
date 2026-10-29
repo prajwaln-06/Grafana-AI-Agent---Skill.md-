@@ -1,5 +1,11 @@
 apiVersion: 1
 
+# The folder UID matches GRAFANA_DEFAULT_FOLDER_UID in .env, so the agent can
+# create/update dashboards and alert rules in it without creating a new one.
+folders:
+  - name: AI Observability Lab
+    uid: afvlix95l3wg0d
+
 providers:
   - name: Local Observability Dashboards
     orgId: 1

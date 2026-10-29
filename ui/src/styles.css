@@ -701,6 +701,331 @@ code {
   box-shadow: 0 0 0 3px rgba(240, 113, 120, 0.18);
 }
 
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+
+.user-name {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Authentication gate ------------------------------------------------ */
+
+.auth-screen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 26rem;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-soft);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.auth-card h1 {
+  margin: 0 0 10px;
+  font-size: 1.25rem;
+}
+
+.auth-card .alert {
+  margin: 14px 0;
+}
+
+.auth-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+/* --- Branded login screen ------------------------------------------------ */
+
+.login-card {
+  width: 100%;
+  max-width: 27rem;
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-soft);
+  box-shadow: var(--shadow);
+}
+
+.login-card-slim {
+  max-width: 24rem;
+}
+
+.login-card h1 {
+  margin: 0;
+  font-size: 1.3rem;
+  font-family: var(--heading);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.login-brand-text p {
+  margin: 4px 0 0;
+}
+
+.login-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  border: 1px solid var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.login-logo svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.login-lead {
+  margin: 18px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.login-title {
+  margin: 20px 0 0;
+  font-size: 1.15rem;
+  font-family: var(--heading);
+  color: var(--text);
+}
+
+.login-signup {
+  margin: 14px 0 0;
+  line-height: 1.5;
+}
+
+.link-button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.link-button:hover:not(:disabled) {
+  color: var(--primary-hover);
+}
+
+.link-button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+.login-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.login-actions .btn {
+  flex: 1;
+  justify-content: center;
+  padding: 11px 16px;
+  font-size: 0.92rem;
+}
+
+.login-actions .btn.login-primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-ink);
+  font-weight: 600;
+}
+
+.login-actions .btn.login-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+  color: var(--primary-ink);
+}
+
+.login-actions .btn.login-secondary {
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--text);
+}
+
+.login-actions .btn.login-secondary:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--control-hover-border);
+  color: var(--text);
+}
+
+.login-hint {
+  margin: 14px 0 0;
+}
+
+.login-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+/* --- Profile button and panel -------------------------------------------- */
+
+.profile-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.profile-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--accent-on-soft);
+  font-family: var(--heading);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background var(--ease), border-color var(--ease), transform var(--ease);
+}
+
+.profile-button:hover {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-ink);
+}
+
+.profile-button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+.profile-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 40;
+  width: 17.5rem;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+}
+
+.profile-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.profile-panel-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--accent-on-soft);
+  font-family: var(--heading);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.profile-panel-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.profile-panel-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-panel-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-panel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.profile-panel-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.profile-panel-actions .btn {
+  flex: 1;
+  justify-content: center;
+}
+
+.profile-panel-note {
+  margin: 10px 0 0;
+  line-height: 1.45;
+}
+
 .main {
   flex: 1;
   padding: 24px;

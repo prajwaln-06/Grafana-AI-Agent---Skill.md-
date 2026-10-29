@@ -31,8 +31,9 @@ curl -s -G http://localhost:3100/loki/api/v1/query \
 
 echo
 echo
-echo "== Demo dataset exporter =="
-curl -s http://localhost:8000/metrics
+echo "== Simulated fleet targets =="
+curl -s http://localhost:9090/api/v1/targets?state=active \
+  | grep -o '"scrapePool":"[^"]*"\|"health":"[^"]*"' | head -20
 
 echo
 echo

@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.adk_agent import run_adk_agent
 from app.config import get_settings
+from app.llm_provider import LLMProviderConfigError
 from app.pipeline import run_pipeline
 from app.proposals.store import PROPOSALS
 from app.proposals.tools import propose_dashboard, resolve_dashboard_intent
@@ -365,6 +366,12 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     alertRule=alert_rule,
                 ))
 
+            except LLMProviderConfigError:
+                # A misconfigured LLM provider is not a transient pipeline
+                # failure -- the ADK fallback below would fail the same way.
+                # Let it propagate so the API can report a precise, actionable
+                # 503 instead of a generic 500.
+                raise
             except Exception as e:
                 logger.error("Alert proposal error: %s", e)
 
@@ -710,6 +717,10 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                 series=normalized_series if normalized_series else None,
                 candidates=first.get("candidates"),
             ))
+        except LLMProviderConfigError:
+            # See the alert branch above: a provider misconfiguration must not
+            # be silently downgraded into "the ADK fallback also failed".
+            raise
         except Exception as e:
             logger.warning("SKILL.md pipeline error: %s; falling back to ADK agent", e)
 

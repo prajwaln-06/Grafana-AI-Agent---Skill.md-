@@ -1,7 +1,10 @@
 apiVersion: 1
 
 datasources:
+  # The Prometheus UID matches GRAFANA_DEFAULT_DATASOURCE_UID in .env, so the
+  # agent-created dashboards/alerts point at this provisioned datasource.
   - name: Prometheus
+    uid: PBFA97CFB590B2093
     type: prometheus
     access: proxy
     url: http://prometheus:9090
@@ -9,6 +12,7 @@ datasources:
     editable: true
 
   - name: Loki
+    uid: Loki
     type: loki
     access: proxy
     url: http://loki:3100

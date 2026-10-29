@@ -7,11 +7,19 @@ import type {
   SearchResponse,
 } from "./types";
 
+/**
+ * Dispatched on the window when the API rejects the request because the
+ * session is missing or has expired. The authentication gate listens for it
+ * and shows the sign-in prompt.
+ */
+export const AUTH_EXPIRED_EVENT = "grafana-ai:auth-expired";
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(url, {
       headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+      credentials: "same-origin",
       ...init,
     });
   } catch (error) {
@@ -21,6 +29,10 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(
       "The UI API is unreachable. Start the app with `cd ui && npm run dev`, then reload the page."
     );
+  }
+
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
   }
 
   const contentType = res.headers.get("content-type") || "";

@@ -21,14 +21,24 @@ Nothing here logs or returns key material in messages.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 PROVIDER_GEMINI_API = "gemini_api"
 PROVIDER_VERTEX = "vertex"
 VALID_PROVIDERS = (PROVIDER_GEMINI_API, PROVIDER_VERTEX)
 
-# Vertex AI express-mode keys start with this prefix; an AI Studio key never does.
-_VERTEX_KEY_PREFIX = "AQ."
+# Google Cloud API keys -- including Vertex AI express-mode keys -- commonly
+# carry this prefix. It is NOT exclusive to Vertex: Google also issues Gemini
+# Developer API (AI Studio) keys with this prefix, and those keys work
+# against the Gemini Developer API. The prefix is therefore a *hint* used to
+# sharpen error messages, never a criterion for rejecting a key: rejecting on
+# it breaks valid Gemini configurations with a misleading "wrong provider"
+# error. Which backend is used is decided solely by the explicit
+# ``LLM_PROVIDER`` setting.
+_CLOUD_KEY_PREFIX = "AQ."
 
 
 class LLMProviderConfigError(ValueError):
@@ -62,11 +72,18 @@ def build_client_kwargs(settings: Any, api_key_override: str | None = None) -> d
             raise LLMProviderConfigError(
                 "LLM_PROVIDER=gemini_api requires GEMINI_API_KEY."
             )
-        if key.startswith(_VERTEX_KEY_PREFIX):
-            raise LLMProviderConfigError(
-                "GEMINI_API_KEY looks like a Vertex AI key (prefix 'AQ.'). It will not be "
-                "sent to the Gemini API. If you intend to use Vertex AI, set "
-                "LLM_PROVIDER=vertex and put the key in VERTEX_API_KEY."
+        if key.startswith(_CLOUD_KEY_PREFIX):
+            # Not an error: this prefix does not imply the key is a Vertex
+            # key (Google issues Gemini Developer API keys with it too).
+            # Warn instead, so a genuine provider mismatch still surfaces
+            # with an actionable message instead of a silent surprise.
+            logger.warning(
+                "GEMINI_API_KEY carries the %r prefix commonly seen on Google Cloud / "
+                "Vertex express-mode keys. The provider is explicitly 'gemini_api', so "
+                "this key is sent to the Gemini Developer API. If the API rejects it "
+                "(HTTP 400/401/403), set LLM_PROVIDER=vertex and move the key to "
+                "VERTEX_API_KEY.",
+                _CLOUD_KEY_PREFIX,
             )
         return {"vertexai": False, "api_key": key}
 

@@ -137,8 +137,10 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
         if code in _PERMANENT_HTTP_STATUS_CODES:
             raise _PermanentError(
                 f"HTTP {code} from Gemini API (model={model!r}): {getattr(e, 'message', e)}. "
-                f"Check LLM_PROVIDER, the matching credentials (GEMINI_API_KEY or VERTEX_*), and GEMINI_MODEL in your .env -- this will not resolve "
-                f"on retry."
+                f"Check LLM_PROVIDER, the matching credentials (GEMINI_API_KEY or VERTEX_*), "
+                f"and GEMINI_MODEL in your .env -- this will not resolve on retry. "
+                f"If the key carries the 'AQ.' prefix and belongs to Vertex AI express mode, "
+                f"set LLM_PROVIDER=vertex and move it to VERTEX_API_KEY instead."
             ) from e
         raise _TransientError(str(e)) from e
     except Exception as e:  # noqa: BLE001 -- anything else from the call
