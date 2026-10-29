@@ -227,3 +227,29 @@ def test_undocumented_type_value_raises_catalog_schema_error(tmp_path):
     )
     with pytest.raises(CatalogSchemaError):
         generate_catalog(tmp_path)
+
+
+# ---- non-Prometheus domains (OpenSearch log families) are not exporters ------
+
+
+def test_exporter_discovery_skips_non_prometheus_overviews(tmp_path):
+    from app.catalog.generator import _find_exporter_overviews
+
+    refs = tmp_path / "references"
+    for name, data_source in (("node-exporter", "prometheus"),
+                              ("opensearch-logs", "opensearch"),
+                              ("legacy-exporter", None)):
+        d = refs / name
+        d.mkdir(parents=True)
+        facts = f"- **Data source:** {data_source}\n" if data_source else "- **Covers:** something\n"
+        (d / "overview.md").write_text(f"Intro.\n\n## Quick Facts\n\n{facts}", encoding="utf-8")
+
+    found = [p.parent.name for p in _find_exporter_overviews(refs)]
+    # opensearch-logs has no metric definitions and is excluded; an overview
+    # with no Data source bullet is still treated as an exporter.
+    assert found == ["legacy-exporter", "node-exporter"]
+
+
+def test_real_skill_package_catalog_ignores_opensearch_logs_directory():
+    catalog = generate_catalog(REAL_SKILLS_ROOT)
+    assert all("opensearch-logs" not in (e.reference_path or "") for e in catalog.metrics)

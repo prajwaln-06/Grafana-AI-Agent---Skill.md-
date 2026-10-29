@@ -79,7 +79,11 @@ SKILL.md (this file)
  ├─ references/dcgm-exporter/interconnect.md (interconnect metric definitions)
  ├─ references/dcgm-exporter/reliability.md (reliability metric definitions)
  ├─ references/prometheus-fundamentals.md  (PromQL mechanics)
- ├─ references/opensearch-fundamentals.md  (OpenSearch DSL mechanics — infrastructure only, see §4)
+ ├─ references/opensearch-logs/overview.md (log-domain scope, entity model, shared caveats)
+ ├─ references/opensearch-logs/fabric-health.md (fabric health index family)
+ ├─ references/opensearch-logs/controller-log.md (controller log index family)
+ ├─ references/opensearch-logs/ilo-events.md (iLO / BMC event log index family)
+ ├─ references/opensearch-fundamentals.md  (OpenSearch DSL mechanics)
  └─ references/execution-contract.md       (post-validation execution output shape)
 ```
 
@@ -90,8 +94,11 @@ files in — which reference(s) get opened depends on the request, per §6.
 
 Use this skill when the user asks to check, monitor, compare, or investigate a
 host or GPU metric (e.g. "what's CPU utilization on node-3?", "is any GPU
-throttling?", "how much swap is free?"), or explicitly asks for a PromQL or
-OpenSearch query.
+throttling?", "how much swap is free?"), asks about log or event data in one
+of the three OpenSearch log families defined in
+`references/opensearch-logs/overview.md` (fabric health, controller logs, iLO
+event logs — e.g. "which controllers reported errors in the last 24 hours?"),
+or explicitly asks for a PromQL or OpenSearch query.
 
 Do not use this skill, and instead handle the request through §7 (Error Handling):
 
@@ -133,7 +140,11 @@ remove, or change which reference that metric's requests route to.
 | PCIe or NVLink transmit/receive traffic throughput | prometheus | [references/dcgm-exporter/interconnect.md](references/dcgm-exporter/interconnect.md) |
 | GPU ECC errors, retired or pending-retirement memory pages, or NVLink error/recovery health signals | prometheus | [references/dcgm-exporter/reliability.md](references/dcgm-exporter/reliability.md) |
 | PromQL syntax: selectors, Counter/Gauge/Histogram handling, functions, aggregation, time modifiers | prometheus | [references/prometheus-fundamentals.md](references/prometheus-fundamentals.md) |
-| OpenSearch DSL syntax: query shape, leaf/compound clauses, date math, aggregations | opensearch | [references/opensearch-fundamentals.md](references/opensearch-fundamentals.md) — **infrastructure only: no exporter or domain currently routes here.** Do not imply OpenSearch metric coverage exists; if a request needs an OpenSearch-backed measurement, treat it as `unmapped` (§7) unless a future domain file is added. |
+| The OpenSearch log domain's overall scope, which of the three log index families a log question belongs to, or what log search does *not* cover | opensearch | [references/opensearch-logs/overview.md](references/opensearch-logs/overview.md) |
+| Slingshot fabric health logs: switch or port faults, link errors, flapping or disabled ports, fabric health state (healthy vs critical), switch heartbeat documents, unhealthy racks or chassis | opensearch | [references/opensearch-logs/fabric-health.md](references/opensearch-logs/fabric-health.md) |
+| Controller (syslog-style) logs: errors or messages per controller host or service, hmscd, hmpad, fabric-manager, I²C failures, LinkStatus Down messages, logs excluding routine CRON noise | opensearch | [references/opensearch-logs/controller-log.md](references/opensearch-logs/controller-log.md) |
+| iLO / BMC event log (Redfish): BMC login and logout events, browser or IPMI access, event codes, event severity other than OK, unrepaired events and recommended actions | opensearch | [references/opensearch-logs/ilo-events.md](references/opensearch-logs/ilo-events.md) |
+| OpenSearch DSL syntax: query shape, leaf/compound clauses, date math, aggregations | opensearch | [references/opensearch-fundamentals.md](references/opensearch-fundamentals.md) |
 | The shape of the post-validation execution/results block (only relevant after a query has been accepted, never during construction) | n/a | [references/execution-contract.md](references/execution-contract.md) |
 
 Keyword rule for matching a question to a row: prefer specific, multi-word phrases

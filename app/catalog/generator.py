@@ -191,13 +191,29 @@ class _MetricDirRow:
     domain_file: str  # e.g. "cpu.md", relative to the overview's own directory
 
 
+_DATA_SOURCE_BULLET_RE = re.compile(r"^-\s+\*\*Data source:\*\*\s*(\S+)", re.MULTILINE)
+
+
 def _find_exporter_overviews(references_dir: Path) -> list[Path]:
     """Every references/<exporter>/overview.md, sorted by exporter
     directory name so generation order (and therefore catalog.json's
     `metrics` array order) is stable across runs and across machines.
     Mirrors app/skill_index.py's own directory-convention approach
-    (overview_path_for) rather than hardcoding exporter names."""
-    return sorted(references_dir.glob("*/overview.md"))
+    (overview_path_for) rather than hardcoding exporter names.
+
+    This catalog describes Prometheus metrics only, so an overview whose
+    Quick Facts declare a different data source (e.g. the OpenSearch log
+    domain's references/opensearch-logs/overview.md, which has no metric
+    definitions at all) is not an exporter and is skipped. An overview with
+    no Data source bullet is still treated as an exporter, so legacy skill
+    packages keep working unchanged."""
+    overviews = []
+    for overview_path in sorted(references_dir.glob("*/overview.md")):
+        m = _DATA_SOURCE_BULLET_RE.search(overview_path.read_text(encoding="utf-8"))
+        if m and m.group(1).strip().lower() != "prometheus":
+            continue
+        overviews.append(overview_path)
+    return overviews
 
 
 def _parse_metric_directory(overview_path: Path) -> list[_MetricDirRow]:

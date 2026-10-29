@@ -148,13 +148,26 @@ deterministically.
 **Expected:** `status: "out_of_scope_action"`. Must not be reinterpreted as a
 monitoring question about GPU state.
 
-## 11. Datasource-infrastructure-only boundary (OpenSearch)
+## 11. OpenSearch log routing and the unmapped boundary
 
-**Input:** "Show me error log volume from OpenSearch over the last day."
-**Expected:** `status: "unmapped"` — `opensearch-fundamentals.md` documents query
-mechanics only; no domain/exporter reference currently exists for it. Must not be
-answered using Prometheus-side reasoning, and must not be treated as `ok` just
-because query-language fundamentals exist for OpenSearch.
+**11a. Input:** "Which fabric components reported a non-healthy status in the last 24 hours?"
+**Expected:** routes to `references/opensearch-logs/fabric-health.md` with
+`data_source: opensearch`. Must **not** return `unmapped`, must not be answered
+with a Prometheus metric, and must not select the controller or iLO families.
+
+**11b. Input:** "Who logged into the iLO of the login node in the last day?"
+**Expected:** routes to `references/opensearch-logs/ilo-events.md`
+(`data_source: opensearch`), not to the controller family.
+
+**11c. Input:** "Show me audit logs from the billing service in OpenSearch."
+**Expected:** `status: "unmapped"` — no registered log family covers it. Must
+not be forced into the nearest of the three families, and must not be treated as
+`ok` just because `opensearch-fundamentals.md` documents the query language.
+
+**11d. Input:** "Show CPU utilization and recent controller errors for x1000c4r7b0."
+**Expected:** a compound request: the CPU intent routes to the Prometheus node
+exporter and the log intent routes to `controller-log.md`; neither half is
+dropped or marked `unmapped`.
 
 ## 12. Panic-mode handling
 

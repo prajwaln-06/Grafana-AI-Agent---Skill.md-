@@ -26,11 +26,15 @@ def test_execution_contract_row_is_not_a_real_datasource(skill_index):
     assert row.is_real_datasource is False
 
 
-def test_opensearch_fundamentals_row_carries_infrastructure_note(skill_index):
+def test_opensearch_fundamentals_row_no_longer_carries_infrastructure_note(skill_index):
+    """The "infrastructure only" banner is removed once a real domain file sets
+    opensearch as its data source (skills/EXTENDING.md, "Adding a New
+    Datasource"); references/opensearch-logs/ now does. The row itself, and its
+    opensearch data source, must remain."""
     row = skill_index.row_for_path("references/opensearch-fundamentals.md")
     assert row is not None
     assert row.data_sources == ("opensearch",)
-    assert "infrastructure only" in row.note.lower()
+    assert "infrastructure only" not in row.note.lower()
 
 
 # ---- Corrective patch: dcgm-exporter/memory.md routing vocabulary --------

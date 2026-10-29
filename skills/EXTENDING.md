@@ -194,10 +194,29 @@ edit a domain file's `Category` bullet to try to change `CatalogEntry.category`
 2. Add one routing-table row in `SKILL.md` §4.
 3. If no exporter or domain routes to this backend yet, keep the template's
    status banner ("infrastructure only, no implemented consumer") in the file
-   and in its routing-table row — see `opensearch-fundamentals.md` for the
-   pattern. Do not let the routing table imply metric coverage that doesn't
-   exist. Remove the banner only once a real domain file sets this backend as
-   its data source.
+   and in its routing-table row — `assets/templates/datasource-fundamentals-
+   template.md` carries the wording. Do not let the routing table imply metric
+   coverage that doesn't exist. Remove the banner only once a real domain file
+   sets this backend as its data source (`opensearch-fundamentals.md` has had
+   its banner removed since `references/opensearch-logs/` was added).
+
+## Adding an OpenSearch Index Family
+
+An OpenSearch family is defined in three places that must agree; none of them
+alone is enough.
+
+1. Copy `assets/templates/opensearch-domain-template.md` to
+   `references/opensearch-logs/<family>.md` and fill it in. Describe field
+   *roles* and document kinds; do not enumerate the live mapping.
+2. Add a routing row for the new file (and keep the `opensearch-logs/overview.md`
+   family table in sync) in `SKILL.md` §4, linking directly to it.
+3. Add an entry to `app/opensearch_catalog/index_registry.json`: a stable
+   `pattern_id`, the exact `index_pattern`, this file as `domain_reference`, the
+   time field, and the role-to-field bindings and allow-lists the validator will
+   enforce. The registry — not the Markdown — is what authorizes a field or index
+   to be queried; the live field catalog then confirms what actually exists.
+4. Add regression cases for routing to the new family and for a question that
+   must stay `unmapped`.
 
 ## When Information Belongs in `SKILL.md` vs. a Reference
 

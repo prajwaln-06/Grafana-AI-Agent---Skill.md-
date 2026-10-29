@@ -9,7 +9,7 @@ files.
 
 After creating this file, add one row to SKILL.md §4's routing table linking
 directly to it. If no exporter or domain currently routes to this backend yet
-(as with opensearch-fundamentals.md at time of writing), add an explicit status
+(the situation opensearch-fundamentals.md was in before references/opensearch-logs/ existed), add an explicit status
 note at the top of the file and in the routing table row — do not let the
 routing table imply metric coverage that doesn't exist yet.
 -->

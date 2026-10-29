@@ -29,24 +29,24 @@ model call succeeding.
   VALIDATOR  -- no LLM. See validator.py.
   EXECUTOR   -- no LLM. See executor.py.
 
-Partial datasource coverage (see also: skills/SKILL.md Section 4's
-OpenSearch note, and skills/opensearch-fundamentals.md's status note):
-today, only Prometheus-backed domains exist. A question that needs BOTH a
-Prometheus measurement and an OpenSearch-backed one (e.g. "show CPU
-utilization and recent error logs for node-1") must not have its OpenSearch
-half silently dropped, and must not have its Prometheus half blocked just
-because the OpenSearch half has nowhere to route yet. The Router's output
+Partial coverage (see also: skills/SKILL.md Section 4 and
+skills/references/opensearch-logs/overview.md): Prometheus domains and three
+OpenSearch log index families have routing rows. A question that needs BOTH a
+Prometheus measurement and a log source no routing row covers (e.g. "show CPU
+utilization and the billing service's audit logs") must not have the
+uncovered half silently dropped, and must not have the covered half blocked
+just because the other half has nowhere to route. The Router's output
 carries an `unresolved_topics` list for exactly this: sub-intents of the
 question it could not match against Section 4's routing table. This
 pipeline resolves whatever DID match normally, then deterministically
 appends one `status: "unmapped"` result entry per unresolved topic to the
 final response (see `_finalize`) -- so the frontend gets the CPU series it
 asked for AND an explicit, structured signal that the logs half isn't
-covered yet, rather than one silently swallowing the other. The moment
-opensearch-* routing rows exist in SKILL.md, questions that need them start
-matching normally and this fallback stops being exercised for them --
-nothing about this mechanism is Prometheus/OpenSearch-specific; it's
-generic to "a sub-intent this skill package doesn't cover yet."
+covered yet, rather than one silently swallowing the other. Questions
+that match a routing row (including the OpenSearch log families) resolve
+normally and do not use this fallback -- nothing about this mechanism is
+Prometheus/OpenSearch-specific; it's generic to "a sub-intent this skill
+package doesn't cover yet."
 
 Alert-rule creation (SKILL.md Section 12, feature-flagged off by default --
 see app/config.py's `alert_rule_creation_enabled`): the narrow, explicit
@@ -1748,7 +1748,7 @@ the question:
   "panic_mode": true | false,
   "unresolved_topics": [
     {"description": "<the specific measurement/intent this covers, restated briefly>",
-     "reason": "<why no routing-table row covers it -- e.g. 'needs an OpenSearch-backed log measurement; no domain reference currently defines one'>"}
+     "reason": "<why no routing-table row covers it -- e.g. 'needs log data from a source that is not one of the registered OpenSearch log families'>"}
   ]
 }
 
@@ -1762,8 +1762,8 @@ independently:
     overall question is covered this way.
   - An intent that matches NO row at all (most commonly because it needs a
     datasource or domain this skill package doesn't have reference content
-    for yet, e.g. an OpenSearch-backed measurement while
-    opensearch-fundamentals.md's own note says no domain routes there yet)
+    for yet, e.g. log data from a source outside the registered OpenSearch
+    log families)
     -> do NOT silently drop it, and do NOT let it force the whole question
     into `unmapped`. Instead, describe it in `unresolved_topics` (Shape B)
     alongside whatever else DID match.
