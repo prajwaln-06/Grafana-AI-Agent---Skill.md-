@@ -44,7 +44,7 @@ pip install -r requirements-dev.txt   # includes prod requirements + pytest/http
 
 cp .env.example .env                  # fill in a real GEMINI_API_KEY
 # Confirm PROMETHEUS_URL / OPENSEARCH_URL match your local setup
-# (defaults: http://localhost:9090, http://localhost:9600)
+# (defaults: http://localhost:9090, http://localhost:9200)
 
 python run_server.py
 ```

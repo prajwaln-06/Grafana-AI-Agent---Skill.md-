@@ -28,9 +28,24 @@ class Settings(BaseSettings):
 
     # --- Backends ---
     prometheus_url: str = Field(default="http://localhost:9090")
-    opensearch_url: str = Field(default="http://localhost:9600")
+    opensearch_url: str = Field(default="http://localhost:9200",
+                                description="OpenSearch REST endpoint (port 9200; 9600 is the "
+                                            "Performance Analyzer port, not the search API).")
     opensearch_auth_username: str | None = Field(default=None)
     opensearch_auth_password: str | None = Field(default=None)
+
+    # --- OpenSearch registry / runtime field catalog (app/opensearch_catalog) ---
+    opensearch_registry_path: Path = Field(
+        default=Path("app/opensearch_catalog/index_registry.json"),
+        description="Index registry: which patterns/fields may be queried.")
+    opensearch_field_catalog_ttl_seconds: float = Field(default=600.0, gt=0)
+    opensearch_field_catalog_stale_ttl_seconds: float = Field(
+        default=3600.0, gt=0,
+        description="How long a previously discovered catalog may still be served "
+                    "(marked stale) when a refresh fails. Must be >= the TTL.")
+    opensearch_field_catalog_max_indices: int = Field(
+        default=7, ge=1, description="Newest N daily indices merged per pattern.")
+    opensearch_field_catalog_failure_backoff_seconds: float = Field(default=30.0, ge=0)
 
     prometheus_timeout_seconds: float = Field(default=15.0)
     opensearch_timeout_seconds: float = Field(default=15.0)

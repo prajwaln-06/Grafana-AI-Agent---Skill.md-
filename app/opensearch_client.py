@@ -3,7 +3,7 @@ opensearch_client.py
 
 Thin, hardened wrapper around OpenSearch's HTTP API. No authentication is
 wired in by default (the current deployment target is a local, unauthenticated
-instance at http://localhost:9600 -- see config.py), but every function
+instance at http://localhost:9200 -- see config.py), but every function
 accepts an optional `auth` so adding basic auth or a bearer token later is a
 config change, not a rewrite.
 
