@@ -139,8 +139,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const endSession = useCallback(async () => {
-    const ok = await signOut(config);
-    if (!ok) {
+    const res = await signOut(config);
+    if (!res.ok) {
       setError("The session could not be ended. Please try again.");
       return;
     }
@@ -149,9 +149,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setExpired(false);
     setLoginError(null);
     setStatus("unauthenticated");
-    // Reload the application so that no state of the signed-in session
-    // lingers in the page.
-    window.location.assign("/");
+    if (res.endSessionUrl) {
+      window.location.assign(res.endSessionUrl);
+    } else {
+      window.location.assign("/");
+    }
   }, [config]);
 
   const value = useMemo<AuthContextValue>(

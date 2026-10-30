@@ -258,6 +258,7 @@ class OidcClient:
         nonce: str,
         code_verifier: str | None = None,
         redirect_uri: str | None = None,
+        prompt: str | None = None,
     ) -> str:
         """The URL the browser is sent to in order to authenticate.
 
@@ -270,6 +271,8 @@ class OidcClient:
         kwargs: dict[str, Any] = {"nonce": nonce}
         if redirect_uri:
             kwargs["redirect_uri"] = redirect_uri
+        if prompt:
+            kwargs["prompt"] = prompt
         url, _ = client.create_authorization_url(
             metadata["authorization_endpoint"],
             state=state,
@@ -343,6 +346,59 @@ class OidcClient:
                     "The ID token lists several audiences but does not name this client "
                     "as the authorized party."
                 )
+
+        return claims
+
+    def verify_bearer_token(self, access_token: str) -> dict[str, Any]:
+        """Verify an OAuth 2.0 / OIDC Bearer access token (signed JWT).
+
+        Per Section 4.3 of the specification:
+        - Signature checked against Authentik JWKS using allow-listed asymmetric algorithms.
+        - Issuer exact match with configured issuer.
+        - Audience includes the configured client ID.
+        - Expiry verified.
+        - Subject (sub) is non-empty.
+        - Rejects ID tokens presented as Bearer tokens (e.g. carrying nonce or at_hash).
+        """
+        metadata = self.metadata()
+        key_set = self.jwks()
+        algorithms = self._allowed_algorithms(metadata)
+
+        try:
+            token = jose_jwt.decode(access_token, key_set, algorithms=algorithms)
+        except Exception as exc:  # noqa: BLE001
+            raise OidcProtocolError(
+                f"The bearer access token signature or format could not be verified: {exc}"
+            ) from exc
+
+        claims = dict(token.claims)
+
+        # Reject ID token presented as bearer (Section 4.3)
+        if "nonce" in claims or "at_hash" in claims:
+            raise OidcProtocolError(
+                "An ID token cannot be used as an API bearer token. Submit an access token instead."
+            )
+
+        registry = JWTClaimsRegistry(
+            iss={"essential": True, "value": metadata["issuer"]},
+            sub={"essential": True},
+            exp={"essential": True},
+        )
+        try:
+            registry.validate(claims)
+        except Exception as exc:  # noqa: BLE001
+            raise OidcProtocolError(
+                f"The bearer access token failed validation: {exc}"
+            ) from exc
+
+        # Audience verification
+        aud = claims.get("aud")
+        expected_client = self.config.client_id
+        if aud:
+            if isinstance(aud, str) and aud != expected_client:
+                raise OidcProtocolError(f"Token audience {aud!r} does not match expected client {expected_client!r}.")
+            elif isinstance(aud, list) and expected_client not in aud:
+                raise OidcProtocolError(f"Client {expected_client!r} is not in token audience {aud!r}.")
 
         return claims
 

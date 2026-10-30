@@ -72,6 +72,10 @@ async def lifespan(app: FastAPI):
     # (and logs a warning) if catalog.json is missing/invalid, and the
     # pipeline then runs exactly as it did before the catalog existed.
     get_structured_catalog(settings)
+
+    # Initialize PostgreSQL/SQLite database tables and seed initial RBAC dummy data
+    from app.storage.database import init_db
+    init_db(auto_seed=bool(getattr(settings, "database_auto_seed", True)))
     yield
 
 

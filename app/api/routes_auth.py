@@ -51,6 +51,7 @@ from app.auth.dependencies import (
     build_session,
     current_principal,
     require_principal,
+    resolve_principal_status,
     validate_oidc_settings,
 )
 from app.auth.oidc import (
@@ -266,6 +267,7 @@ async def login(request: Request, next: str | None = None) -> RedirectResponse:
     nonce = secrets.token_urlsafe(32)
     code_verifier = secrets.token_urlsafe(64)
 
+    prompt = request.query_params.get("prompt", "login")
     try:
         with OidcClient(OidcProviderConfig.from_settings(settings)) as client:
             authorization_url = client.authorization_url(
@@ -273,6 +275,7 @@ async def login(request: Request, next: str | None = None) -> RedirectResponse:
                 nonce=nonce,
                 code_verifier=code_verifier,
                 redirect_uri=_redirect_uri(settings, request),
+                prompt=prompt,
             )
     except OidcConfigurationError as exc:
         logger.error("The OIDC provider is not usable: %s", exc)
@@ -395,21 +398,37 @@ async def callback(
 
 @router.get(WHOAMI_PATH)
 async def whoami(
-    request: Request, principal: Principal = Depends(require_principal)
+    request: Request, principal: Principal = Depends(resolve_principal_status)
 ) -> dict[str, Any]:
     """The verified identity of the caller."""
     return principal.to_public_dict()
 
 
+def _end_session_url(settings: Any) -> str:
+    base_url = (getattr(settings, "authentik_base_url", None) or "").rstrip("/")
+    app_slug = getattr(settings, "authentik_app_slug", "grafana-ai-agent")
+    if base_url:
+        return f"{base_url}/application/o/{app_slug}/end-session/?post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A5173%2F"
+    return "/"
+
+
+@router.get(LOGOUT_PATH)
+async def logout_get(request: Request) -> RedirectResponse:
+    """Clear session cookies and redirect to Authentik end-session endpoint."""
+    settings = get_settings()
+    session = _session(settings)
+    transaction = _login_transaction(settings)
+    response = RedirectResponse(_end_session_url(settings), status_code=status.HTTP_302_FOUND)
+    if session is not None:
+        session.clear_cookie(response)
+    if transaction is not None:
+        transaction.clear_cookie(response)
+    return response
+
+
 @router.post(LOGOUT_PATH)
 async def logout(request: Request) -> dict[str, Any]:
-    """End the application session.
-
-    This clears the application's own session cookie. It is **not** a global
-    single-sign-on logout: the user stays signed in to Authentik itself --
-    and to every other application that uses it -- unless the Authentik
-    provider's invalidation flow is configured to end that session too.
-    """
+    """End the application session and return the Authentik end-session URL."""
     settings = get_settings()
     session = _session(settings)
     transaction = _login_transaction(settings)
@@ -419,6 +438,7 @@ async def logout(request: Request) -> dict[str, Any]:
             "scope": "application",
             "providerName": "Authentik",
             "globalSsoLogout": False,
+            "endSessionUrl": _end_session_url(settings),
         }
     )
     if session is not None:

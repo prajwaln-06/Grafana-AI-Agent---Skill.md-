@@ -260,6 +260,20 @@ class Settings(BaseSettings):
                     "Not a secret.",
     )
 
+    # --- Database / RBAC User & Role Store ---
+    database_url: str = Field(
+        default="postgresql+psycopg://postgres:postgres@localhost:5432/grafana_ai",
+        description="Database URL for the User and Role Store (PostgreSQL in production, "
+                    "or SQLite such as sqlite:///./app_data/rbac.db for local dev). "
+                    "If the configured PostgreSQL server is unreachable on startup, "
+                    "falls back safely to a local SQLite database for development.",
+    )
+    database_auto_seed: bool = Field(
+        default=True,
+        description="Automatically seed realistic dummy data (users, scopes, proposals, "
+                    "approvals, audit logs) if the database tables are empty on startup.",
+    )
+
     # --- Session store (clarification / multi-turn flow) ---
     session_ttl_seconds: int = Field(default=600)
 

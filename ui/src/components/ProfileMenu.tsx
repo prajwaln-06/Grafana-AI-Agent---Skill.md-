@@ -13,17 +13,18 @@ import { useEffect, useRef, useState } from "react";
 import { changePassword, fetchPrincipal } from "../auth";
 import type { Principal } from "../auth";
 import { useAuth } from "./AuthGate";
+import { UserManagementModal } from "./UserManagementModal";
 
 export function ProfileMenu() {
   const { principal, devMode, config, signOut } = useAuth();
   const [open, setOpen] = useState(false);
   const [details, setDetails] = useState<Principal | null>(principal);
   const [loading, setLoading] = useState(false);
+  const [showUsersModal, setShowUsersModal] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    let cancelled = false;
 
     function onPointerDown(event: MouseEvent) {
       if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) {
@@ -60,79 +61,122 @@ export function ProfileMenu() {
   const shown = details ?? principal;
   const initials = initialsOf(shown);
   const email = shown?.email || null;
+  const isAdmin = shown?.role === "admin";
 
   return (
-    <div className="profile-menu" ref={wrapRef}>
-      <button
-        type="button"
-        className="profile-button"
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={email ? `Account: ${email}` : "Account"}
-        title={email || "Account"}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span aria-hidden="true">{initials}</span>
-      </button>
+    <>
+      <div className="profile-menu" ref={wrapRef}>
+        <button
+          type="button"
+          className="profile-button"
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-label={email ? `Account: ${email}` : "Account"}
+          title={email || "Account"}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span aria-hidden="true">{initials}</span>
+        </button>
 
-      {open && (
-        <div className="profile-panel" role="dialog" aria-label="Signed-in account">
-          <div className="profile-panel-head">
-            <span className="profile-panel-avatar" aria-hidden="true">
-              {initials}
-            </span>
-            <div className="profile-panel-identity">
-              <span className="profile-panel-name">
-                {shown?.name || shown?.username || "Signed in"}
+        {open && (
+          <div className="profile-panel" role="dialog" aria-label="Signed-in account">
+            <div className="profile-panel-head">
+              <span className="profile-panel-avatar" aria-hidden="true">
+                {initials}
               </span>
-              <span className="profile-panel-email muted small" title={email || undefined}>
-                {loading && !email ? "Loading…" : email || "No email address on file"}
-              </span>
+              <div className="profile-panel-identity">
+                <span className="profile-panel-name">
+                  {shown?.name || shown?.username || "Signed in"}
+                </span>
+                <span className="profile-panel-email muted small" title={email || undefined}>
+                  {loading && !email ? "Loading…" : email || "No email address on file"}
+                </span>
+              </div>
             </div>
+
+            {shown?.role && (
+              <div className="profile-panel-row">
+                <span className="muted small">Role</span>
+                <span
+                  className={`admin-badge ${
+                    shown.role === "admin"
+                      ? "role-admin"
+                      : shown.role === "maintainer"
+                      ? "role-maintainer"
+                      : shown.role === "operator"
+                      ? "role-operator"
+                      : "role-observer"
+                  }`}
+                >
+                  {shown.role.toUpperCase()}
+                </span>
+              </div>
+            )}
+
+            {shown?.username && (
+              <div className="profile-panel-row">
+                <span className="muted small">Username</span>
+                <span className="small">{shown.username}</span>
+              </div>
+            )}
+
+            {isAdmin && (
+              <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                <button
+                  type="button"
+                  className="btn secondary small"
+                  style={{ width: "100%", justifyContent: "center" }}
+                  onClick={() => {
+                    setOpen(false);
+                    setShowUsersModal(true);
+                  }}
+                >
+                  👥 Manage Team & Users
+                </button>
+              </div>
+            )}
+
+            {!devMode && (
+              <div className="profile-panel-actions">
+                <button
+                  type="button"
+                  className="btn ghost small"
+                  onClick={() => changePassword(config)}
+                  disabled={!config.passwordChangeUrl}
+                  title={
+                    config.passwordChangeUrl
+                      ? "Change your password in Authentik"
+                      : "No Authentik password-change flow is configured for this deployment"
+                  }
+                >
+                  Change password
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost small"
+                  onClick={signOut}
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+
+            {!devMode && (
+              <p className="muted small profile-panel-note">
+                Signing out ends this application's session only. You stay signed in to{" "}
+                {config.providerName || "Authentik"} itself — and to your other applications —
+                unless the provider's invalidation flow is configured to end that session too.
+              </p>
+            )}
           </div>
+        )}
+      </div>
 
-          {shown?.username && (
-            <div className="profile-panel-row">
-              <span className="muted small">Username</span>
-              <span className="small">{shown.username}</span>
-            </div>
-          )}
-
-          {!devMode && (
-            <div className="profile-panel-actions">
-              <button
-                type="button"
-                className="btn ghost small"
-                onClick={() => changePassword(config)}
-                disabled={!config.passwordChangeUrl}
-                title={
-                  config.passwordChangeUrl
-                    ? "Change your password in Authentik"
-                    : "No Authentik password-change flow is configured for this deployment"
-                }
-              >
-                Change password
-              </button>
-              <button
-                type="button"
-                className="btn ghost small"
-                onClick={signOut}
-              >
-                Sign out
-              </button>
-            </div>
-          )}
-
-          {!devMode && (
-            <p className="muted small profile-panel-note">
-              Signing out ends this application's session only. You stay signed in to{" "}
-              {config.providerName || "Authentik"} itself — and to your other applications —
-              unless the provider's invalidation flow is configured to end that session too.
-            </p>
-          )}
-        </div>
-      )}
-    </div>
+      <UserManagementModal
+        isOpen={showUsersModal}
+        onClose={() => setShowUsersModal(false)}
+      />
+    </>
   );
 }
 

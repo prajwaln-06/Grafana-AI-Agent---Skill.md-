@@ -29,6 +29,15 @@ export type Principal = {
   email?: string | null;
   name?: string | null;
   app?: string | null;
+  userId?: string | null;
+  status?: string | null;
+  role?: string | null;
+  scopes?: {
+    allowedFolderUids: string[];
+    allowedDashboardUids: string[];
+    deniedDashboardUids: string[];
+    allowedEnvironments: string[];
+  } | null;
 };
 
 export type SessionStatus = "loading" | "authenticated" | "unauthenticated" | "error";
@@ -180,7 +189,9 @@ export function signIn(config?: AuthConfig | null): void {
  *
  * Returns false when the logout request could not be completed.
  */
-export async function signOut(config?: AuthConfig | null): Promise<boolean> {
+export async function signOut(
+  config?: AuthConfig | null
+): Promise<{ ok: boolean; endSessionUrl?: string | null }> {
   const path = config?.logoutPath || DEFAULT_AUTH_CONFIG.logoutPath;
   try {
     const response = await fetch(path, {
@@ -188,9 +199,13 @@ export async function signOut(config?: AuthConfig | null): Promise<boolean> {
       headers: { Accept: "application/json" },
       credentials: "same-origin",
     });
-    return response.ok;
+    if (response.ok) {
+      const data = await response.json().catch(() => ({}));
+      return { ok: true, endSessionUrl: data.endSessionUrl || null };
+    }
+    return { ok: false };
   } catch {
-    return false;
+    return { ok: false };
   }
 }
 

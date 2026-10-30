@@ -166,6 +166,21 @@ services:
     restart: unless-stopped
 
   # --------------------------------------------------------------------------
+  # PostgreSQL (RBAC User, Role, Scope, Proposal, and Audit Store)
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: grafana_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
   # The agent (optional containerized alternative to ./start.sh).
   # Host networking keeps the URLs in .env (http://localhost:...) working
   # unchanged. It sits behind the "agent" profile, so the default
@@ -183,3 +198,4 @@ services:
 volumes:
   prometheus-data:
   grafana-data:
+  postgres-data:

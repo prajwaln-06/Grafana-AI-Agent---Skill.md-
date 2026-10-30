@@ -3,30 +3,34 @@ api/routes_admin.py
 
 Operational endpoint for picking up SKILL.md structural changes (a new
 routing-table row, a new exporter, a frontmatter version bump) without a
-full process restart.
-
-Why this is needed at all: reference file CONTENT (an existing domain
-file's text, an existing overview.md's Metric Directory table) is read
-fresh from disk on every request already -- see skill_index.py's
-read_reference()/metric_directory(), which never cache -- so editing an
-existing file's content is already live with zero action needed. Only
-SKILL.md's own routing table and frontmatter are snapshotted once (in
-SkillIndex.routing_rows / .metadata, computed at SkillIndex.load() time),
-since those genuinely need re-parsing as a whole, not a small text read.
-This endpoint is the explicit trigger for that re-parse.
+full process restart, and administrative management endpoints (Section 5.3 & 5.4).
 """
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
+from app.auth.dependencies import current_principal
 from app.catalog.runtime import reload_structured_catalog
 from app.config import get_settings
 from app.skill_index import SkillIndex, SkillIndexError
+from app.storage.database import get_db_session
+from app.storage.models import UserModel
+from app.storage.user_store import AdminSecurityError, UserStore
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+class UserAccessUpdateRequest(BaseModel):
+    role: str | None = Field(default=None, description="One of: admin, maintainer, operator, observer")
+    status: str | None = Field(default=None, description="One of: active, pending, deactivated")
+    scopes: dict[str, Any] | None = Field(default=None, description="Granular scope boundaries")
 
 
 @router.post("/api/v1/admin/reload-skill")
@@ -66,3 +70,103 @@ async def reload_skill(request: Request) -> dict:
         "skill_version": new_index.metadata.version,
         "routing_rows": len(new_index.routing_rows),
     }
+
+
+@router.get("/api/v1/admin/users")
+async def list_users() -> dict[str, Any]:
+    """List all registered users, roles, statuses, and scopes per Section 5.3."""
+    with get_db_session() as session:
+        users = (
+            session.execute(
+                select(UserModel)
+                .options(joinedload(UserModel.scopes))
+                .order_by(UserModel.created_at)
+            )
+            .scalars()
+            .unique()
+            .all()
+        )
+
+        return {
+            "users": [
+                {
+                    "user_id": u.user_id,
+                    "display_name": u.display_name,
+                    "username": u.username,
+                    "email": u.email,
+                    "role": u.role,
+                    "status": u.status,
+                    "authz_version": u.authz_version,
+                    "created_at": u.created_at.isoformat() if u.created_at else None,
+                    "last_seen_at": u.last_seen_at.isoformat() if u.last_seen_at else None,
+                    "scopes": {
+                        "allowed_folder_uids": list(u.scopes.allowed_folder_uids) if u.scopes else [],
+                        "allowed_dashboard_uids": list(u.scopes.allowed_dashboard_uids) if u.scopes else [],
+                        "denied_dashboard_uids": list(u.scopes.denied_dashboard_uids) if u.scopes else [],
+                        "allowed_environments": list(u.scopes.allowed_environments) if u.scopes else [],
+                    },
+                }
+                for u in users
+            ]
+        }
+
+
+@router.put("/api/v1/admin/users/{user_id}/access")
+async def update_user_access(
+    user_id: str,
+    update: UserAccessUpdateRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Update user role, status, and scopes with strict administrative guardrails (Section 5.3 & 5.4)."""
+    principal = current_principal(request)
+    if not principal or principal.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator role required.")
+
+    valid_roles = {"admin", "maintainer", "operator", "observer"}
+    if update.role is not None and update.role not in valid_roles:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role. Must be one of: {sorted(valid_roles)}",
+        )
+
+    valid_statuses = {"active", "pending", "deactivated"}
+    if update.status is not None and update.status not in valid_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Must be one of: {sorted(valid_statuses)}",
+        )
+
+    with get_db_session() as session:
+        try:
+            target = UserStore.update_user_access(
+                session,
+                admin_user_id=principal.user_id,
+                target_user_id=user_id,
+                role=update.role,
+                status=update.status,
+                scopes=update.scopes,
+            )
+            session.commit()
+        except AdminSecurityError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found.")
+
+        return {
+            "status": "ok",
+            "user": {
+                "user_id": target.user_id,
+                "display_name": target.display_name,
+                "username": target.username,
+                "email": target.email,
+                "role": target.role,
+                "status": target.status,
+                "authz_version": target.authz_version,
+                "scopes": {
+                    "allowed_folder_uids": list(target.scopes.allowed_folder_uids) if target.scopes else [],
+                    "allowed_dashboard_uids": list(target.scopes.allowed_dashboard_uids) if target.scopes else [],
+                    "denied_dashboard_uids": list(target.scopes.denied_dashboard_uids) if target.scopes else [],
+                    "allowed_environments": list(target.scopes.allowed_environments) if target.scopes else [],
+                },
+            },
+        }
