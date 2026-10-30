@@ -1,0 +1,12 @@
+prompt,run_number,status,stage1_router_s,stage2_context_s,stage3_generator_s,stage4_val_exec_s,total_s,input_tokens,output_tokens
+Plot CPU utilization for node-00 and node-01 over the last h…,1,ok,5.678,0.062,10.032,0.008,15.78,22565,347
+Plot CPU utilization for node-00 and node-01 over the last h…,2,ok,4.704,0.052,19.257,0.006,24.019,22565,343
+Plot CPU utilization for node-00 and node-01 over the last h…,3,ok,5.001,0.049,12.62,0.008,17.678,22565,339
+"Which node has the highest CPU utilization right now, and ho…",1,"ok, ok",6.565,0.043,33.884,0.007,40.498,26101,575
+"Which node has the highest CPU utilization right now, and ho…",2,ok,6.314,0.045,19.349,0.007,25.715,26101,419
+"Which node has the highest CPU utilization right now, and ho…",3,"ok, ok",6.63,0.045,19.439,0.009,26.123,26101,591
+Show GPU temperature across all GPUs.,1,ok,30.582,0.058,19.508,0.004,50.152,25120,287
+How much disk space is available across all cluster nodes?,1,ok,6.813,0.061,6.382,0.005,13.261,20279,287
+How much disk space is available across all cluster nodes?,2,ok,5.298,0.041,9.953,0.005,15.297,20279,293
+How much disk space is available across all cluster nodes?,3,ok,13.352,0.042,16.276,0.003,29.674,20279,279
+Alert me if CPU utilization exceeds 90% on node-00 for 5 min…,1,alert_rule_proposed,18.787,0.057,9.979,0.0,28.823,25822,405

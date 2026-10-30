@@ -1,0 +1,6 @@
+prompt,status,stage1_router_s,stage2_context_s,stage3_generator_s,stage4_val_exec_s,total_s,input_tokens,output_tokens
+Plot CPU utilization for node-00 and node-01 over the last hour.,ok,5.63,0.058,8.96,0.01,14.66,22315,335
+"Which node has the highest CPU utilization right now, and how much memory is available on that node?","ok, ok",7.71,0.045,23.04,0.013,30.81,26024,489
+Show GPU temperature across all GPUs.,ok,15.59,0.09,8.41,0.007,24.09,24972,287
+How much disk space is available across all cluster nodes?,ok,20.17,0.062,5.78,0.007,26.02,20204,284
+Alert me if CPU utilization exceeds 90% on node-00 for 5 minutes.,alert_rule_proposed,13.15,0.063,30.66,0.0,43.87,25572,379

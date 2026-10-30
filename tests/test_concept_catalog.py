@@ -351,8 +351,10 @@ def test_awaiting_metric_for_alert_resolution():
     resp = client.post("/api/chat", json={"message": "DCGM_FI_DEV_GPU_UTIL", "sessionId": session_id})
     assert resp.status_code == 200
     data = resp.json()
-    # pending_action must be cleared
-    assert session.pending_action is None
+    # The metric-level clarification must be resolved — pending_action must no longer
+    # be "awaiting_metric_for_alert". The pipeline may still ask for threshold/duration
+    # on the next turn (setting "awaiting_alert_details"), which is correct behaviour.
+    assert session.pending_action != "awaiting_metric_for_alert"
     # The rewritten request should have gone through the alert or query pipeline
     assert data["intent"] in ("alert_rule", "prometheus", "clarification", "ok")
 

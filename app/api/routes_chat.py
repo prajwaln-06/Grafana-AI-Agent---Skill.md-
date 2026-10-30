@@ -351,8 +351,10 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
                     session.pending_payload = {"alert_rule": alert_rule}
                     session.last_alert_rule = alert_rule
                 else:
-                    # Pipeline still needs more info (e.g. duration, threshold) — keep alert context for next turn
-                    session.pending_action = "awaiting_metric_for_alert"
+                    # Pipeline still needs more info (e.g. duration, threshold) — keep alert context for next turn.
+                    # Use "awaiting_alert_details" (not "awaiting_metric_for_alert") so the metric-resolution
+                    # handler does not fire again when the user supplies the missing threshold/duration.
+                    session.pending_action = "awaiting_alert_details"
                     session.pending_payload = {"original_request": text, "candidates": []}
 
                 return respond(ChatResponse(

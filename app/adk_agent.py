@@ -144,7 +144,7 @@ def get_adk_agent() -> LlmAgent:
                 logger.warning("Failed to initialize LiteLLM (%s); falling back to Gemini", e)
 
         if selected_model is None:
-            model_name = settings.gemini_model if settings.gemini_model != "gemini-3.7-flash" else "gemini-2.5-flash"
+            model_name = settings.gemini_model
             from app import llm_provider
             client_kwargs = llm_provider.build_client_kwargs(settings)
             selected_model = Gemini(

@@ -61,6 +61,11 @@ class _PermanentError(Exception):
 class LLMResponse:
     text: str
     parsed: dict | list
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+_last_usage: tuple[int | None, int | None] = (None, None)
 
 
 def call_llm_json(prompt: str, system_instruction: str, api_key: str, model: str,
@@ -76,7 +81,8 @@ def call_llm_json(prompt: str, system_instruction: str, api_key: str, model: str
         try:
             text = _call_gemini_once(prompt, system_instruction, api_key, model)
             parsed = _parse_json_response(text)
-            return LLMResponse(text=text, parsed=parsed)
+            in_tok, out_tok = _last_usage
+            return LLMResponse(text=text, parsed=parsed, input_tokens=in_tok, output_tokens=out_tok)
         except _PermanentError as e:
             raise LLMCallError(f"LLM call failed with a non-retryable error: {e}") from e
         except (_TransientError, json.JSONDecodeError) as e:
@@ -127,6 +133,12 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
         text = response.text
         if text is None:
             raise _TransientError("Gemini returned an empty response body.")
+        usage = getattr(response, "usage_metadata", None)
+        global _last_usage
+        _last_usage = (
+            getattr(usage, "prompt_token_count", None) if usage else None,
+            getattr(usage, "candidates_token_count", None) if usage else None,
+        )
         return text
     except _TransientError:
         raise
