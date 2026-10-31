@@ -69,6 +69,41 @@ def parse_duration_seconds(value: str) -> int:
 
 
 @dataclass(frozen=True)
+class SeverityField:
+    """Documented value vocabulary of ONE severity-like field. Values are
+    compared case-sensitively against the stored value. `source` records
+    where the vocabulary came from (observed in samples, a published enum, or
+    unverified) so nobody mistakes an assumption for a measurement."""
+    path: str
+    normal: frozenset[str]
+    abnormal: frozenset[str]
+    other_known: frozenset[str]
+    source: str
+
+    @property
+    def known(self) -> frozenset[str]:
+        return self.normal | self.abnormal | self.other_known
+
+
+@dataclass(frozen=True)
+class SeveritySemantics:
+    """What "abnormal" means for a pattern.
+
+    mode "positive_abnormal": a document is abnormal only if a field holds a
+        RECOGNISED abnormal value. An unrecognised or empty value is never
+        treated as abnormal.
+    mode "negative_healthy": the source team's own definition -- abnormal
+        means the field exists and is not a documented normal value.
+    combine "any": with several fields, ONE abnormal field is enough (OR)."""
+    mode: str
+    combine: str
+    fields: tuple[SeverityField, ...]
+
+    def field(self, path: str) -> SeverityField | None:
+        return next((f for f in self.fields if f.path == path), None)
+
+
+@dataclass(frozen=True)
 class PatternEntry:
     pattern_id: str
     index_pattern: str
@@ -86,6 +121,7 @@ class PatternEntry:
     description: str = ""
     sensitivity: dict = field(default_factory=dict)
     date_rotation: dict = field(default_factory=dict)
+    severity_semantics: SeveritySemantics | None = None
 
     @property
     def max_window_seconds(self) -> int:
@@ -176,6 +212,52 @@ def _str_list(obj: dict, key: str, where: str, *, required: bool) -> list[str]:
     if len(set(v)) != len(v):
         _fail(where, f"'{key}' contains duplicates")
     return v
+
+
+_SEVERITY_MODES = frozenset({"positive_abnormal", "negative_healthy"})
+_SEVERITY_ROLE_NAMES = ("severity", "health_state")
+
+
+def _build_severity(raw, where: str, roles: dict[str, tuple[str, ...]]) -> SeveritySemantics | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        _fail(where, "'severity_semantics' must be an object")
+    mode, combine = raw.get("mode"), raw.get("combine")
+    if mode not in _SEVERITY_MODES:
+        _fail(where, f"severity_semantics.mode must be one of {sorted(_SEVERITY_MODES)}")
+    if combine != "any":
+        _fail(where, "severity_semantics.combine must be 'any' (one abnormal field is enough)")
+    role_paths = {p for r in _SEVERITY_ROLE_NAMES for p in roles.get(r, ())}
+    raw_fields = raw.get("fields")
+    if not isinstance(raw_fields, dict) or not raw_fields:
+        _fail(where, "severity_semantics.fields must be a non-empty object")
+    out = []
+    for path, body in raw_fields.items():
+        if path not in role_paths:
+            _fail(where, f"severity_semantics field {path!r} is not bound to the severity/health_state role")
+        if not isinstance(body, dict):
+            _fail(where, f"severity_semantics.fields[{path!r}] must be an object")
+        sets = {}
+        for key in ("normal", "abnormal", "other_known"):
+            vals = body.get(key, [])
+            if not isinstance(vals, list) or not all(isinstance(v, str) and v for v in vals) \
+                    or len(set(vals)) != len(vals):
+                _fail(where, f"severity_semantics.fields[{path!r}].{key} must be a list of unique non-empty strings")
+            sets[key] = frozenset(vals)
+        if sets["normal"] & sets["abnormal"] or sets["normal"] & sets["other_known"] \
+                or sets["abnormal"] & sets["other_known"]:
+            _fail(where, f"severity_semantics.fields[{path!r}]: normal/abnormal/other_known must be disjoint")
+        if not sets["abnormal"]:
+            _fail(where, f"severity_semantics.fields[{path!r}].abnormal must not be empty")
+        if mode == "negative_healthy" and not sets["normal"]:
+            _fail(where, f"severity_semantics.fields[{path!r}].normal must not be empty in negative_healthy mode")
+        source = body.get("source")
+        if not isinstance(source, str) or not source:
+            _fail(where, f"severity_semantics.fields[{path!r}].source is required (where the vocabulary came from)")
+        out.append(SeverityField(path=path, normal=sets["normal"], abnormal=sets["abnormal"],
+                                 other_known=sets["other_known"], source=source))
+    return SeveritySemantics(mode=mode, combine=combine, fields=tuple(out))
 
 
 def _build_entry(raw: dict, index: int, skills_root: Path | None) -> PatternEntry:
@@ -271,6 +353,7 @@ def _build_entry(raw: dict, index: int, skills_root: Path | None) -> PatternEntr
         description=str(raw.get("description", "")),
         sensitivity=dict(sensitivity),
         date_rotation=dict(date_rotation),
+        severity_semantics=_build_severity(raw.get("severity_semantics"), where, roles),
     )
 
 

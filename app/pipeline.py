@@ -313,7 +313,9 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
-from app import executor, field_discovery, label_discovery, llm_client, validator
+from app import executor, label_discovery, llm_client, validator
+from app.opensearch_catalog import canonical as os_canonical, runtime as os_runtime
+from app.opensearch_catalog.context import OpenSearchContext
 from app.catalog import runtime as catalog_runtime
 from app.catalog import search as catalog_search
 from app.catalog.schema import Catalog, CatalogStatus
@@ -480,6 +482,7 @@ async def _resolve_matched_group(question: str, matched: list[dict], panic_mode:
         known_references=known_references,
         known_datasources=known_datasources,
         catalog_status_by_metric=catalog_status_by_metric,
+        opensearch_context=generator_context.opensearch,
     )
 
     level1_candidate_scope = {m["name"] for m in generator_context.metric_metadata} or None
@@ -683,6 +686,7 @@ async def _run_level3_fallback(question: str, skill_index: SkillIndex, settings:
         known_references=known_references,
         known_datasources=known_datasources,
         catalog_status_by_metric=catalog_status_by_metric,
+        opensearch_context=generator_context.opensearch,
     )
     _, merged, validated = await _run_generation_attempt(
         question, matched, panic_mode, generator_context, skill_index, settings, context, action_intent,
@@ -1161,6 +1165,7 @@ async def _resolve_dependent_entry(question: str, dep_matched: dict, resolved_en
         known_references=known_references,
         known_datasources=known_datasources,
         catalog_status_by_metric=catalog_status_by_metric,
+        opensearch_context=generator_context.opensearch,
     )
     if not validated.passed:
         logger.warning(
@@ -1954,9 +1959,13 @@ class GeneratorContext:
     # skip the value check for it" -- same fail-open posture as
     # labels_by_metric's own None-means-skip handling.
     label_values_by_metric: dict[str, dict[str, list[str]] | None] = field(default_factory=dict)
-    attributes_by_pattern: dict[str, dict] = field(default_factory=dict)
+    # OpenSearch: the registry + runtime-field view for the index families the
+    # Router selected (app/opensearch_catalog). None for a Prometheus-only
+    # request, so those requests are completely unaffected. `opensearch_block`
+    # is the prompt rendering of the same object.
+    opensearch: "OpenSearchContext | None" = None
     labels_block: str = ""
-    attributes_block: str = ""
+    opensearch_block: str = ""
     # Batch 1 (Phase 2): the Level-1 catalog-narrowed Generator-candidate
     # set (built by `_build_metric_metadata` from `catalog_metric_candidates`
     # -- unconditional now; the old `catalog_generator_candidates_enabled`
@@ -2061,8 +2070,8 @@ def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
         ctx.labels_block = f"{keys_block}\n\n{values_block}" if values_block else keys_block
 
     if "opensearch" in datasources:
-        ctx.attributes_by_pattern = field_discovery.discover_attributes_for_all_known_patterns(settings.opensearch_url)
-        ctx.attributes_block = field_discovery.format_attributes_for_prompt(ctx.attributes_by_pattern)
+        ctx.opensearch = os_runtime.build_request_context(matched, settings)
+        ctx.opensearch_block = ctx.opensearch.prompt_block
 
     if catalog is not None and ctx.known_prometheus_metrics:
         # Level-1 Generator-candidate construction is unconditional (Batch
@@ -2424,8 +2433,8 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
         prompt_parts.append(f"\nDatasource fundamentals:\n\n{fundamentals_blocks}")
     if ctx.labels_block:
         prompt_parts.append(f"\n{ctx.labels_block}")
-    if ctx.attributes_block:
-        prompt_parts.append(f"\n{ctx.attributes_block}")
+    if ctx.opensearch_block:
+        prompt_parts.append(f"\n{ctx.opensearch_block}")
     prompt_parts.append(f"\nUser question: {question}")
     prompt_parts.append(f"\npanic_mode is currently: {panic_mode}")
     prompt_parts.append(f"\naction_intent (from the routing phase): {action_intent!r}")
@@ -2457,7 +2466,10 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
     )
-    return response.parsed
+    # OpenSearch only (no-op for Prometheus-only requests): canonicalise via the
+    # deterministic guard so validation and execution see registry-resolved
+    # index, expanded named conditions and bounded defaults.
+    return os_canonical.canonicalise_contract(response.parsed, ctx.opensearch)
 
 
 # ---- Batch 3 catalog integration (Phases 7-9) ------------------------------

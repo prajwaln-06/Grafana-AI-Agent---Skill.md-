@@ -185,6 +185,7 @@ def validate_contract(
     known_datasources: set[str] | None = None,
     catalog_status_by_metric: dict[str, str] | None = None,
     candidate_metric_scope: set[str] | None = None,
+    opensearch_context=None,
 ) -> ValidationResult:
     """Validates a full Output Contract response (either `mode: "single"`
     with fields inline, or `mode: "multi"` with a `results` array).
@@ -255,6 +256,7 @@ def validate_contract(
             known_references=known_references, known_datasources=known_datasources,
             catalog_status_by_metric=catalog_status_by_metric,
             candidate_metric_scope=candidate_metric_scope,
+            opensearch_context=opensearch_context,
         )
         if not result.passed:
             prefix = f"results[{i}]: " if contract.get("mode") == "multi" else ""
@@ -322,7 +324,8 @@ def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: d
                      known_references: set[str], known_datasources: set[str],
                      catalog_status_by_metric: dict[str, str],
                      candidate_metric_scope: set[str] | None = None,
-                     label_values_by_metric: dict[str, dict[str, list[str]] | None] | None = None) -> ValidationResult:
+                     label_values_by_metric: dict[str, dict[str, list[str]] | None] | None = None,
+                     opensearch_context=None) -> ValidationResult:
     status = entry.get("status")
     if status not in _VALID_STATUSES:
         return ValidationResult(False, f"Unknown status {status!r}; must be one of {sorted(_VALID_STATUSES)}.")
@@ -332,7 +335,8 @@ def _validate_entry(entry: dict, *, known_metrics: set[str], labels_by_metric: d
                                    known_references=known_references, known_datasources=known_datasources,
                                    catalog_status_by_metric=catalog_status_by_metric,
                                    candidate_metric_scope=candidate_metric_scope,
-                                   label_values_by_metric=label_values_by_metric)
+                                   label_values_by_metric=label_values_by_metric,
+                                   opensearch_context=opensearch_context)
     if status == "ambiguous_metric":
         return _validate_ambiguous(entry)
     if status == "unsupported_metric":
@@ -737,7 +741,8 @@ def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric
                         known_references: set[str], known_datasources: set[str],
                         catalog_status_by_metric: dict[str, str],
                         candidate_metric_scope: set[str] | None = None,
-                        label_values_by_metric: dict[str, dict[str, list[str]] | None] | None = None) -> ValidationResult:
+                        label_values_by_metric: dict[str, dict[str, list[str]] | None] | None = None,
+                        opensearch_context=None) -> ValidationResult:
     status = entry["status"]
     warnings: list[str] = []
 
@@ -791,7 +796,7 @@ def _validate_ok_entry(entry: dict, *, known_metrics: set[str], labels_by_metric
             return result
         warnings.extend(result.warnings)
     elif data_source == "opensearch":
-        result = _validate_opensearch_entry(entry, query)
+        result = _validate_opensearch_entry(entry, query, opensearch_context)
         if not result.passed:
             return result
         warnings.extend(result.warnings)
@@ -959,26 +964,31 @@ def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: li
     return ValidationResult(True, warnings=warnings)
 
 
-def _validate_opensearch_entry(entry: dict, query) -> ValidationResult:
-    # Section 6 Step 7 sanity pass: shape matches data source.
+def _validate_opensearch_entry(entry: dict, query, opensearch_context=None) -> ValidationResult:
+    """With a request context (the pipeline always supplies one) the entry is
+    checked by the deterministic guard: approved pattern, confirmed fields,
+    permitted operations, bounded sizes/aggregations, one bounded time window
+    within the cap, named-condition semantics. The guard is idempotent, so a
+    query the pipeline already canonicalised passes unchanged. Without a
+    context (direct/legacy callers) only the structural check runs and a
+    warning says so -- it is never silently treated as fully validated."""
     if not isinstance(query, dict) or not query:
         return ValidationResult(False, "data_source is 'opensearch' but 'query' is not a non-empty DSL object.")
-    index = entry.get("index")
-    if not index:
-        return ValidationResult(False, "data_source is 'opensearch' but 'index' is missing (Section 9: "
-                                        "'index' replaces 'time_range' for an OpenSearch-bound result).")
-    # No OpenSearch domain reference exists yet (opensearch-fundamentals.md's
-    # own status note), so there is no confirmed field/index-pattern catalog
-    # to check `query`'s field names or `index`'s pattern against -- doing so
-    # would mean guessing, which this module deliberately never does. Once an
-    # opensearch-logs (or similar) domain exists, this function is the place
-    # to add the same kind of Principle-9 field-key check
-    # `_validate_prometheus_entry` does for PromQL label keys, using
-    # field_discovery's live `Attributes.*` discovery the same way.
-    return ValidationResult(True, warnings=[
-        "OpenSearch entry passed structural checks only (no domain reference exists yet to confirm "
-        "index patterns or field names against -- see opensearch-fundamentals.md's status note)."
-    ])
+    if opensearch_context is None:
+        if not entry.get("pattern_id") and not entry.get("index"):
+            return ValidationResult(False, "data_source is 'opensearch' but neither 'pattern_id' nor 'index' is present.")
+        return ValidationResult(True, warnings=[
+            "OpenSearch entry passed structural checks only (no OpenSearch request context was supplied, so "
+            "fields, index and time window were not confirmed)."
+        ])
+    from app.opensearch_catalog import guard
+    result = guard.check_entry(entry, opensearch_context)
+    if not result.ok:
+        return ValidationResult(False, f"OpenSearch query rejected ({result.code}): {result.reason}")
+    if result.query != query or (entry.get("index") not in (None, "", result.index)):
+        return ValidationResult(False, "OpenSearch query was not in canonical form (internal canonicalisation was "
+                                        "skipped); refusing to run an unnormalised query.")
+    return ValidationResult(True, warnings=list(result.warnings))
 
 
 def _extract_promql_label_keys(query: str) -> set[str]:

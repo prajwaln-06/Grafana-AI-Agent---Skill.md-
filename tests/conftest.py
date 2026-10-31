@@ -49,3 +49,41 @@ def settings(skills_root):
         alert_rule_creation_enabled=False,
         dependent_query_resolution_enabled=False,
     )
+
+
+# ---- OpenSearch helpers (synthetic mapping fixtures; see tests/fixtures/opensearch/README.md) ----
+
+_OS_FIXTURE_BY_INDEX = {
+    "slingshot_crayfabrichealth-*": "mapping_fabric_health.json",
+    "controllerlog-*": "mapping_controller_log.json",
+    "log_iml-*": "mapping_ilo_events.json",
+}
+
+
+@pytest.fixture(scope="session")
+def os_registry(skills_root):
+    from app.opensearch_catalog.registry import DEFAULT_REGISTRY_PATH, load_registry
+    return load_registry(DEFAULT_REGISTRY_PATH, skills_root=skills_root)
+
+
+@pytest.fixture()
+def os_ctx(os_registry):
+    """Factory: os_ctx("controller_log", "ilo_events") -> OpenSearchContext built from the SYNTHETIC
+    fixture mappings (a real cluster's mappings are not claimed)."""
+    import json
+    from app.opensearch_catalog.context import Limits, OpenSearchContext, PatternContext
+    from app.opensearch_catalog.field_catalog import FieldCatalogCache, build_field_view
+
+    def fetch(index_pattern):
+        return json.loads((BACKEND_ROOT / "tests" / "fixtures" / "opensearch" / _OS_FIXTURE_BY_INDEX[index_pattern]).read_text())
+
+    def make(*pattern_ids, limits=None):
+        cache = FieldCatalogCache(fetch, ttl_seconds=60, stale_ttl_seconds=60, max_indices=50,
+                                  failure_backoff_seconds=1)
+        pats = {}
+        for pid in pattern_ids or ("fabric_health", "controller_log", "ilo_events"):
+            entry = os_registry.get(pid)
+            pats[pid] = PatternContext(entry=entry, view=build_field_view(entry, cache.get(entry)))
+        return OpenSearchContext(patterns=pats, limits=limits or Limits())
+
+    return make

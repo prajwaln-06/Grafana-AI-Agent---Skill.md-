@@ -243,4 +243,4 @@ def test_settings_defaults_for_opensearch(monkeypatch):
     assert s.opensearch_field_catalog_ttl_seconds == 600
     assert s.opensearch_field_catalog_stale_ttl_seconds >= s.opensearch_field_catalog_ttl_seconds
     assert s.opensearch_field_catalog_max_indices == 7
-    assert s.opensearch_registry_path.name == "index_registry.json"
+    assert s.opensearch_registry_path is None   # None = packaged registry

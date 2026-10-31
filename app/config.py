@@ -35,9 +35,10 @@ class Settings(BaseSettings):
     opensearch_auth_password: str | None = Field(default=None)
 
     # --- OpenSearch registry / runtime field catalog (app/opensearch_catalog) ---
-    opensearch_registry_path: Path = Field(
-        default=Path("app/opensearch_catalog/index_registry.json"),
-        description="Index registry: which patterns/fields may be queried.")
+    opensearch_registry_path: Path | None = Field(
+        default=None,
+        description="Index registry file. None = the packaged "
+                    "app/opensearch_catalog/index_registry.json.")
     opensearch_field_catalog_ttl_seconds: float = Field(default=600.0, gt=0)
     opensearch_field_catalog_stale_ttl_seconds: float = Field(
         default=3600.0, gt=0,
@@ -46,6 +47,23 @@ class Settings(BaseSettings):
     opensearch_field_catalog_max_indices: int = Field(
         default=7, ge=1, description="Newest N daily indices merged per pattern.")
     opensearch_field_catalog_failure_backoff_seconds: float = Field(default=30.0, ge=0)
+
+    # --- OpenSearch query limits (enforced in Python by opensearch_catalog.guard) ---
+    opensearch_default_hits_size: int = Field(default=20, ge=1)
+    opensearch_max_hits_size: int = Field(default=100, ge=1)
+    opensearch_default_terms_size: int = Field(default=10, ge=1)
+    opensearch_max_terms_size: int = Field(default=50, ge=1)
+    opensearch_max_histogram_buckets: int = Field(default=200, ge=1)
+    opensearch_search_timeout: str = Field(
+        default="10s", pattern=r"^[1-9][0-9]*(ms|s)$",
+        description="Server-side search timeout added to every OpenSearch query "
+                    "(an expired timeout yields a partial result that is flagged).")
+
+    # --- OpenSearch result redaction (opensearch_catalog.redaction) ---
+    opensearch_redact_usernames: bool = Field(default=True)
+    opensearch_redact_ip_mode: str = Field(
+        default="mask_all", pattern=r"^(mask_all|keep_internal|off)$",
+        description="mask_all | keep_internal (keep private/loopback addresses) | off.")
 
     prometheus_timeout_seconds: float = Field(default=15.0)
     opensearch_timeout_seconds: float = Field(default=15.0)

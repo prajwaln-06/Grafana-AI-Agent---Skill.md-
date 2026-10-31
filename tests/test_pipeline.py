@@ -404,10 +404,12 @@ def test_opensearch_side_of_generator_context_only_built_when_matched(skill_inde
     }
     with patch.object(llm_client, "call_llm_json", side_effect=[router_resp, MagicMock(parsed=gen_contract)]), \
          patch.object(label_discovery, "discover_label_details_for_metrics", return_value={"node_load1": label_discovery.LabelDetails(keys=[], values={})}), \
-         patch.object(field_discovery, "discover_attributes_for_all_known_patterns") as mock_field_discovery:
+         patch.object(field_discovery, "discover_attributes_for_all_known_patterns") as mock_field_discovery, \
+         patch("app.opensearch_catalog.runtime.build_request_context") as mock_os_context:
         _run(pipeline.run_pipeline("load average", skill_index, settings))
 
     assert not mock_field_discovery.called
+    assert not mock_os_context.called  # the OpenSearch registry/field view is never built for Prometheus-only requests
 
 
 # ---- Alert-rule creation (SKILL.md Section 12) ----------------------------------

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from app import pipeline
+from app.opensearch_catalog.context import error_context
 
 FAMILY_REFERENCES = {
     "fabric_health": "references/opensearch-logs/fabric-health.md",
@@ -135,7 +136,7 @@ def test_generator_context_loads_family_overview_and_fundamentals(pattern_id, sk
     ref = FAMILY_REFERENCES[pattern_id]
     matched = [{"reference_path": ref, "data_source": "opensearch"}]
 
-    with patch("app.field_discovery.discover_attributes_for_all_known_patterns", return_value={}):
+    with patch("app.opensearch_catalog.runtime.build_request_context", return_value=error_context("test: no cluster")):
         ctx = pipeline._build_generator_context(matched, skill_index, settings, question="q")
 
     assert ref in ctx.reference_texts
@@ -152,7 +153,7 @@ def test_other_families_are_not_loaded_into_a_single_family_context(skill_index,
     ref = FAMILY_REFERENCES["controller_log"]
     matched = [{"reference_path": ref, "data_source": "opensearch"}]
 
-    with patch("app.field_discovery.discover_attributes_for_all_known_patterns", return_value={}):
+    with patch("app.opensearch_catalog.runtime.build_request_context", return_value=error_context("test: no cluster")):
         ctx = pipeline._build_generator_context(matched, skill_index, settings, question="q")
 
     assert set(ctx.reference_texts) == {ref}

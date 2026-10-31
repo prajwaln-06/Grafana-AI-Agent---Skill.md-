@@ -49,18 +49,30 @@ names and source addresses appear only inside the message text, not as fields.
 | Login/logout events for a BMC | time range, term on `entity_host`, `match_phrase` on `text` or term on `event_code` |
 | Most frequent event codes per BMC | `size: 0`, `terms` on `entity_host` with nested `terms` on `event_code` |
 | Browser versus IPMI counts | `filters` aggregation with two `match_phrase` clauses on `text` |
-| Abnormal events with actions | time range, `must_not` of a `bool` that requires both severity fields to hold their normal values (so a document is kept when either field is abnormal), rows with `recommended_action` |
+| Abnormal events with actions | time range, `{"named_condition": "abnormal_severity"}` (expanded by the system), rows with `recommended_action` |
 | Unrepaired events | term on `repaired` set to false |
 
 ## Severity and "Abnormal" Definition
 
-There are two severity fields. In the sampled data every document had the
-normal values `OK` and `Informational`, so the abnormal value domain is
-**unobserved**. "Abnormal" or "severity other than OK or Informational" means a
-document where the top-level severity is not `OK`, the vendor severity is not
-`Informational`, or both. Whether the two conditions are combined with "or" or
-"and" is a pending decision: use "or" (either field abnormal) and say so in the
-explanation. Never assume the set of abnormal values.
+There are two severity fields, and **either** one being abnormal makes an event
+abnormal (an OR). Write the condition as `{"named_condition":
+"abnormal_severity"}`; the system expands it deterministically to "the top-level
+`Severity` is one of the recognised abnormal values **or** the vendor
+`Oem.Hpe.Severity` is one of the recognised abnormal values". Never write the
+expansion yourself and never use `must_not` on a severity field: that would also
+match documents where a field is missing or holds an unrecognised value, which
+are not known to be abnormal.
+
+| Field | Normal (observed) | Recognised abnormal | Status of the abnormal set |
+|---|---|---|---|
+| `Severity` | `OK` | `Warning`, `Critical` | From the DMTF Redfish severity enumeration; **not observed** in the sampled data |
+| `Oem.Hpe.Severity` | `Informational` | `Caution`, `Warning`, `Critical` | **Unverified assumption**; not observed in the sampled data |
+
+Values outside these sets are neither normal nor abnormal; they are reported on
+the row as unrecognised rather than guessed at. Result rows carry a severity
+assessment that says which field decided the state, and flags a missing field
+or a conflict between the two fields. Match severity values in their stored
+case.
 
 ## Known Data Caveats
 
@@ -93,11 +105,9 @@ a fixture-checked shape illustration, not run against the live cluster.
   "size": 20,
   "sort": [ { "@timestamp": "desc" } ],
   "query": { "bool": {
-    "filter":   [ { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
-                  { "term": { "Oem.Hpe.Repaired": false } } ],
-    "must_not": [ { "bool": { "filter": [
-                      { "term": { "Severity.keyword": "OK" } },
-                      { "term": { "Oem.Hpe.Severity.keyword": "Informational" } } ] } } ] } },
+    "filter": [ { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+                { "named_condition": "abnormal_severity" },
+                { "term": { "Oem.Hpe.Repaired": false } } ] } },
   "_source": [ "@timestamp", "Created", "host", "Severity", "Message", "Oem.Hpe.Severity",
                "Oem.Hpe.Code", "Oem.Hpe.RecommendedAction" ]
 }
@@ -107,5 +117,6 @@ a fixture-checked shape illustration, not run against the live cluster.
 
 - Never treat the BMC hostname as an xname.
 - Never infer a user name or address as a field; they exist only in message text.
-- Never assume the abnormal severity values.
+- Never write a `must_not` on a severity field; use `abnormal_severity`.
+- Never treat a value outside the recognised sets as abnormal or normal.
 - Never filter on `Created`.

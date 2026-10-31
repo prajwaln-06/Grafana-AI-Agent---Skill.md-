@@ -7,39 +7,105 @@
       "domain_reference": "references/opensearch-logs/fabric-health.md",
       "enabled": true,
       "description": "Slingshot fabric health: heartbeat and fault documents",
-      "date_rotation": { "style": "daily", "suffix": "-YYYY.MM.dd", "verified": false },
+      "date_rotation": {
+        "style": "daily",
+        "suffix": "-YYYY.MM.dd",
+        "verified": false
+      },
       "time_field": "@timestamp",
-      "display_time_fields": ["fields.Timestamp", "timestamp"],
+      "display_time_fields": [
+        "fields.Timestamp",
+        "timestamp"
+      ],
       "max_window": "7d",
       "roles": {
-        "health_state": ["fields.PhysicalSubContext"],
-        "event_kind": ["fields.PhysicalContext"],
-        "text": ["fields.Value"],
-        "entity_switch": ["fields.Switch"],
-        "entity_port": ["fields.Port"],
-        "entity_location": ["fields.Location"],
-        "group_rack": ["fields.Rack"],
-        "group_chassis": ["fields.Chassis"]
+        "health_state": [
+          "fields.PhysicalSubContext"
+        ],
+        "event_kind": [
+          "fields.PhysicalContext"
+        ],
+        "text": [
+          "fields.Value"
+        ],
+        "entity_switch": [
+          "fields.Switch"
+        ],
+        "entity_port": [
+          "fields.Port"
+        ],
+        "entity_location": [
+          "fields.Location"
+        ],
+        "group_rack": [
+          "fields.Rack"
+        ],
+        "group_chassis": [
+          "fields.Chassis"
+        ]
       },
       "queryable_fields": [
-        "@timestamp", "fields.Switch", "fields.Port", "fields.Location", "fields.Rack",
-        "fields.Chassis", "fields.Slot", "fields.PhysicalContext", "fields.PhysicalSubContext",
+        "@timestamp",
+        "fields.Switch",
+        "fields.Port",
+        "fields.Location",
+        "fields.Rack",
+        "fields.Chassis",
+        "fields.Slot",
+        "fields.PhysicalContext",
+        "fields.PhysicalSubContext",
         "fields.Value"
       ],
       "groupable_fields": [
-        "fields.Switch", "fields.Rack", "fields.Chassis", "fields.Port", "fields.Location",
-        "fields.PhysicalContext", "fields.PhysicalSubContext"
+        "fields.Switch",
+        "fields.Rack",
+        "fields.Chassis",
+        "fields.Port",
+        "fields.Location",
+        "fields.PhysicalContext",
+        "fields.PhysicalSubContext"
       ],
-      "never_group": ["fields.Value"],
+      "never_group": [
+        "fields.Value"
+      ],
       "output_projection": [
-        "@timestamp", "fields.Switch", "fields.Port", "fields.Location",
-        "fields.PhysicalContext", "fields.PhysicalSubContext", "fields.Value"
+        "@timestamp",
+        "fields.Switch",
+        "fields.Port",
+        "fields.Location",
+        "fields.PhysicalContext",
+        "fields.PhysicalSubContext",
+        "fields.Value"
       ],
-      "sensitivity": { "level": "internal", "redact_text_fields": false, "open_question": "OQ-PII" },
+      "sensitivity": {
+        "level": "internal",
+        "redact_text_fields": false,
+        "open_question": "OQ-PII"
+      },
       "known_caveats": [
-        "duplicate_reemission", "event_time_unreliable", "heartbeat_is_document_kind",
-        "schema_varies_by_document_kind", "severity_vocabulary_per_index", "text_not_aggregatable"
-      ]
+        "duplicate_reemission",
+        "event_time_unreliable",
+        "heartbeat_is_document_kind",
+        "schema_varies_by_document_kind",
+        "severity_vocabulary_per_index",
+        "text_not_aggregatable"
+      ],
+      "severity_semantics": {
+        "mode": "negative_healthy",
+        "combine": "any",
+        "fields": {
+          "fields.PhysicalSubContext": {
+            "normal": [
+              "HEALTHY"
+            ],
+            "abnormal": [
+              "CRITICAL"
+            ],
+            "other_known": [],
+            "source": "mentor_query_and_observed"
+          }
+        }
+      }
     },
     {
       "pattern_id": "controller_log",
@@ -47,33 +113,97 @@
       "domain_reference": "references/opensearch-logs/controller-log.md",
       "enabled": true,
       "description": "Controller syslog-style messages per host and service",
-      "date_rotation": { "style": "daily", "suffix": "-YYYY.MM.dd", "verified": false },
+      "date_rotation": {
+        "style": "daily",
+        "suffix": "-YYYY.MM.dd",
+        "verified": false
+      },
       "time_field": "@timestamp",
-      "display_time_fields": ["Timestamp"],
+      "display_time_fields": [
+        "Timestamp"
+      ],
       "max_window": "7d",
       "roles": {
-        "severity": ["Severity"],
-        "text": ["Body"],
-        "entity_host": ["Resource.host.name"],
-        "service": ["Resource.service.name"],
-        "entity_port": ["Attributes.PortName"]
+        "severity": [
+          "Severity"
+        ],
+        "text": [
+          "Body"
+        ],
+        "entity_host": [
+          "Resource.host.name"
+        ],
+        "service": [
+          "Resource.service.name"
+        ],
+        "entity_port": [
+          "Attributes.PortName"
+        ]
       },
       "queryable_fields": [
-        "@timestamp", "Severity", "Body", "Resource.host.name", "Resource.service.name",
-        "Attributes.facility", "Attributes.PortName", "Attributes.PortNumber"
+        "@timestamp",
+        "Severity",
+        "Body",
+        "Resource.host.name",
+        "Resource.service.name",
+        "Attributes.facility",
+        "Attributes.PortName",
+        "Attributes.PortNumber"
       ],
       "groupable_fields": [
-        "Resource.host.name", "Resource.service.name", "Severity", "Attributes.facility"
+        "Resource.host.name",
+        "Resource.service.name",
+        "Severity",
+        "Attributes.facility"
       ],
-      "never_group": ["Body"],
+      "never_group": [
+        "Body"
+      ],
       "output_projection": [
-        "@timestamp", "Resource.host.name", "Resource.service.name", "Severity", "Body"
+        "@timestamp",
+        "Resource.host.name",
+        "Resource.service.name",
+        "Severity",
+        "Body"
       ],
-      "sensitivity": { "level": "internal", "redact_text_fields": false, "open_question": "OQ-PII" },
+      "sensitivity": {
+        "level": "internal",
+        "redact_text_fields": false,
+        "open_question": "OQ-PII"
+      },
       "known_caveats": [
-        "event_time_unreliable", "ingest_lag_variable", "schema_varies_by_document_kind",
-        "severity_vocabulary_per_index", "text_not_aggregatable"
-      ]
+        "event_time_unreliable",
+        "ingest_lag_variable",
+        "schema_varies_by_document_kind",
+        "severity_vocabulary_per_index",
+        "text_not_aggregatable"
+      ],
+      "severity_semantics": {
+        "mode": "positive_abnormal",
+        "combine": "any",
+        "fields": {
+          "Severity": {
+            "normal": [
+              "info",
+              "notice",
+              "debug"
+            ],
+            "other_known": [
+              "warning",
+              "warn"
+            ],
+            "abnormal": [
+              "error",
+              "err",
+              "critical",
+              "crit",
+              "alert",
+              "emerg"
+            ],
+            "source": "observed_info_error_plus_syslog_levels"
+          }
+        }
+      }
     },
     {
       "pattern_id": "ilo_events",
@@ -81,37 +211,113 @@
       "domain_reference": "references/opensearch-logs/ilo-events.md",
       "enabled": true,
       "description": "iLO / BMC Redfish event log entries",
-      "date_rotation": { "style": "daily", "suffix": "-YYYY.MM.dd", "verified": false },
+      "date_rotation": {
+        "style": "daily",
+        "suffix": "-YYYY.MM.dd",
+        "verified": false
+      },
       "time_field": "@timestamp",
-      "display_time_fields": ["Created"],
+      "display_time_fields": [
+        "Created"
+      ],
       "max_window": "7d",
       "roles": {
-        "severity": ["Severity", "Oem.Hpe.Severity"],
-        "text": ["Message"],
-        "entity_host": ["host"],
-        "event_code": ["Oem.Hpe.Code"],
-        "category": ["Oem.Hpe.Categories"],
-        "repaired": ["Oem.Hpe.Repaired"],
-        "recommended_action": ["Oem.Hpe.RecommendedAction"]
+        "severity": [
+          "Severity",
+          "Oem.Hpe.Severity"
+        ],
+        "text": [
+          "Message"
+        ],
+        "entity_host": [
+          "host"
+        ],
+        "event_code": [
+          "Oem.Hpe.Code"
+        ],
+        "category": [
+          "Oem.Hpe.Categories"
+        ],
+        "repaired": [
+          "Oem.Hpe.Repaired"
+        ],
+        "recommended_action": [
+          "Oem.Hpe.RecommendedAction"
+        ]
       },
       "queryable_fields": [
-        "@timestamp", "Severity", "Oem.Hpe.Severity", "Message", "host", "Oem.Hpe.Code",
-        "Oem.Hpe.Categories", "Oem.Hpe.Repaired", "Oem.Hpe.RecommendedAction"
+        "@timestamp",
+        "Severity",
+        "Oem.Hpe.Severity",
+        "Message",
+        "host",
+        "Oem.Hpe.Code",
+        "Oem.Hpe.Categories",
+        "Oem.Hpe.Repaired",
+        "Oem.Hpe.RecommendedAction"
       ],
       "groupable_fields": [
-        "host", "Severity", "Oem.Hpe.Severity", "Oem.Hpe.Code", "Oem.Hpe.Repaired",
+        "host",
+        "Severity",
+        "Oem.Hpe.Severity",
+        "Oem.Hpe.Code",
+        "Oem.Hpe.Repaired",
         "Oem.Hpe.Categories"
       ],
-      "never_group": ["Message", "Oem.Hpe.RecommendedAction"],
-      "output_projection": [
-        "@timestamp", "Created", "host", "Severity", "Oem.Hpe.Severity", "Message",
-        "Oem.Hpe.Code", "Oem.Hpe.RecommendedAction"
+      "never_group": [
+        "Message",
+        "Oem.Hpe.RecommendedAction"
       ],
-      "sensitivity": { "level": "internal", "redact_text_fields": false, "open_question": "OQ-PII" },
+      "output_projection": [
+        "@timestamp",
+        "Created",
+        "host",
+        "Severity",
+        "Oem.Hpe.Severity",
+        "Message",
+        "Oem.Hpe.Code",
+        "Oem.Hpe.RecommendedAction"
+      ],
+      "sensitivity": {
+        "level": "internal",
+        "redact_text_fields": false,
+        "open_question": "OQ-PII"
+      },
       "known_caveats": [
-        "event_time_unreliable", "ingest_lag_variable", "severity_vocabulary_per_index",
+        "event_time_unreliable",
+        "ingest_lag_variable",
+        "severity_vocabulary_per_index",
         "text_not_aggregatable"
-      ]
+      ],
+      "severity_semantics": {
+        "mode": "positive_abnormal",
+        "combine": "any",
+        "fields": {
+          "Severity": {
+            "normal": [
+              "OK"
+            ],
+            "other_known": [],
+            "abnormal": [
+              "Warning",
+              "Critical"
+            ],
+            "source": "observed_OK_plus_dmtf_redfish_enum"
+          },
+          "Oem.Hpe.Severity": {
+            "normal": [
+              "Informational"
+            ],
+            "other_known": [],
+            "abnormal": [
+              "Caution",
+              "Warning",
+              "Critical"
+            ],
+            "source": "observed_Informational_abnormal_values_unverified"
+          }
+        }
+      }
     }
   ]
 }

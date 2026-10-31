@@ -1,6 +1,13 @@
 """
 field_discovery.py
 
+DEPRECATED for request handling. The pipeline no longer calls this module: the
+OpenSearch Generator context now comes from the registry + runtime field
+catalog (app/opensearch_catalog). It assumed the syslog/consolelog/heartbeat
+index prefixes and an `Attributes.*`-only dynamic region, which do not match the
+registered index families. Kept (unchanged, still tested) so nothing that imports
+it breaks; remove once no caller or test references it.
+
 The OpenSearch-side counterpart to label_discovery.py. Per the blueprint's
 §B.3/§B.4 finding, OpenSearch's static/dynamic boundary lands differently
 than Prometheus's: the document ENVELOPE (`@timestamp`, `Severity`, `Body`,

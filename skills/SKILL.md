@@ -504,10 +504,13 @@ result, never omitted and never a value outside this closed pair. When
 Expression Grammar) instead of `{"from", "to", "step"}` — this is the only
 condition under which `time_range`'s shape differs from the example above.
 
-For an OpenSearch-bound result, `query` holds a DSL object and `index` replaces
-`time_range`; `query_type` does not apply to OpenSearch results (OpenSearch has
-no instant/range distinction in this skill's scope) and may be omitted for
-those.
+For an OpenSearch-bound result, `query` holds a DSL object and `pattern_id`
+(the index family named in the matched reference file) replaces `time_range`.
+The system resolves the actual index from `pattern_id`; never write an `index`
+value, and the time window lives inside `query` as a single bounded `range` on
+the family's time field. `query_type` does not apply to OpenSearch results
+(OpenSearch has no instant/range distinction in this skill's scope) and may be
+omitted for those.
 
 **`status: "panic_mode_best_effort"`** — identical to `ok`, plus:
 
