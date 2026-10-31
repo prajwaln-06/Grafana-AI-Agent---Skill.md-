@@ -215,3 +215,32 @@ def test_to_dict_includes_metadata_and_legacy_results_do_not():
     from app.normalizer import NormalizedResult
     assert "metadata" not in NormalizedResult(result_type="hits").to_dict()
     assert NormalizedResult(result_type="hits", metadata={"a": 1}).to_dict()["metadata"] == {"a": 1}
+
+
+# ---- observed_range is documented as returned-rows-only (checkpoint-2 review, item 4) ----------------------------
+
+
+def test_observed_range_basis_says_it_is_not_the_full_data_range(os_registry):
+    m = norm(os_registry, "controller_log", resp([ctl(1), ctl(2)], total=500)).metadata
+    basis = m["observed_range"]["basis"]
+    assert "returned rows only" in basis and "NOT the full range of data" in basis and "NOT the query window" in basis
+
+
+def test_observed_range_differs_from_query_window_and_matched_total(os_registry):
+    m = norm(os_registry, "controller_log", resp([ctl(1), ctl(2)], total=500)).metadata
+    assert m["rows"]["returned"] == 2 and m["rows"]["matched"] == 500 and m["rows"]["more_available"]
+    assert "query_window" not in m  # the executor adds it; the normaliser never presents the observed range as one
+
+
+def test_histogram_observed_range_basis_is_equally_explicit(os_registry):
+    q = {"aggs": {"t": {"date_histogram": {}}}}
+    raw = resp(total=1, aggs={"t": {"buckets": [{"key_as_string": "2026-10-28T11:00:00.000Z", "key": 1, "doc_count": 1}]}})
+    basis = norm(os_registry, "controller_log", raw, q).metadata["observed_range"]["basis"]
+    assert "NOT the full range of data" in basis
+
+
+def test_overview_documents_result_metadata_limits_and_redaction_caveats(skills_root):
+    text = (skills_root / "references" / "opensearch-logs" / "overview.md").read_text(encoding="utf-8")
+    for needle in ("## Result metadata and limits", "observed_range", "not the full range of data available in OpenSearch",
+                   "not comprehensive PII detection", "provisional", "`gte` total is a lower bound"):
+        assert needle in text, needle

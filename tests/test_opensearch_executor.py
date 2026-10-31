@@ -84,7 +84,7 @@ def test_success_reports_query_window_separately_from_observed_range(settings):
     ex, _ = run(settings, entry(), outcome(raw_hits()))
     md = ex["metadata"]
     assert md["query_window"]["from_expression"] == "now-24h" and md["query_window"]["seconds"] == 86400
-    assert md["observed_range"]["basis"].startswith("returned rows only")
+    assert "returned rows only" in md["observed_range"]["basis"] and "NOT the query window" in md["observed_range"]["basis"]
     assert ex["resolved_time_range"]["to_expression"] == "now"
 
 

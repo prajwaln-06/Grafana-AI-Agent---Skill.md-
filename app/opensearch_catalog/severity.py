@@ -127,7 +127,7 @@ def classify_value(f: SeverityField, value: Any, mode: str) -> str:
 
 def assess_hit(sem: SeveritySemantics | None, source: dict) -> dict | None:
     """None when the pattern defines no severity semantics. Otherwise:
-    {"state": abnormal|normal|unknown, "abnormal": bool, "conflict": bool,
+    {"state": abnormal|normal|unknown ("normal" only when EVERY field is positively normal), "abnormal": bool, "conflict": bool,
      "basis": [abnormal field paths], "fields": {path: {"value", "class"}},
      "missing_fields": [...], "unrecognised_fields": [...]}"""
     if sem is None:
@@ -135,16 +135,22 @@ def assess_hit(sem: SeveritySemantics | None, source: dict) -> dict | None:
     per_field: dict[str, dict] = {}
     for f in sem.fields:
         value = _lookup(source, f.path)
-        per_field[f.path] = {"value": value, "class": classify_value(f, value, sem.mode)}
+        per_field[f.path] = {"value": value, "class": classify_value(f, value, sem.mode),
+                             "vocabulary": f.verification}
     classes = [v["class"] for v in per_field.values()]
     abnormal_fields = [p for p, v in per_field.items() if v["class"] == CLASS_ABNORMAL]
     has_normal = CLASS_NORMAL in classes
+    # Four distinct states. "normal" needs POSITIVE normal evidence from EVERY
+    # severity field: a missing, unrecognised or merely "known-other" field is
+    # absence of evidence, never evidence of health, so it yields "unknown".
+    # Any abnormal field makes the event abnormal (OR) regardless of the rest.
     if abnormal_fields:
         state = STATE_ABNORMAL
-    elif has_normal and all(c in (CLASS_NORMAL, CLASS_MISSING, CLASS_OTHER) for c in classes):
+    elif all(c == CLASS_NORMAL for c in classes):
         state = STATE_NORMAL
     else:
         state = STATE_UNKNOWN
+    by_path = {f.path: f for f in sem.fields}
     return {
         "state": state,
         "abnormal": state == STATE_ABNORMAL,
@@ -153,4 +159,7 @@ def assess_hit(sem: SeveritySemantics | None, source: dict) -> dict | None:
         "fields": per_field,
         "missing_fields": [p for p, v in per_field.items() if v["class"] == CLASS_MISSING],
         "unrecognised_fields": [p for p, v in per_field.items() if v["class"] == CLASS_UNRECOGNISED],
+        # abnormal fields whose vocabulary is an unverified assumption: the
+        # verdict rests on provisional ground and must be presented that way
+        "provisional_basis": [p for p in abnormal_fields if by_path[p].verification == "provisional"],
     }

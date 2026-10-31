@@ -11,9 +11,11 @@ metadata a reader needs to interpret it correctly:
   approximation       cardinality (estimate), terms doc-count error bound
   partial results     timed_out, shard failures (type + redacted/truncated
                       detail, never raw documents)
-  query window        reported by the executor (requested window), kept
-                      separate from the OBSERVED range of the returned
-                      results (earliest/latest actually returned)
+  query window        reported by the executor (the window that was asked for), kept
+                      separate from `observed_range`: the earliest/latest timestamp
+                      among the RETURNED rows or non-empty buckets only. It is not
+                      the full range of data in OpenSearch (that would need another
+                      query) and, with a row cap, may be narrower than the window.
   severity            per-row assessment incl. missing/conflicting fields
   redaction           what was masked
 
@@ -175,6 +177,12 @@ def normalize_search_response(raw: dict, *, entry: PatternEntry, query: dict, po
         result = _aggregation(raw, aggs, query, policy, stats, max_series, total, relation, meta)
 
     meta["redaction"] = stats.to_dict(policy)
+    sem = entry.severity_semantics
+    if sem is not None:
+        meta["severity_vocabulary"] = {f.path: f.verification for f in sem.fields}
+        provisional = [f.path for f in sem.fields if f.verification == "provisional"]
+        if provisional:
+            meta["severity_vocabulary_provisional"] = provisional
     result.metadata = meta
     return result
 
@@ -205,7 +213,7 @@ def _hits(raw, entry: PatternEntry, policy, stats, max_hits, total, relation, me
     meta["rows"] = {"returned": len(rows), "matched": total, "matched_exact": relation == "eq",
                     "more_available": bool(total is not None and total > len(rows))}
     meta["observed_range"] = {"earliest": stamps[0], "latest": stamps[-1],
-                              "basis": "returned rows only; not the full extent of the data"} if stamps else None
+                              "basis": "earliest and latest @timestamp among the returned rows only; NOT the full range of data available in OpenSearch and NOT the query window"} if stamps else None
     return NormalizedResult(result_type="hits", hits=rows, total_hits=total, truncated=truncated,
                             original_count=len(raw_hits) if truncated else None)
 
@@ -266,7 +274,7 @@ def _histogram(items, max_series, policy, stats, meta) -> NormalizedResult:
 
     nonzero = [ts(b) for _, b in items if (b.get("doc_count") or 0) > 0 and ts(b)]
     meta["observed_range"] = ({"earliest": min(nonzero), "latest": max(nonzero),
-                               "basis": "first and last non-empty time bucket returned; not the full extent of the data"}
+                               "basis": "earliest and latest non-empty time bucket among the returned buckets only; NOT the full range of data available in OpenSearch and NOT the query window"}
                               if nonzero else None)
 
     series: list[Series] = []

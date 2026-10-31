@@ -213,7 +213,10 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
                 L.append("  abnormal_severity = the field exists and is not a documented normal value:")
             for f in sem.fields:
                 L.append(f"    - {f.path}: normal={sorted(f.normal)} abnormal={sorted(f.abnormal)} "
-                         f"other_known={sorted(f.other_known)} (source: {f.source}; compare exact case)")
+                         f"other_known={sorted(f.other_known)} (vocabulary: {f.verification}; compare exact case)")
+                if f.verification == "provisional":
+                    L.append(f"      NOTE: the vocabulary of {f.path} is PROVISIONAL (unverified); if you rely on it, "
+                             f"say so in the explanation.")
         if e.known_caveats:
             L.append("  caveats an answer must respect: " + ", ".join(e.known_caveats))
         for w in v.warnings:

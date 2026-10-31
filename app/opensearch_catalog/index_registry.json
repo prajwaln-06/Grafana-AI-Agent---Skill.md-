@@ -79,8 +79,9 @@
       ],
       "sensitivity": {
         "level": "internal",
-        "redact_text_fields": false,
-        "open_question": "OQ-PII"
+        "redact_text_fields": true,
+        "open_question": "OQ-PII",
+        "redaction_note": "Heuristic masking of cued user names, e-mail and IP addresses is applied to every user-facing string (see skills/references/opensearch-logs/overview.md, Result metadata and limits). Not comprehensive PII detection."
       },
       "known_caveats": [
         "duplicate_reemission",
@@ -102,7 +103,8 @@
               "CRITICAL"
             ],
             "other_known": [],
-            "source": "mentor_query_and_observed"
+            "source": "Observed HEALTHY/CRITICAL in the sampled data; 'unhealthy = not HEALTHY' is the source team's own query definition.",
+            "verification": "observed"
           }
         }
       }
@@ -168,8 +170,9 @@
       ],
       "sensitivity": {
         "level": "internal",
-        "redact_text_fields": false,
-        "open_question": "OQ-PII"
+        "redact_text_fields": true,
+        "open_question": "OQ-PII",
+        "redaction_note": "Heuristic masking of cued user names, e-mail and IP addresses is applied to every user-facing string (see skills/references/opensearch-logs/overview.md, Result metadata and limits). Not comprehensive PII detection."
       },
       "known_caveats": [
         "event_time_unreliable",
@@ -200,7 +203,8 @@
               "alert",
               "emerg"
             ],
-            "source": "observed_info_error_plus_syslog_levels"
+            "source": "info/error/critical (and notice/warning) observed in sampled data; the remaining names (debug, warn, err, crit, alert, emerg) come from the syslog severity names (RFC 5424) and are not observed here.",
+            "verification": "documented"
           }
         }
       }
@@ -280,8 +284,9 @@
       ],
       "sensitivity": {
         "level": "internal",
-        "redact_text_fields": false,
-        "open_question": "OQ-PII"
+        "redact_text_fields": true,
+        "open_question": "OQ-PII",
+        "redaction_note": "Heuristic masking of cued user names, e-mail and IP addresses is applied to every user-facing string (see skills/references/opensearch-logs/overview.md, Result metadata and limits). Not comprehensive PII detection."
       },
       "known_caveats": [
         "event_time_unreliable",
@@ -302,7 +307,8 @@
               "Warning",
               "Critical"
             ],
-            "source": "observed_OK_plus_dmtf_redfish_enum"
+            "source": "Only OK observed in the sampled iLO export (120,645 documents). Warning/Critical come from the DMTF Redfish LogEntry EventSeverity enumeration (OK, Warning, Critical); not observed in this deployment's data.",
+            "verification": "documented"
           },
           "Oem.Hpe.Severity": {
             "normal": [
@@ -314,7 +320,8 @@
               "Warning",
               "Critical"
             ],
-            "source": "observed_Informational_abnormal_values_unverified"
+            "source": "Only Informational observed (120,645 documents). HPE's iLO log-services documentation names Caution and Critical (as severities of events that can be marked repaired); Warning is NOT documented there and is an assumption. The full vocabulary is unverified.",
+            "verification": "provisional"
           }
         }
       }

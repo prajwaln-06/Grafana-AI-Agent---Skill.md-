@@ -63,13 +63,15 @@ expansion yourself and never use `must_not` on a severity field: that would also
 match documents where a field is missing or holds an unrecognised value, which
 are not known to be abnormal.
 
-| Field | Normal (observed) | Recognised abnormal | Status of the abnormal set |
+| Field | Normal | Recognised abnormal | Verification |
 |---|---|---|---|
-| `Severity` | `OK` | `Warning`, `Critical` | From the DMTF Redfish severity enumeration; **not observed** in the sampled data |
-| `Oem.Hpe.Severity` | `Informational` | `Caution`, `Warning`, `Critical` | **Unverified assumption**; not observed in the sampled data |
+| `Severity` | `OK` (observed) | `Warning`, `Critical` | **Documented**: the DMTF Redfish `LogEntry` severity enumeration (`OK`, `Warning`, `Critical`). Only `OK` was observed in the sampled data |
+| `Oem.Hpe.Severity` | `Informational` (observed) | `Caution`, `Warning`, `Critical` | **Provisional**: only `Informational` was observed. HPE's iLO log-services documentation names `Caution` and `Critical` (as severities of events that can be marked repaired); `Warning` is not documented there and is an assumption. The full vocabulary is unverified |
 
 Values outside these sets are neither normal nor abnormal; they are reported on
-the row as unrecognised rather than guessed at. Result rows carry a severity
+the row as unrecognised rather than guessed at, and an event is `normal` only
+when **both** fields hold a normal value (a missing or unrecognised field makes
+it `unknown`). Results that rest on the provisional vocabulary say so. Result rows carry a severity
 assessment that says which field decided the state, and flags a missing field
 or a conflict between the two fields. Match severity values in their stored
 case.

@@ -79,6 +79,11 @@ class SeverityField:
     abnormal: frozenset[str]
     other_known: frozenset[str]
     source: str
+    # How far the vocabulary is trusted: "observed" (seen in real data),
+    # "documented" (a published enumeration, not seen in this deployment's data)
+    # or "provisional" (an assumption awaiting verification). Surfaced in row
+    # assessments, result metadata and the Generator prompt.
+    verification: str = "provisional"
 
     @property
     def known(self) -> frozenset[str]:
@@ -218,6 +223,9 @@ _SEVERITY_MODES = frozenset({"positive_abnormal", "negative_healthy"})
 _SEVERITY_ROLE_NAMES = ("severity", "health_state")
 
 
+SEVERITY_VERIFICATION_LEVELS = frozenset({"observed", "documented", "provisional"})
+
+
 def _build_severity(raw, where: str, roles: dict[str, tuple[str, ...]]) -> SeveritySemantics | None:
     if raw is None:
         return None
@@ -255,8 +263,12 @@ def _build_severity(raw, where: str, roles: dict[str, tuple[str, ...]]) -> Sever
         source = body.get("source")
         if not isinstance(source, str) or not source:
             _fail(where, f"severity_semantics.fields[{path!r}].source is required (where the vocabulary came from)")
+        verification = body.get("verification")
+        if verification not in SEVERITY_VERIFICATION_LEVELS:
+            _fail(where, f"severity_semantics.fields[{path!r}].verification must be one of "
+                         f"{sorted(SEVERITY_VERIFICATION_LEVELS)}")
         out.append(SeverityField(path=path, normal=sets["normal"], abnormal=sets["abnormal"],
-                                 other_known=sets["other_known"], source=source))
+                                 other_known=sets["other_known"], source=source, verification=verification))
     return SeveritySemantics(mode=mode, combine=combine, fields=tuple(out))
 
 

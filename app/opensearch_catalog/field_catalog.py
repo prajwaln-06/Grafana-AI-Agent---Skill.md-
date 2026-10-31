@@ -285,12 +285,19 @@ def build_field_catalog(pattern_id: str, mapping: dict, *,
         if len({type_family(r.type) for r in raws}) > 1:
             continue
         confirmed_sub[path] = (parent, raws[0])
+    # A parent's exact-match sub-field is a CONFIRMED keyword-typed sub-field:
+    # `<parent>.keyword` if it is one, otherwise the only one there is. Several
+    # keyword sub-fields with none named `keyword` is ambiguous, so none is
+    # chosen (the parent then supports no exact match) -- never guess.
+    keyword_candidates: dict[str, list[str]] = {}
     for sub_path, (parent, raw) in sorted(confirmed_sub.items()):
-        if type_family(raw.type) != "keyword":
-            continue
-        current = keyword_for_parent.get(parent)
-        if current is None or sub_path == f"{parent}.keyword":
-            keyword_for_parent[parent] = sub_path
+        if type_family(raw.type) == "keyword":
+            keyword_candidates.setdefault(parent, []).append(sub_path)
+    for parent, cands in keyword_candidates.items():
+        if f"{parent}.keyword" in cands:
+            keyword_for_parent[parent] = f"{parent}.keyword"
+        elif len(cands) == 1:
+            keyword_for_parent[parent] = cands[0]
 
     fields: dict[str, FieldInfo] = {}
     any_conflict = False

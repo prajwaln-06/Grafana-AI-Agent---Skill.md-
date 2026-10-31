@@ -11,6 +11,7 @@ and `ilo-events.md` for that.
 - Entity Model
 - Shared Data Caveats
 - Query Intents
+- Result metadata and limits
 - Guardrails
 
 ## Quick Facts
@@ -118,6 +119,38 @@ query shapes in the relevant domain file and the DSL mechanics in
 Not supported in this domain yet: absence or "no recent heartbeat" detection,
 multi-step "before and after an event" lookups, and cross-family queries. Treat
 those as `unmapped` rather than approximating them.
+
+## Result metadata and limits
+
+Every executed OpenSearch result carries a `metadata` object. Read it before
+stating a count or a time range.
+
+| Field | Meaning |
+|---|---|
+| `count` | `value`, `relation` (`eq` exact, `gte` at least) and `exact`. A `gte` total is a lower bound, never an exact count |
+| `rows` | rows returned vs documents matched, and whether more are available (row results are capped) |
+| `aggregation` | type, `approximate` and why: `cardinality` is an estimate; terms counts may be off by `doc_count_error_upper_bound`; `sum_other_doc_count` documents fall outside the returned buckets |
+| `partial`, `partial_reasons`, `shards`, `shard_failures` | the search timed out or some shards failed, so results may be incomplete. If every shard fails the result is an error, not an empty answer |
+| `query_window` | the window that was asked for (always within the 7-day cap) |
+| `observed_range` | the earliest and latest `@timestamp` **among the returned rows (or non-empty buckets) only**. It is not the full range of data available in OpenSearch and not the query window; absent data at the edges of the window cannot be told from this |
+| `severity_vocabulary`, `severity_vocabulary_provisional` | how far each severity vocabulary is trusted (`observed`, `documented`, `provisional`); a verdict that rests on a provisional vocabulary must be presented as such |
+| `redaction` | counts of masked user names and IP addresses and the policy used |
+
+Severity assessment per row has four distinct states: `abnormal`, `normal`,
+`unknown` (including a missing, empty or unrecognised value) and, per field,
+`unrecognised`. A row is `normal` only when every severity field positively holds
+a normal value; absence of a field is never evidence of health. When two
+severity fields disagree, `conflict` is set.
+
+Redaction is a heuristic second layer, **not comprehensive PII detection**. It
+masks a user name that follows a cue (`user X`, `login by X`, `logged in as X`,
+`password for X`), e-mail addresses, and IPv4/IPv6 addresses (internal addresses
+can be kept by configuration). It does not detect a name with no cue, a
+`DOMAIN\name` form, hostnames, MAC addresses, serial numbers or other
+identifiers, and it can mask an ordinary word that happens to follow a cue. The
+primary control is that rows contain only the registry's allow-listed
+projection. The `endpoint` shown on an execution block is the configured service
+URL, as it is for Prometheus.
 
 ## Guardrails
 

@@ -6,11 +6,17 @@ returned to a user. Applies to string values only: timestamps, counts,
 severity values, field names and aggregation metadata are structured data and
 are preserved.
 
-This is a best-effort, pattern-based control, not a guarantee: a user name that
-appears in free text without one of the recognised cues (e.g. "login: <name>",
-"for user <name>", "user <name>") is NOT detected. The allow-listed projection
+This is a best-effort, pattern-based control, NOT comprehensive PII detection.
+Detected: a name after a cue ("login: <name>", "login by [username] <name>",
+"logged in as <name>", "for user <name>", "user[name] <name>", "password for
+[invalid user] <name>"), e-mail addresses, IPv4 and IPv6 addresses. NOT
+detected: a name with no cue; "DOMAIN\\name" forms; names in a field of their
+own; hostnames, MAC addresses, serial numbers or other identifiers; an address
+written in an unusual form (e.g. integer or hex IPv4). A cue followed by an
+ordinary word ("user interface") is deliberately left alone, which also means a
+real name equal to one of those words is not masked. The allow-listed projection
 (registry `output_projection`) remains the primary control; redaction is the
-second layer. Limits are documented in the registry's open_question OQ-PII.
+second layer. Limits are documented in skills/references/opensearch-logs/overview.md (Result metadata and limits).
 
 IP modes (configurable because internal addresses help infrastructure
 troubleshooting):
@@ -42,16 +48,26 @@ _IPV6_RE = re.compile(
     rf"(?<![\w:.])(?:(?:{_H}:){{7}}{_H}|(?:{_H}:){{1,7}}:(?:{_H}(?::{_H}){{0,6}})?|::(?:{_H}(?::{_H}){{0,6}})?)(?![\w:.])"
 )
 
-_NOT_A_USER = (r"(?!(?:from|by|as|for|to|the|a|an|on|in|at|failed|failure|success|successful|"
-               r"attempt|attempts|event|events|session|sessions|timeout|error|errors|via|using|"
-               r"with|name|user|users|id)\b)")
+# Words that follow a cue like "user" in ordinary prose ("user interface",
+# "the user was notified") and are not names.
+_NOT_A_USER = (r"(?!(?:from|by|as|for|to|the|a|an|on|in|at|of|and|or|is|was|were|are|be|been|being|has|have|had|"
+               r"did|does|do|will|would|can|could|may|might|should|must|not|no|failed|failure|success|successful|"
+               r"attempt|attempts|event|events|session|sessions|timeout|error|errors|via|using|with|name|names|"
+               r"user|users|id|interface|interfaces|account|accounts|access|authentication|auth|permission|"
+               r"permissions|group|groups|role|roles|password|passwords|process|mode|agent|input|data|logged|"
+               r"login|logins|logout|logouts|that|this|which|when|while|after|before|unknown|invalid|none|null|field|fields|value|values|missing|required|list|table|column|attribute|attributes|record|records|database|directory|database|profile|profiles|type|types|level|state|status|key|keys|file|files|login|home|shell|limit|limits|quota|count|counts|total|table|prompt|message|messages|login)\b)")
 _USER_TOKEN = r"[A-Za-z0-9_][\w.\-@\\$]*"
 _USER_PATTERNS = (
-    # "login: root", "logged in as bob", "logout by alice"
-    re.compile(rf"(?i)(\b(?:log(?:in|out)|logged\s+(?:in|out))\b\s*(?:by|as|for)?\s*[:\-]?\s*){_NOT_A_USER}(?P<u>{_USER_TOKEN})"),
+    # "login: root", "logged in as bob", "logout by alice", "login by username Administrator"
+    re.compile(rf"(?i)(\b(?:log(?:in|out)|logged\s+(?:in|out))\b\s*(?:by|as|for)?\s*[:\-]?\s*"
+               rf"(?:user(?:name)?\b\s*[:=]?\s*)?['\"]?){_NOT_A_USER}(?P<u>{_USER_TOKEN})"),
     # "for user root", "user 'bob'", "username=alice"
     re.compile(rf"(?i)(\b(?:for\s+user|user(?:name)?)\b\s*[:=]?\s*['\"]?){_NOT_A_USER}(?P<u>{_USER_TOKEN})"),
+    # "Accepted password for root", "Failed password for invalid user admin"
+    re.compile(rf"(?i)(\bpassword\s+for\s+(?:invalid\s+user\s+)?){_NOT_A_USER}(?P<u>{_USER_TOKEN})"),
 )
+# An e-mail address identifies a person; masked as a user name.
+_EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 
 
 @dataclass(frozen=True)
@@ -109,6 +125,11 @@ def redact_text(text: str, policy: RedactionPolicy, stats: RedactionStats | None
             return m.group(1) + USER_PLACEHOLDER
         for pattern in _USER_PATTERNS:
             out = pattern.sub(_user, out)
+
+        def _email(_m: re.Match) -> str:
+            stats.usernames += 1
+            return USER_PLACEHOLDER
+        out = _EMAIL_RE.sub(_email, out)
     if policy.ip_mode != IP_MODE_OFF:
         out = _IPV4_RE.sub(lambda m: _mask_ip(m, policy, stats), out)
         out = _IPV6_RE.sub(lambda m: _mask_ip(m, policy, stats), out)
