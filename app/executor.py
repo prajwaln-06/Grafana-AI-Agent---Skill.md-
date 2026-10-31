@@ -181,42 +181,97 @@ def _execute_prometheus_entry(entry: dict, settings: Settings) -> dict:
 
 
 def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
+    """Registry-governed OpenSearch execution. The index actually searched is
+    ALWAYS resolved from the registry (by `pattern_id`, or by an exact match of
+    a registered pattern string) -- an index named only by the LLM is never
+    queried. The body is re-checked here (defence in depth: this module has no
+    field catalog, so only the field-agnostic rules and the window cap)."""
+    from app.opensearch_catalog import guard, runtime
+    from app.opensearch_catalog.context import Limits
+    from app.opensearch_catalog.redaction import RedactionPolicy, safe_diagnostic
+    from app.opensearch_catalog.registry import RegistryError
+    from app.opensearch_catalog.results import all_shards_failed, normalize_search_response, response_metadata
+
     base_url = settings.opensearch_url
     dsl_body = entry.get("query")
     if not dsl_body or not isinstance(dsl_body, dict):
         return _error_block("endpoint_error", "Contract entry has no usable DSL object in `query`.", base_url)
 
-    index = entry.get("index")
-    if not index:
-        return _error_block("endpoint_error", "Contract entry has no `index` (required for OpenSearch results).", base_url)
-    index_pattern = ",".join(index) if isinstance(index, list) else str(index)
+    pattern_id, index = entry.get("pattern_id"), entry.get("index")
+    if not pattern_id and not index:
+        return _error_block("endpoint_error",
+                            "Contract entry has no `pattern_id` or `index` (required for OpenSearch results).", base_url)
 
-    auth = settings.opensearch_auth  # None by default -- see config.py
+    policy = RedactionPolicy(mask_usernames=settings.opensearch_redact_usernames,
+                             ip_mode=settings.opensearch_redact_ip_mode)
+    try:
+        registry = runtime.get_registry(settings)
+    except RegistryError as exc:
+        return _error_block("endpoint_error", f"OpenSearch registry unavailable: {safe_diagnostic(str(exc), policy)}",
+                            base_url)
+
+    if pattern_id:
+        pattern = registry.get(str(pattern_id))
+    else:  # legacy shape: only an index naming exactly one registered pattern is accepted
+        pattern = next((p for p in registry.enabled_patterns if isinstance(index, str) and p.index_pattern == index),
+                       None)
+    if pattern is None or not pattern.enabled:
+        return _error_block("not_executed",
+                            "The index/pattern is not an approved, enabled OpenSearch source; nothing was queried.",
+                            base_url)
+    if isinstance(index, str) and pattern_id and index != pattern.index_pattern:
+        return _error_block("not_executed", "`index` does not match the approved pattern; nothing was queried.",
+                            base_url)
+
+    limits = Limits.from_settings(settings)
+    problem = guard.structural_check(dsl_body, limits)
+    window = guard.extract_window(dsl_body, pattern.time_field)
+    if problem is None:
+        if window is None:
+            problem = f"the query has no single bounded time range on {pattern.time_field}"
+        elif window["seconds"] > pattern.max_window_seconds:
+            problem = f"the time window exceeds the maximum of {pattern.max_window}"
+    if problem:
+        return _error_block("not_executed", f"Query rejected before execution: {problem}.", base_url,
+                            resolved_time_range=window)
+
     outcome = opensearch_client.search(
-        base_url, index_pattern, dsl_body,
-        timeout=settings.opensearch_timeout_seconds, auth=auth,
+        base_url, pattern.index_pattern, dsl_body,
+        timeout=max(settings.opensearch_timeout_seconds, limits.search_timeout_seconds),
+        auth=settings.opensearch_auth,
     )
 
-    resolved_time_range = _best_effort_extract_time_range(dsl_body)
-
     if outcome.status not in ("success", "empty_result"):
-        return _error_block(outcome.status, outcome.error, base_url, resolved_time_range=resolved_time_range)
+        return _error_block(outcome.status, safe_diagnostic(outcome.error, policy), base_url,
+                            resolved_time_range=window)
+
+    raw = outcome.raw_body or {}
+    if all_shards_failed(raw):
+        meta = response_metadata(raw, policy)
+        block = _error_block("endpoint_error", "Every shard failed; no results are available.", base_url,
+                             resolved_time_range=window)
+        block["metadata"] = meta
+        return block
 
     if outcome.status == "empty_result":
+        meta = response_metadata(raw, policy)
+        meta["query_window"] = window
+        meta["count"] = {"value": 0, "relation": "eq", "exact": True}
         return {
             "execution_status": "empty_result",
             "result_type": None,
             "endpoint": base_url,
             "fetched_at": _now_iso(),
-            "resolved_time_range": resolved_time_range,
+            "resolved_time_range": window,
+            "metadata": meta,
         }
 
-    normalized = normalizer.normalize_opensearch_result(
-        outcome.raw_body,
-        max_series=settings.max_series_per_result,
-        max_hits=settings.max_hits_per_result,
+    normalized = normalize_search_response(
+        raw, entry=pattern, query=dsl_body, policy=policy,
+        max_series=settings.max_series_per_result, max_hits=settings.max_hits_per_result,
     )
-    return _success_block(normalized, base_url, resolved_time_range=resolved_time_range)
+    normalized.metadata["query_window"] = window
+    return _success_block(normalized, base_url, resolved_time_range=window)
 
 
 def _best_effort_extract_time_range(dsl_body: dict) -> dict | None:

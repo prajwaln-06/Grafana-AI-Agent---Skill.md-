@@ -92,11 +92,14 @@ class Bucket:
     key: str
     doc_count: int
     sub_buckets: list["Bucket"] = field(default_factory=list)
+    metrics: dict[str, float | None] | None = None  # metric sub-aggregations (e.g. distinct count)
 
     def to_dict(self) -> dict:
         d = {"key": self.key, "doc_count": self.doc_count}
         if self.sub_buckets:
             d["sub_buckets"] = [b.to_dict() for b in self.sub_buckets]
+        if self.metrics:
+            d["metrics"] = self.metrics
         return d
 
 
@@ -107,15 +110,25 @@ class Hit:
     body: str | None
     resource: dict[str, str]
     attributes: dict[str, Any]
+    # Registry-driven rows (app/opensearch_catalog/results.py) carry the
+    # allow-listed projection and a severity assessment; both stay None for
+    # legacy rows so their serialised shape is unchanged.
+    fields: dict[str, Any] | None = None
+    severity_assessment: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "timestamp": self.timestamp,
             "severity": self.severity,
             "body": self.body,
             "resource": self.resource,
             "attributes": self.attributes,
         }
+        if self.fields is not None:
+            d["fields"] = self.fields
+        if self.severity_assessment is not None:
+            d["severity_assessment"] = self.severity_assessment
+        return d
 
 
 @dataclass
@@ -128,6 +141,10 @@ class NormalizedResult:
     total_hits: int | None = None    # only meaningful for result_type=="hits"
     truncated: bool = False
     original_count: int | None = None
+    # Backend-specific result metadata (count exactness, partial/shard status,
+    # approximation, redaction ...). None for every Prometheus result and every
+    # legacy OpenSearch result, so their serialised shape is unchanged.
+    metadata: dict | None = None
 
     @property
     def count(self) -> int:
@@ -155,6 +172,8 @@ class NormalizedResult:
         d["truncated"] = self.truncated
         if self.truncated:
             d["original_count"] = self.original_count
+        if self.metadata is not None:
+            d["metadata"] = self.metadata
         return d
 
 

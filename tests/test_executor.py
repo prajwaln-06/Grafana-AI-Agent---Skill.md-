@@ -76,14 +76,29 @@ def test_opensearch_entry_missing_index_is_endpoint_error(settings):
     assert "index" in result["execution"]["error"]
 
 
-def test_opensearch_entry_with_list_index_joins_as_comma_pattern(settings):
+def test_opensearch_entry_with_unregistered_list_index_is_not_executed(settings):
+    """Previously an LLM-supplied list of indices was joined and searched as-is.
+    The index is now always resolved from the registry, so an arbitrary index
+    (or list) is refused and nothing is queried."""
     entry = {"status": "ok", "data_source": "opensearch",
               "query": {"query": {"match_all": {}}}, "index": ["syslog-*", "consolelog-*"]}
+    with patch.object(opensearch_client, "search") as mock_search:
+        result = executor.execute_contract(entry, settings)
+    assert result["execution"]["execution_status"] == "not_executed"
+    assert not mock_search.called
+
+
+def test_opensearch_entry_with_registered_pattern_searches_registry_index(settings):
+    entry = {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log",
+              "query": {"size": 5, "query": {"bool": {"filter": [
+                  {"range": {"@timestamp": {"gte": "now-24h", "lte": "now"}}}]}}}}
     fake_outcome = opensearch_client.ExecutionOutcome(
-        status="success", raw_body={"hits": {"total": {"value": 1}, "hits": [{"_source": {"Body": "x"}}]}})
+        status="success", raw_body={"hits": {"total": {"value": 1, "relation": "eq"},
+                                              "hits": [{"_source": {"Body": "x", "Severity": "error"}}]}})
     with patch.object(opensearch_client, "search", return_value=fake_outcome) as mock_search:
-        executor.execute_contract(entry, settings)
-    assert mock_search.call_args[0][1] == "syslog-*,consolelog-*"
+        result = executor.execute_contract(entry, settings)
+    assert mock_search.call_args[0][1] == "controllerlog-*"
+    assert result["execution"]["execution_status"] == "success"
 
 
 def test_unrecognized_data_source_is_not_executed(settings):
