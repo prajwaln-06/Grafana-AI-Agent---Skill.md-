@@ -161,7 +161,7 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "- Allowed clauses: bool(must/filter/should/must_not/minimum_should_match), term, terms, match, match_phrase "
         "(text role only, max %d chars), prefix (exact fields), range, exists. Forbidden: script, query_string, "
         "wildcard, regexp, fuzzy, nested/join queries, runtime/script fields, paging (`from`, search_after)." % lim.max_text_chars,
-        "- Row queries: omit `aggs`; `size` <= %d (default %d); rows come back newest first." % (lim.max_hits_size, lim.default_hits_size),
+        "- Row queries: omit `aggs`; `size` <= %d (default %d); rows come back newest first. To only COUNT matching documents, use `size` 0 with no `aggs` (and `track_total_hits`: true); the count is in the result metadata." % (lim.max_hits_size, lim.default_hits_size),
         "- Aggregation queries: `size` 0 and exactly ONE top-level aggregation (terms, date_histogram, filters, "
         "cardinality, min, max, avg, sum, value_count), at most %d levels deep. `terms` size <= %d (default %d); group "
         "only by the group-by paths listed. `date_histogram` must use the time field with `fixed_interval`, at most %d "

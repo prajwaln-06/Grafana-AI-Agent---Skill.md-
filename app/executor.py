@@ -271,7 +271,12 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
         max_series=settings.max_series_per_result, max_hits=settings.max_hits_per_result,
     )
     normalized.metadata["query_window"] = window
-    return _success_block(normalized, base_url, resolved_time_range=window)
+    block = _success_block(normalized, base_url, resolved_time_range=window)
+    # A count-only query (size 0) legitimately returns no rows; the answer is the
+    # total in metadata.count. Only "matched nothing" is an empty result.
+    if block["execution_status"] == "empty_result" and ((normalized.metadata.get("count") or {}).get("value") or 0) > 0:
+        block["execution_status"] = "success"
+    return block
 
 
 def _best_effort_extract_time_range(dsl_body: dict) -> dict | None:

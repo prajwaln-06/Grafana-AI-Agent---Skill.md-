@@ -739,12 +739,16 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
                 out["size"] = limits.default_hits_size
                 ck.applied.append(f"size defaulted to {limits.default_hits_size}")
             else:
-                if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= limits.max_hits_size:
-                    _fail(CODE_LIMIT, f"size must be an integer from 1 to {limits.max_hits_size} for a row query")
+                if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= limits.max_hits_size:
+                    _fail(CODE_LIMIT, f"size must be an integer from 0 to {limits.max_hits_size} for a query "
+                                      f"without aggregations (0 = count only)")
                 out["size"] = size
+            count_only = out["size"] == 0
             if "sort" in body:
+                if count_only:
+                    _fail(CODE_BAD_CLAUSE, "`sort` is not used by a count-only query (size 0)")
                 out["sort"] = _check_sort(body["sort"], ck)
-            else:
+            elif not count_only:
                 out["sort"] = [{pc.entry.time_field: {"order": "desc"}}]
                 ck.applied.append(f"sorted newest first by {pc.entry.time_field}")
 
@@ -758,7 +762,7 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
                 _fail(CODE_PROJECTION, f"`_source` fields not returnable for {pid!r}: {bad}. "
                                        f"Returnable: {sorted(allowed_src)}")
             out["_source"] = src
-        elif not has_aggs:
+        elif not has_aggs and out["size"] != 0:
             out["_source"] = list(pc.entry.output_projection)
             ck.applied.append("rows limited to the family's output projection")
 

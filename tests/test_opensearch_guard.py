@@ -347,3 +347,26 @@ def test_prompt_advertises_only_what_the_guard_accepts(os_ctx):
     body_line = next(l for l in block.splitlines() if l.strip().startswith("- Body --"))
     assert "group-by" not in body_line and "sort" not in body_line and "exact" not in body_line
     assert "text-search" in body_line
+
+
+# ---- count-only queries (size 0, no aggregations) -----------------------------------------------------------------
+
+
+def test_count_only_query_is_accepted_and_adds_no_rows_machinery(os_ctx):
+    q = {"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [W, {"named_condition": "abnormal_severity"}]}}}
+    r = check(os_ctx, "controller_log", q)
+    assert r.ok, r.reason
+    assert r.query["size"] == 0 and "sort" not in r.query and "_source" not in r.query and "aggs" not in r.query
+    assert r.query["track_total_hits"] is True
+
+
+def test_count_only_query_is_idempotent(os_ctx):
+    first = check(os_ctx, "controller_log", {"size": 0, "query": {"bool": {"filter": [W]}}})
+    again = check(os_ctx, "controller_log", copy.deepcopy(first.query))
+    assert first.ok and again.ok and again.query == first.query and not again.applied
+
+
+def test_count_only_query_rejects_sort_and_still_bounds_other_things(os_ctx):
+    assert not check(os_ctx, "controller_log", {"size": 0, "sort": [{"@timestamp": "asc"}], "query": {"bool": {"filter": [W]}}}).ok
+    assert not check(os_ctx, "controller_log", {"size": 0, "query": {"bool": {"filter": []}}}).ok          # still needs a window
+    assert not check(os_ctx, "controller_log", {"size": -1, "query": {"bool": {"filter": [W]}}}).ok

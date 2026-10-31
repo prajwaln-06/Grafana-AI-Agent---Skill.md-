@@ -237,8 +237,12 @@ def _aggregation(raw, aggs, query, policy, stats, max_series, total, relation, m
     buckets = body.get("buckets") if isinstance(body, dict) else None
     if buckets is None:
         value = safe_float((body or {}).get("value"))
-        point = Point(timestamp=_iso(datetime.now(timezone.utc)), value=value)
         meta["aggregation"]["type"] = "metric"
+        if (body or {}).get("value") is None:
+            # e.g. avg/min/max over zero documents: there is no value, so there is
+            # no result -- not a point carrying null at an invented timestamp.
+            return NormalizedResult(result_type="series", series=[])
+        point = Point(timestamp=_iso(datetime.now(timezone.utc)), value=value)
         return NormalizedResult(
             result_type="series", series=[Series(labels={"aggregation": name}, points=[point], legend_label=name)],
             had_invalid_samples=(body or {}).get("value") is not None and value is None)
