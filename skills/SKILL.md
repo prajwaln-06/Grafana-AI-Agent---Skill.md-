@@ -141,9 +141,9 @@ remove, or change which reference that metric's requests route to.
 | GPU ECC errors, retired or pending-retirement memory pages, or NVLink error/recovery health signals | prometheus | [references/dcgm-exporter/reliability.md](references/dcgm-exporter/reliability.md) |
 | PromQL syntax: selectors, Counter/Gauge/Histogram handling, functions, aggregation, time modifiers | prometheus | [references/prometheus-fundamentals.md](references/prometheus-fundamentals.md) |
 | The OpenSearch log domain's overall scope, which of the three log index families a log question belongs to, or what log search does *not* cover | opensearch | [references/opensearch-logs/overview.md](references/opensearch-logs/overview.md) |
-| Slingshot fabric health logs: switch or port faults, link errors, flapping or disabled ports, fabric health state (healthy vs critical), switch heartbeat documents, unhealthy racks or chassis | opensearch | [references/opensearch-logs/fabric-health.md](references/opensearch-logs/fabric-health.md) |
-| Controller (syslog-style) logs: errors or messages per controller host or service, hmscd, hmpad, fabric-manager, I²C failures, LinkStatus Down messages, logs excluding routine CRON noise | opensearch | [references/opensearch-logs/controller-log.md](references/opensearch-logs/controller-log.md) |
-| iLO / BMC event log (Redfish): BMC login and logout events, browser or IPMI access, event codes, event severity other than OK, unrepaired events and recommended actions | opensearch | [references/opensearch-logs/ilo-events.md](references/opensearch-logs/ilo-events.md) |
+| Slingshot fabric health logs: switch or port faults, link errors, flapping or disabled ports, fabric health state (healthy vs critical), switch heartbeat documents, switches that stopped sending heartbeats, recurring port faults, unhealthy racks or chassis | opensearch | [references/opensearch-logs/fabric-health.md](references/opensearch-logs/fabric-health.md) |
+| Controller (syslog-style) logs: errors or messages per controller host or service, hmscd, hmpad, fabric-manager, I²C failures, LinkStatus Down messages, logs excluding routine CRON noise, controller messages before and after an event, fewer switches available than expected | opensearch | [references/opensearch-logs/controller-log.md](references/opensearch-logs/controller-log.md) |
+| iLO / BMC event log (Redfish): BMC login and logout events, browser or IPMI access, event codes, event severity other than OK, unrepaired events and recommended actions, how long after creation BMC events were ingested | opensearch | [references/opensearch-logs/ilo-events.md](references/opensearch-logs/ilo-events.md) |
 | OpenSearch DSL syntax: query shape, leaf/compound clauses, date math, aggregations | opensearch | [references/opensearch-fundamentals.md](references/opensearch-fundamentals.md) |
 | The shape of the post-validation execution/results block (only relevant after a query has been accepted, never during construction) | n/a | [references/execution-contract.md](references/execution-contract.md) |
 
@@ -511,6 +511,45 @@ value, and the time window lives inside `query` as a single bounded `range` on
 the family's time field. `query_type` does not apply to OpenSearch results
 (OpenSearch has no instant/range distinction in this skill's scope) and may be
 omitted for those.
+
+Two **optional** keys exist for OpenSearch results only; a result without them
+is exactly as above:
+
+- `intent`: one of `rows`, `count`, `top_n`, `trend`, `distinct` (descriptive
+  only), or the name of an analysis below.
+- `analysis`: for a question one query cannot answer, an object
+  `{"type": "<analysis>", ...parameters}` next to the ordinary `query`. The
+  types are `absence`, `context_window`, `ingest_lag`, `text_ratio_shortfall`
+  and `recurrence`; which family supports which, the query shape each needs and
+  its parameters are in the family's domain file and in the runtime context.
+  The system runs the follow-up queries itself. When `intent` names an
+  analysis, `analysis` must be present with the same `type`. A parameter
+  outside its limit is rejected and the user is asked to change it; it is
+  never adjusted for you. An analysis the family does not list is `unmapped`.
+
+`pattern_id`, `measurement_used.type: "raw_metric"` and "never write an `index`"
+apply unchanged to an analysis result. For example:
+
+```json
+{
+  "mode": "single",
+  "status": "ok",
+  "reference_used": "references/opensearch-logs/fabric-health.md",
+  "measurement_used": {"type": "raw_metric", "name": "switches that stopped sending heartbeats", "source_metrics": []},
+  "data_source": "opensearch",
+  "pattern_id": "fabric_health",
+  "intent": "absence",
+  "query": {
+    "size": 0,
+    "query": {"bool": {"filter": [
+      {"range": {"@timestamp": {"gte": "now-24h", "lte": "now"}}},
+      {"term": {"fields.PhysicalContext.keyword": "runtime.heartbeat"}}]}},
+    "aggs": {"by_switch": {"terms": {"field": "fields.Switch.keyword", "size": 500}}}
+  },
+  "analysis": {"type": "absence"},
+  "explanation": "Switches that sent heartbeats in the last 24 hours but none recently; the heartbeat threshold is an unverified placeholder."
+}
+```
 
 **`status: "panic_mode_best_effort"`** — identical to `ok`, plus:
 

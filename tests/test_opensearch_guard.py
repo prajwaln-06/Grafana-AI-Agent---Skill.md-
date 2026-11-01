@@ -298,7 +298,12 @@ def test_reference_examples_are_accepted_by_the_guard(os_ctx, skills_root):
         blocks = re.findall(r"```json\n(.*?)```", text, re.S)
         assert blocks, doc
         for b in blocks:
-            r = check(os_ctx, pid, json.loads(b))
+            obj = json.loads(b)
+            if "pattern_id" in obj:   # a contract fragment (query + optional intent/analysis), checked as an entry
+                assert obj["pattern_id"] == pid, doc
+                r = check(os_ctx, pid, obj["query"], **{k: v for k, v in obj.items() if k not in ("pattern_id", "query")})
+            else:
+                r = check(os_ctx, pid, obj)
             assert r.ok, f"{doc}: {r.code} {r.reason}"
 
 

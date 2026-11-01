@@ -169,6 +169,51 @@ not be forced into the nearest of the three families, and must not be treated as
 exporter and the log intent routes to `controller-log.md`; neither half is
 dropped or marked `unmapped`.
 
+**11e. Input:** "Which switches stopped sending heartbeats?"
+**Expected:** routes to `fabric-health.md`; `status: "ok"` with
+`"analysis": {"type": "absence"}` (optional `recent_window`), a terms
+aggregation on the switch field over heartbeat documents only, and an
+explanation that says the heartbeat threshold is an unverified placeholder.
+Must not be answered as a plain list of switches that reported, and must not
+route to the controller family.
+
+**11f. Input:** "What did hmscd log in the five minutes before and after the last LinkStatus Down?"
+**Expected:** routes to `controller-log.md`; `status: "ok"` with
+`"analysis": {"type": "context_window", "before": "5m", "after": "5m", ...}`
+and a rows query (size 1 to 3) that finds the link-down message. Must not be
+approximated with one wide text search. A request for "two hours before and
+after" must not be shortened: the result asks the user to narrow it to 60
+minutes or less.
+
+**11g. Input:** "Show fabric-manager messages with fewer switches available than expected."
+**Expected:** routes to `controller-log.md`; `status: "ok"` with
+`"analysis": {"type": "text_ratio_shortfall"}` and a `match_phrase` on the
+message for the availability wording. Must not route to `fabric-health.md`
+(that family has no availability messages) and must not be answered by a text
+match alone.
+
+**11h. Input:** "How long after creation were the iLO events ingested yesterday?"
+**Expected:** routes to `ilo-events.md`; `status: "ok"` with
+`"analysis": {"type": "ingest_lag"}` and a rows query; the explanation says the
+lag is measured on the returned rows only and that `Created` is unverified as
+an event clock.
+
+**11i. Input:** "Which ports have recurring faults this week?"
+**Expected:** routes to `fabric-health.md`; `status: "ok"` with
+`"analysis": {"type": "recurrence"}`, a terms aggregation on the location with
+a one-hour `date_histogram` sub-aggregation, and an explanation that states
+which reading of "recurring" was used.
+
+**11j. Input:** "Which controllers stopped logging in the last hour?"
+**Expected:** `status: "unmapped"` (or a clarification) — the `absence`
+analysis is configured only for fabric heartbeats; it must not be applied to
+the controller family, and the question must not be approximated.
+
+**11k. Input:** "Which BMCs have unusually frequent logins?" / "Any failed login attempts on the BMCs?"
+**Expected:** `status: "unmapped"` — no baseline for "unusually frequent" is
+defined and the failed-login wording is unconfirmed (`ilo-events.md`). Adding
+analyses did not change this.
+
 ## 12. Panic-mode handling
 
 **Input:** "everything is on fire the node is dying help"

@@ -54,6 +54,9 @@ Examples of user requests that route to this domain:
 - "Who logged into this BMC in the last 24 hours?"
 - "Show iLO events with a severity other than OK."
 - "Which event codes recur most on each BMC?"
+- "Which switches stopped sending heartbeats?"
+- "What did hmscd log before and after the link-down event?"
+- "How long after creation were the iLO events ingested?"
 
 These illustrate intent and are not an exhaustive whitelist.
 
@@ -116,8 +119,31 @@ query shapes in the relevant domain file and the DSL mechanics in
 | `trend` | "Error volume over time" | time series |
 | `distinct` | "How many different ports are affected?" | bucketed or approximate count |
 
-Not supported in this domain yet: absence or "no recent heartbeat" detection,
-multi-step "before and after an event" lookups, and cross-family queries. Treat
+Some questions cannot be answered by one query. For those, write the ordinary
+query for the family and add an `analysis` object (and, optionally, the same
+name as `intent`); the system then runs the follow-up queries itself, checks
+every one of them the same way, and returns one combined result. Use an
+analysis **only** where the family's domain file (and the runtime context)
+lists it:
+
+| Analysis (`analysis.type`) | Typical question | Family | Result shape |
+|---|---|---|---|
+| `absence` | "Which switches stopped sending heartbeats?" | `fabric_health` | buckets: the entities that went quiet |
+| `recurrence` | "Which ports have recurring faults?" | `fabric_health` | buckets ranked by how many separate intervals they appear in |
+| `context_window` | "What was logged before and after the link-down event?" | `controller_log` | hits around each event, marked before / anchor / after |
+| `text_ratio_shortfall` | "Messages with fewer switches available than expected" | `controller_log` | hits whose `n/m` count has n below m |
+| `ingest_lag` | "How long after creation were events ingested?" | `ilo_events` | hits with a lag per row, plus min / median / p90 / max |
+
+Each domain file gives the exact query shape and an example. A parameter outside
+its limit (for example a context window longer than the maximum) is rejected
+and the user is asked to change it; it is never shortened. The parameters
+behind these analyses (heartbeat interval, the `n/m` message wording, what one
+"occurrence" interval is, which time field holds the event time) are recorded
+in the registry and are **unverified** until confirmed on the real cluster; an
+answer that relies on them must say so.
+
+Still not supported: cross-family queries (one question that joins two
+families, or logs with metrics), and any analysis a family does not list. Treat
 those as `unmapped` rather than approximating them.
 
 ## Result metadata and limits
@@ -135,6 +161,15 @@ stating a count or a time range.
 | `observed_range` | the earliest and latest `@timestamp` **among the returned rows (or non-empty buckets) only**. It is not the full range of data available in OpenSearch and not the query window; absent data at the edges of the window cannot be told from this |
 | `severity_vocabulary`, `severity_vocabulary_provisional` | how far each severity vocabulary is trusted (`observed`, `documented`, `provisional`); a verdict that rests on a provisional vocabulary must be presented as such |
 | `redaction` | counts of masked user names and IP addresses and the policy used |
+
+An analysis result also carries `execution.analysis`: its type, the parameters
+actually used, the counts it is based on (for example how many entities
+reported in each window), whether its parameters are verified, how many queries
+ran and why, and any warnings (for example that a list was incomplete). Rows of
+an analysis may carry a per-row `analysis` note such as
+`{"position": "before"}` or `{"lag_seconds": 300}`. All of the metadata above
+(count exactness, partial results, redaction, severity) applies to analysis
+results exactly as to ordinary ones.
 
 Severity assessment per row has four distinct states: `abnormal`, `normal`,
 `unknown` (including a missing, empty or unrecognised value) and, per field,

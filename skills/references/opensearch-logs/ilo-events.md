@@ -15,7 +15,8 @@ semantics needed to query it correctly.
 
 Route here for: BMC or iLO login and logout events, browser versus IPMI access,
 events by code or category, event severity other than OK, unrepaired events and
-recommended actions, ingestion lag.
+recommended actions, ingestion lag (how long after creation the BMC events were
+ingested).
 
 Do not route here for: controller syslog messages (`controller-log.md`), fabric
 health (`fabric-health.md`), numeric metrics (Prometheus).
@@ -51,6 +52,7 @@ names and source addresses appear only inside the message text, not as fields.
 | Browser versus IPMI counts | `filters` aggregation with two `match_phrase` clauses on `text` |
 | Abnormal events with actions | time range, `{"named_condition": "abnormal_severity"}` (expanded by the system), rows with `recommended_action` |
 | Unrepaired events | term on `repaired` set to false |
+| How long after creation events were ingested | analysis `ingest_lag`: a rows query (time range, any filters), `size` up to 100; if `_source` is given it must include `@timestamp` and `Created`; `"analysis": {"type": "ingest_lag"}` |
 
 ## Severity and "Abnormal" Definition
 
@@ -85,10 +87,16 @@ case.
 - **Sensitive content:** messages contain user names and internal addresses.
   Which of these may be shown to users is an open policy question; return only
   the allow-listed projection.
-- **Not supported by a plain query:** computing per-document ingestion lag,
-  detecting "unusually frequent" access (no baseline is defined), and failed
-  login detection (the failure wording has not been confirmed). Treat these as
-  `unmapped`.
+- **Per-document ingestion lag is not computable by a plain query** (it needs
+  `@timestamp` minus `Created` per event, and scripts are not allowed). Use the
+  `ingest_lag` analysis: the system computes the lag on the returned rows and
+  reports the smallest, median, 90th-percentile and largest values. It is a
+  sample of the returned rows (newest first), not every event, and `Created` is
+  display-only and **unverified** as an event clock; say both in the answer. A
+  negative lag (ingested "before" it was created) is counted and reported.
+- **Still not supported by a plain query:** detecting "unusually frequent"
+  access (no baseline is defined) and failed login detection (the failure
+  wording has not been confirmed). Treat these as `unmapped`.
 
 ## Safe Projection
 
@@ -99,8 +107,8 @@ fields.
 
 ## Query Examples
 
-No verified query example is currently available for this family; the example is
-a fixture-checked shape illustration, not run against the live cluster.
+No verified query example is currently available for this family; the examples
+are fixture-checked shape illustrations, not run against the live cluster.
 
 ```json
 {
@@ -112,6 +120,22 @@ a fixture-checked shape illustration, not run against the live cluster.
                 { "term": { "Oem.Hpe.Repaired": false } } ] } },
   "_source": [ "@timestamp", "Created", "host", "Severity", "Message", "Oem.Hpe.Severity",
                "Oem.Hpe.Code", "Oem.Hpe.RecommendedAction" ]
+}
+```
+
+How long after creation the last day's events were ingested (`ingest_lag`):
+
+```json
+{
+  "pattern_id": "ilo_events",
+  "intent": "ingest_lag",
+  "query": {
+    "size": 100,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } } ] } },
+    "_source": [ "@timestamp", "Created", "host", "Message" ]
+  },
+  "analysis": { "type": "ingest_lag" }
 }
 ```
 

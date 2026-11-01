@@ -16,7 +16,8 @@ and the semantics needed to query it correctly.
 
 Route here for: fabric or switch health, switch or port faults, link errors,
 flapping ports, ports disabled, heartbeat documents, which racks or chassis have
-the most unhealthy events.
+the most unhealthy events, switches that stopped sending heartbeats (gone
+quiet), ports or locations with recurring faults.
 
 Do not route here for: controller messages by service (`controller-log.md`),
 BMC login or iLO events (`ilo-events.md`), CPU or GPU measurements (Prometheus).
@@ -67,6 +68,8 @@ treat the two spellings as different switches.
 | Ports disabled for flapping | `match_phrase` on `text`, `terms` on `entity_location` |
 | Recommendations for a port | term on `entity_port`, return `text` in rows |
 | Most unhealthy racks/chassis | `terms` on `group_rack` with a nested `terms` on `group_chassis` |
+| Switches that stopped sending heartbeats | analysis `absence`: `size: 0`, time range = the baseline (for example the last 24 hours), term on `event_kind` = `runtime.heartbeat`, ONE `terms` on `entity_switch` with no sub-aggregation; `"analysis": {"type": "absence"}` (optional `recent_window`) |
+| Ports with recurring faults | analysis `recurrence`: `size: 0`, time range, term on `health_state` = `CRITICAL`, `terms` on `entity_location` with ONE `date_histogram` sub-aggregation on `@timestamp` using the registry interval (`1h`); `"analysis": {"type": "recurrence"}` |
 
 Grouping uses only exact-value fields the catalog confirms are groupable; the
 `text` role is never grouped. Disallowed everywhere: scripts, `query_string`,
@@ -90,10 +93,19 @@ filters on the stored value `CRITICAL`.
   `@timestamp`. They are shown, never filtered on.
 - **"Recurring" is undefined.** Hourly re-emission means "recurring faults" is
   ambiguous between a persistent state and repeated new occurrences. State
-  which reading the answer used.
+  which reading the answer used. The `recurrence` analysis reads it as "seen in
+  several separate one-hour intervals" (the registry interval, unverified) and
+  ranks by that count (`metrics.active_intervals`), not by document count; a
+  fault that is simply re-emitted every hour also scores high, so say that the
+  ranking cannot tell a persistent fault from repeated new ones.
 - **Heartbeat interval** was about one per switch per minute in one sampled day;
-  this is unconfirmed for production and no "heartbeat missing" logic is
-  supported yet.
+  this is unconfirmed for production. The `absence` analysis uses the registry's
+  heartbeat settings (60 seconds, missing after 3 missed heartbeats, so a
+  default recent window of 3 minutes), which are **placeholders**: present a
+  "stopped sending heartbeats" answer as provisional. A switch is compared
+  without its ASIC suffix, so `x1000c0r1b0` and `x1000c0r1b1` count as the same
+  switch. If nothing at all reported recently, the answer warns that this may
+  be an ingestion outage rather than every switch being down.
 
 ## Safe Projection
 
@@ -118,6 +130,43 @@ verified. Field paths and `.keyword` use depend on the live field catalog.
                   { "exists": { "field": "fields.PhysicalSubContext" } } ],
     "must_not": [ { "term": { "fields.PhysicalSubContext.keyword": "HEALTHY" } } ] } },
   "aggs": { "by_switch": { "terms": { "field": "fields.Switch.keyword", "size": 50 } } }
+}
+```
+
+Switches that stopped sending heartbeats (`absence`): the query is the baseline
+(who sent heartbeats in the last 24 hours); the system runs the "recent" query
+itself and returns the switches missing from it.
+
+```json
+{
+  "pattern_id": "fabric_health",
+  "intent": "absence",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "term":  { "fields.PhysicalContext.keyword": "runtime.heartbeat" } } ] } },
+    "aggs": { "by_switch": { "terms": { "field": "fields.Switch.keyword", "size": 500 } } }
+  },
+  "analysis": { "type": "absence", "recent_window": "3m" }
+}
+```
+
+Ports with recurring faults (`recurrence`), over the last 7 days:
+
+```json
+{
+  "pattern_id": "fabric_health",
+  "intent": "recurrence",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-7d", "lte": "now" } } },
+      { "term":  { "fields.PhysicalSubContext.keyword": "CRITICAL" } } ] } },
+    "aggs": { "by_location": { "terms": { "field": "fields.Location.keyword", "size": 20 },
+              "aggs": { "per_hour": { "date_histogram": { "field": "@timestamp", "fixed_interval": "1h" } } } } }
+  },
+  "analysis": { "type": "recurrence" }
 }
 ```
 

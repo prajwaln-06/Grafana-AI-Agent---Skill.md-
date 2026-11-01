@@ -207,6 +207,59 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
   frequent logins" (no baseline is defined) and "failed logins" (the wording is
   not confirmed).
 
+### Stage 3 — skill files (the friend's content, minimal edits)
+
+- **D-27 Only what the new capability made false or incomplete was edited.**
+  Her structure, headings, caveats and wording were kept. Per file:
+  - `overview.md`: the sentence "Not supported in this domain yet: absence …,
+    before and after …, and cross-family queries. Treat those as `unmapped`"
+    became a short table of the five analyses (which family supports each)
+    plus the rule "parameters outside their limit are rejected, never
+    shortened; the parameters are unverified". Cross-family queries **stay**
+    `unmapped`, in her words. Three trigger examples added; one paragraph about
+    the `execution.analysis` block added to "Result metadata and limits".
+  - `fabric-health.md`: routing triggers gained "switches that stopped sending
+    heartbeats" and "recurring faults"; two rows in Query Intent Patterns; her
+    "Recurring is undefined" caveat kept and extended with how the analysis
+    reads it; her heartbeat caveat's last clause ("no heartbeat-missing logic
+    is supported yet") replaced with how `absence` works and that its
+    threshold is a placeholder; two JSON examples added under her existing
+    "not verified" disclaimer.
+  - `controller-log.md`: triggers gained "before and after an event" and "fewer
+    switches available than expected"; two Query Intent rows; her "Not
+    supported by a plain query" caveat kept as the explanation of why, with
+    instructions for `text_ratio_shortfall` and `context_window` in place of
+    "treat as `unmapped`"; two JSON examples; "the example is" became "the
+    examples are".
+  - `ilo-events.md`: the ingestion-lag trigger now names the question form;
+    one Query Intent row; the "not supported" caveat split in two: ingest lag
+    is now an analysis (sample-only and `Created`-unverified caveats stated),
+    while "unusually frequent" access and failed-login detection **stay
+    `unmapped`** exactly as she wrote; one JSON example.
+  - `SKILL.md`: the three routing rows gained the new phrasing (each phrase in
+    one row only); §9 documents the optional `intent` and `analysis` keys,
+    restates that `pattern_id`, `raw_metric` and "never write an `index`" are
+    unchanged, and shows one complete analysis result.
+  - `evals/regression-cases.md`: cases 11e–11k (one per analysis, plus "absence
+    is not applied to the controller family" and "unusually frequent / failed
+    logins stay unmapped").
+- **D-28 The three families do not overlap more than before.** A routing test
+  proves every new phrase appears in exactly one family row, next to her
+  existing test that the signature words (hmscd, heartbeat, IPMI) stay apart.
+  Another test proves each family file documents exactly the analyses the
+  registry configures for it, so docs and registry cannot drift.
+- **D-29 Every JSON example in the skill files is proven valid.**
+  `tests/test_skill_examples.py` extracts each ```json block from the three
+  family files, the overview and the concrete OpenSearch example in `SKILL.md`,
+  and runs it through the friend's guard against the fixture mappings (10
+  examples today). Her own example test (`test_reference_examples_are_accepted_by_the_guard`)
+  was extended so it also understands an example that carries `pattern_id` +
+  `analysis` (it previously assumed every block was a bare query body). Nothing
+  in it was relaxed.
+- **D-30 Not verified:** whether the real Gemini model routes the new phrasings
+  to the intended rows and writes these shapes. Tests fake the Router and
+  Generator. See the smoke test in Stage 4.
+
 ---
 
 ## 3. Open flags (summary)

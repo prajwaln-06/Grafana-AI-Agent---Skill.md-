@@ -70,6 +70,64 @@ def test_family_rows_use_distinctive_vocabulary(skill_index):
     assert "ipmi" not in topics["fabric_health"] and "ipmi" not in topics["controller_log"]
 
 
+ANALYSIS_TRIGGERS = {
+    "fabric_health": ("stopped sending heartbeats", "recurring port faults"),
+    "controller_log": ("before and after an event", "fewer switches available than expected"),
+    "ilo_events": ("ingested",),
+}
+
+
+def test_analysis_phrasing_routes_to_exactly_one_family(skill_index):
+    """The new phrasings for the five analyses appear in their own family's row and in no
+    sibling row, so they add no overlap between the three families."""
+    topics = {pid: skill_index.row_for_path(path).topic.lower() for pid, path in FAMILY_REFERENCES.items()}
+    for pid, phrases in ANALYSIS_TRIGGERS.items():
+        for phrase in phrases:
+            assert phrase in topics[pid], (pid, phrase)
+            for other, topic in topics.items():
+                if other != pid:
+                    assert phrase not in topic, (phrase, other)
+    assert "before and after" not in topics["fabric_health"] + topics["ilo_events"]
+    assert "available" not in topics["fabric_health"] + topics["ilo_events"]
+
+
+def test_each_family_file_documents_exactly_its_registry_analyses(skills_root, os_registry):
+    """A family file describes an analysis only if the registry configures it for that family,
+    and every configured analysis is described (as `"type": "<name>"` in an example)."""
+    names = ("absence", "context_window", "ingest_lag", "text_ratio_shortfall", "recurrence")
+    for pid, path in FAMILY_REFERENCES.items():
+        text = (skills_root / path).read_text(encoding="utf-8")
+        configured = set(os_registry.get(pid).analyses)
+        for name in names:
+            documented = f'"type": "{name}"' in text
+            assert documented == (name in configured), (pid, name)
+
+
+def test_the_old_unmapped_statements_for_the_new_analyses_are_gone(skills_root):
+    """The four places that said 'treat as unmapped' for absence, before/after, the n/m shortfall
+    and ingest lag now give instructions instead; the remaining unmapped boundaries stay."""
+    def flat(path):
+        return " ".join((skills_root / path).read_text(encoding="utf-8").split())
+    overview = flat(OVERVIEW)
+    assert 'absence or "no recent heartbeat" detection' not in overview
+    assert "Still not supported: cross-family queries" in overview                 # still unmapped
+    ctl = flat(FAMILY_REFERENCES["controller_log"])
+    assert "Treat these as `unmapped`; do not approximate" not in ctl
+    assert "Use `text_ratio_shortfall`" in ctl and "Use `context_window`" in ctl
+    fab = flat(FAMILY_REFERENCES["fabric_health"])
+    assert 'no "heartbeat missing" logic is supported yet' not in fab and "**placeholders**" in fab
+    ilo = flat(FAMILY_REFERENCES["ilo_events"])
+    assert "computing per-document ingestion lag" not in ilo and "Use the `ingest_lag` analysis" in ilo
+    assert 'detecting "unusually frequent" access' in ilo and "failed login detection" in ilo   # these stay unmapped
+
+
+def test_skill_section_9_documents_the_optional_keys_and_keeps_the_contract(skill_index):
+    text = skill_index.section("## 9.")
+    for needle in ("`intent`", "`analysis`", "absence", "context_window", "ingest_lag", "text_ratio_shortfall",
+                   "recurrence", "`pattern_id`", "never write an `index`", '"type": "raw_metric"'):
+        assert needle in text, needle
+
+
 def test_opensearch_datasource_is_in_play_for_each_family(skill_index):
     for path in FAMILY_REFERENCES.values():
         assert skill_index.datasources_in_play([path]) == {"opensearch"}
