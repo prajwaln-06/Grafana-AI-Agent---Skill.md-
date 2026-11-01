@@ -299,6 +299,23 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
   the file manifest. **FLAG F-5:** tell the frontend about the new optional
   fields; no existing field changed meaning.
 
+### Stage 5 — final verification
+
+- **D-36 Verified results.** `ruff check app run_server.py --select F,E9`:
+  clean. The result was packaged with `git archive` (exactly the committed
+  files, so no `.git`, `__pycache__`, caches or `.env`; 165 entries checked),
+  unzipped into a fresh folder outside the repository, and the full suite was
+  run there twice:
+  - Windows 11, Python 3.12.10: **1384 passed, 1 failed** (only the
+    Windows-only permission test, D-03).
+  - Linux container (`python:3.12-slim`, Python 3.12.16, dependencies freshly
+    installed from `requirements-dev.txt`): **1385 passed, 0 failed**, ruff
+    clean.
+  Starting point: 1231 tests. Added: 154.
+- **D-37 Deliverable:** `work/Grafana-AI-Agent---Skill.md--feat-opensearch-integration-merged.zip`.
+  The git history of the five stages stays in the work folder
+  (`git log --oneline`) for review or revert.
+
 ---
 
 ## 3. What could NOT be verified (stated plainly)
@@ -314,9 +331,9 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
   whether the real Generator writes the `analysis` shapes, is unproven; the
   regression cases 11e–11k in `skills/evals/regression-cases.md` are the
   manual check.
-- The Linux test count. On this Windows laptop one test
+- (Resolved in Stage 5: on Linux all 1385 tests pass.) On this Windows laptop one test
   (`test_reviews.py::test_round_trip_is_deterministic_and_sorted`) fails
-  because it checks a Linux file permission; Stage 5 records the exact count.
+  because it checks a Linux file permission.
 
 ---
 
