@@ -6,9 +6,10 @@ contract BEFORE validation, so downstream stages (validator, executor) see the
 canonical form -- registry-resolved `index`, expanded named conditions,
 documented safe defaults filled in.
 
-  guard ok                      entry.query / entry.index replaced by the
-                                canonical forms; `guard_notes` records which
-                                defaults were applied and any warnings
+  guard ok                      entry.query / entry.index (and, for an
+                                analysis question, entry.analysis) replaced
+                                by the canonical forms; `guard_notes` records
+                                which defaults were applied and any warnings
   window_exceeds_max            entry becomes declined /
                                 parameter_requires_clarification carrying the
                                 guard's user message (the window is NEVER
@@ -38,6 +39,9 @@ def _canonicalise_entry(entry: dict, ctx: OpenSearchContext) -> dict:
     result = guard.check_entry(entry, ctx)
     if result.ok:
         out = {**entry, "query": result.query, "index": result.index, "pattern_id": result.pattern_id}
+        if result.analysis is not None:
+            # canonical analysis parameters: documented defaults filled in, nothing the model wrote changed
+            out["analysis"] = result.analysis
         notes = {"applied": list(result.applied), "warnings": list(result.warnings)}
         if notes["applied"] or notes["warnings"]:
             out["guard_notes"] = notes

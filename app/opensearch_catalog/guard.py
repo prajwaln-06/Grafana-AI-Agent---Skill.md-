@@ -27,6 +27,15 @@ filling DOCUMENTED safe defaults when a key is absent (recorded in `applied`).
 A value the model WROTE is never changed: out-of-range values are rejected,
 not clamped, and `.keyword` is never added to a field for the model.
 
+Optional multi-step analyses (keys `intent` and `analysis`, see analysis.py for
+the algorithms): the same rule applies. A parameter the model wrote is checked
+against the registry's per-family `analyses` block and the analysis limits and
+REJECTED (code analysis_invalid) when it is out of range -- never clamped. A
+documented default (e.g. the absence `recent_window` derived from the registry
+heartbeat settings, the context-window `before`/`after`) is filled only when the
+key is absent, and recorded in `applied`. Simple questions carry neither key and
+are checked exactly as before.
+
 check_entry() is idempotent: feeding its output back in yields ok with no
 further defaults applied.
 """
@@ -44,6 +53,10 @@ from app import time_utils
 from app.opensearch_catalog.context import Limits, OpenSearchContext, PatternContext
 from app.opensearch_catalog.field_catalog import (
     OP_EXISTS, OP_GROUP_BY, OP_MATCH, OP_METRIC, OP_RANGE, OP_SORT, OP_TERM, FieldInfo,
+)
+from app.opensearch_catalog.registry import (
+    ANALYSIS_ABSENCE, ANALYSIS_CONTEXT_WINDOW, ANALYSIS_INGEST_LAG, ANALYSIS_RECURRENCE,
+    ANALYSIS_TEXT_RATIO_SHORTFALL, ANALYSIS_TYPES, parse_short_duration_seconds,
 )
 from app.opensearch_catalog.severity import (
     CONDITION_ABNORMAL, NAMED_CONDITIONS, SeverityConditionError, expand_abnormal_condition,
@@ -66,6 +79,13 @@ CODE_LIMIT = "limit_exceeded"
 CODE_AGGREGATION = "aggregation_invalid"
 CODE_SEVERITY = "severity_invalid"
 CODE_PROJECTION = "projection_violation"
+CODE_INTENT = "intent_invalid"
+CODE_ANALYSIS = "analysis_invalid"
+
+# Optional `intent` vocabulary: the five simple shapes of the domain overview, plus
+# the analysis types. A simple intent is descriptive only (it changes no check).
+SIMPLE_INTENTS = frozenset({"rows", "count", "top_n", "trend", "distinct"})
+INTENTS = SIMPLE_INTENTS | ANALYSIS_TYPES
 
 ALLOWED_TOP_LEVEL_KEYS = frozenset(
     {"query", "size", "from", "sort", "aggs", "aggregations", "_source", "track_total_hits", "timeout"})
@@ -108,6 +128,8 @@ class GuardResult:
     window: dict | None = None
     estimated_buckets: int = 0
     approximate_aggregations: tuple[str, ...] = ()
+    intent: str | None = None
+    analysis: dict | None = None      # canonical analysis parameters (None = simple question)
 
 
 def _fail(code: str, reason: str, user_message: str = "") -> None:
@@ -245,6 +267,9 @@ class _Checker:
         self.group_by_effective = frozenset(self.view.group_by_fields.values())
         self.sev = self.entry.severity_semantics
         self.sev_paths = severity_paths(self.sev)
+        # terms-aggregation size bounds; raised ONLY for the absence analysis
+        self.terms_cap = limits.max_terms_size
+        self.terms_default = limits.default_terms_size
 
     # -- fields ------------------------------------------------------------------------------------------------
 
@@ -593,11 +618,11 @@ class _Checker:
                   f"fields outside the group-by list are excluded). Allowed: {sorted(self.group_by_effective)}")
         out = dict(body)
         if "size" not in body:
-            out["size"] = self.limits.default_terms_size
-            self.applied.append(f"terms size defaulted to {self.limits.default_terms_size}")
+            out["size"] = self.terms_default
+            self.applied.append(f"terms size defaulted to {self.terms_default}")
         size = out["size"]
-        if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= self.limits.max_terms_size:
-            _fail(CODE_LIMIT, f"{where}: size must be an integer from 1 to {self.limits.max_terms_size}")
+        if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= self.terms_cap:
+            _fail(CODE_LIMIT, f"{where}: size must be an integer from 1 to {self.terms_cap}")
         if "order" in body:
             o = body["order"]
             if not (isinstance(o, dict) and len(o) == 1 and next(iter(o)) in ("_count", "_key")
@@ -664,8 +689,14 @@ class _Checker:
 # ---- public entry point -----------------------------------------------------------------------------------------------
 
 
-def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = None) -> GuardResult:
-    """Validate and canonicalise ONE result entry (data_source 'opensearch')."""
+def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = None,
+                followup_of: str | None = None) -> GuardResult:
+    """Validate and canonicalise ONE result entry (data_source 'opensearch').
+
+    `followup_of` is set only by the executor for a query that Python built for an
+    analysis (analysis.py). Such a query is checked by exactly the same rules; the
+    only difference is that `intent`/`analysis` are not read from it and, for
+    'absence', the terms size may go up to the analysis maximum."""
     now = now or datetime.now(timezone.utc)
     pid = entry.get("pattern_id") if isinstance(entry, dict) else None
     try:
@@ -697,6 +728,14 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
         ck = _Checker(pc, limits, now)
         body = copy.deepcopy(query)
         out: dict[str, Any] = {}
+
+        if followup_of is None:
+            intent, atype = _intent_and_type(entry, pc)
+        else:
+            intent, atype = None, None
+        if ANALYSIS_ABSENCE in (atype, followup_of):
+            ck.terms_cap = limits.analysis_max_terms
+            ck.terms_default = limits.analysis_max_terms
 
         # query
         q = body.get("query")
@@ -736,8 +775,12 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
                 _fail(CODE_BAD_CLAUSE, "`sort` is not used by aggregation queries")
         else:
             if size is None:
-                out["size"] = limits.default_hits_size
-                ck.applied.append(f"size defaulted to {limits.default_hits_size}")
+                default_size = limits.analysis_anchor_limit if atype == ANALYSIS_CONTEXT_WINDOW \
+                    else limits.default_hits_size
+                out["size"] = default_size
+                ck.applied.append(f"size defaulted to {default_size}"
+                                  + (" (events to expand for the context window)"
+                                     if atype == ANALYSIS_CONTEXT_WINDOW else ""))
             else:
                 if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= limits.max_hits_size:
                     _fail(CODE_LIMIT, f"size must be an integer from 0 to {limits.max_hits_size} for a query "
@@ -784,10 +827,13 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
         if "from" in body and body["from"] not in (0,):
             _fail(CODE_LIMIT, "paging is not allowed")
 
+        analysis = _check_analysis(atype, entry.get("analysis"), ck, out, window) if atype else None
+
         return GuardResult(
             ok=True, query=out, index=pc.entry.index_pattern, pattern_id=pid,
             applied=tuple(dict.fromkeys(ck.applied)), warnings=tuple(dict.fromkeys(ck.warnings)),
             window=window, estimated_buckets=est, approximate_aggregations=tuple(ck.approx),
+            intent=intent, analysis=analysis,
         )
     except GuardError as e:
         return GuardResult(ok=False, code=e.code, reason=e.reason, user_message=e.user_message, pattern_id=pid if isinstance(pid, str) else None)
@@ -810,3 +856,195 @@ def _check_sort(sort: Any, ck: _Checker) -> list:
             _fail(CODE_BAD_CLAUSE, f"sort[{i}]: order must be 'asc' or 'desc'")
         out.append(it)
     return out
+
+
+# ---- optional `intent` / `analysis` keys ------------------------------------------------------------------------
+#
+# Validation only. The algorithms that run an analysis live in analysis.py and are
+# driven by the executor; every query they build is checked by check_entry() again.
+
+_ANALYSIS_KEYS = {
+    ANALYSIS_ABSENCE: frozenset({"type", "recent_window"}),
+    ANALYSIS_CONTEXT_WINDOW: frozenset({"type", "before", "after", "context_filter"}),
+    ANALYSIS_INGEST_LAG: frozenset({"type"}),
+    ANALYSIS_TEXT_RATIO_SHORTFALL: frozenset({"type"}),
+    ANALYSIS_RECURRENCE: frozenset({"type"}),
+}
+
+
+def _intent_and_type(entry: dict, pc: PatternContext) -> tuple[str | None, str | None]:
+    """Reads the optional keys. Returns (intent, analysis type or None)."""
+    intent = entry.get("intent")
+    if intent is not None and (not isinstance(intent, str) or intent not in INTENTS):
+        _fail(CODE_INTENT, f"`intent` {intent!r} is not one of {sorted(INTENTS)}; omit `intent` if unsure")
+    raw = entry.get("analysis")
+    if raw is None:
+        if intent in ANALYSIS_TYPES:
+            _fail(CODE_ANALYSIS, f"`intent` {intent!r} needs an `analysis` object, at least "
+                                 f"{{\"type\": \"{intent}\"}}; nothing is assumed for you")
+        return intent, None
+    if not isinstance(raw, dict):
+        _fail(CODE_ANALYSIS, "`analysis` must be an object such as {\"type\": \"absence\"}")
+    atype = raw.get("type")
+    if atype not in ANALYSIS_TYPES:
+        _fail(CODE_ANALYSIS, f"analysis.type {atype!r} is not one of {sorted(ANALYSIS_TYPES)}")
+    if intent is not None and intent != atype:
+        _fail(CODE_ANALYSIS, f"`intent` {intent!r} contradicts analysis.type {atype!r}; they must be equal "
+                             f"(or omit `intent`)")
+    if pc.entry.analysis(atype) is None:
+        configured = ", ".join(sorted(pc.entry.analyses)) or "none"
+        _fail(CODE_ANALYSIS, f"the {atype!r} analysis is not available for {pc.entry.pattern_id!r} "
+                             f"(available: {configured}); answer the question as unmapped instead")
+    return intent, atype
+
+
+def _has_time_range(node: Any, time_field: str) -> bool:
+    if isinstance(node, dict):
+        r = node.get("range")
+        if isinstance(r, dict) and time_field in r:
+            return True
+        return any(_has_time_range(v, time_field) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_time_range(v, time_field) for v in node)
+    return False
+
+
+def _role_group_paths(ck: _Checker, role: str, atype: str) -> set[str]:
+    """The effective (exact-match) group-by paths of a registry role, as the live
+    catalog confirms them. Empty -> the analysis cannot run."""
+    paths = {ck.view.group_by_fields[p] for p in ck.entry.role_paths(role) if p in ck.view.group_by_fields}
+    if not paths:
+        _fail(CODE_ANALYSIS, f"{atype}: the {role!r} field of {ck.entry.pattern_id!r} is not confirmed groupable in "
+                             f"the live mapping, so this analysis cannot run")
+    return paths
+
+
+def _single_terms_agg(out: dict, atype: str, what: str) -> tuple[str, dict]:
+    aggs = out.get("aggs")
+    if not isinstance(aggs, dict) or len(aggs) != 1:
+        _fail(CODE_ANALYSIS, f"{atype}: the query must be size 0 with exactly one `terms` aggregation on {what}")
+    (name, spec), = aggs.items()
+    if "terms" not in spec:
+        _fail(CODE_ANALYSIS, f"{atype}: the top-level aggregation must be `terms` on {what}")
+    return name, spec
+
+
+def _parse_param_duration(params: dict, key: str, atype: str) -> int:
+    try:
+        return parse_short_duration_seconds(params[key])
+    except ValueError as e:
+        _fail(CODE_ANALYSIS, f"{atype}: `{key}` {e}")
+
+
+def _check_analysis(atype: str, raw: dict, ck: _Checker, out: dict, window: dict) -> dict:
+    """Checks the model-written analysis parameters against the registry and limits.
+    Returns the canonical parameters (documented defaults filled in when a key is
+    ABSENT, recorded in ck.applied). Never changes a value that was written."""
+    params = dict(raw)
+    extra = set(params) - _ANALYSIS_KEYS[atype]
+    if extra:
+        _fail(CODE_ANALYSIS, f"{atype}: unknown parameter(s) {sorted(extra)}; allowed: {sorted(_ANALYSIS_KEYS[atype])}")
+    cfg = ck.entry.analysis(atype)
+    tf = ck.entry.time_field
+    lim = ck.limits
+
+    if atype == ANALYSIS_ABSENCE:
+        what = f"the {cfg['entity_role']!r} field"
+        _, spec = _single_terms_agg(out, atype, what)
+        if "aggs" in spec:
+            _fail(CODE_ANALYSIS, f"{atype}: the terms aggregation must not have sub-aggregations")
+        allowed = _role_group_paths(ck, cfg["entity_role"], atype)
+        if spec["terms"].get("field") not in allowed:
+            _fail(CODE_ANALYSIS, f"{atype}: the terms aggregation must group by {what}: {sorted(allowed)}")
+        beat = cfg["heartbeat_interval_seconds"]
+        if "recent_window" not in params:
+            default = _duration_text(beat * cfg["dead_after_intervals"])
+            params["recent_window"] = default
+            ck.applied.append(f"analysis.recent_window defaulted to {default} (registry: heartbeat every {beat}s, "
+                              f"missing after {cfg['dead_after_intervals']} missed; verified={cfg['verified']})")
+        recent = _parse_param_duration(params, "recent_window", atype)
+        if recent < beat:
+            _fail(CODE_ANALYSIS, f"{atype}: `recent_window` {params['recent_window']!r} is shorter than one heartbeat "
+                                 f"interval ({beat}s), so every entity would look missing; it has not been changed")
+        if recent >= window["seconds"]:
+            _fail(CODE_ANALYSIS, f"{atype}: `recent_window` {params['recent_window']!r} must be shorter than the query's "
+                                 f"time window ({_duration_text(window['seconds'])}), which is the baseline")
+
+    elif atype == ANALYSIS_CONTEXT_WINDOW:
+        if "aggs" in out:
+            _fail(CODE_ANALYSIS, f"{atype}: the query finds the event(s) to look around, so it must be a rows query "
+                                 f"without aggregations")
+        if not 1 <= out["size"] <= lim.analysis_anchor_limit:
+            _fail(CODE_ANALYSIS, f"{atype}: at most {lim.analysis_anchor_limit} events are expanded; set `size` "
+                                 f"between 1 and {lim.analysis_anchor_limit} (it has not been changed)")
+        cap = lim.analysis_context_max_minutes * 60
+        for side in ("before", "after"):
+            if side not in params:
+                params[side] = cfg[f"default_{side}"]
+                ck.applied.append(f"analysis.{side} defaulted to {params[side]} (registry default; "
+                                  f"verified={cfg['verified']})")
+            seconds = _parse_param_duration(params, side, atype)
+            if seconds > cap:
+                _fail(CODE_ANALYSIS, f"{atype}: `{side}` {params[side]!r} is longer than the maximum of "
+                                     f"{lim.analysis_context_max_minutes}m; it has not been shortened",
+                      f"The span you asked for around the event ({params[side]}) is longer than the "
+                      f"{lim.analysis_context_max_minutes}-minute maximum. Please ask for "
+                      f"{lim.analysis_context_max_minutes} minutes or less.")
+        src = out.get("_source")
+        if isinstance(src, list) and tf not in src:
+            _fail(CODE_ANALYSIS, f"{atype}: `_source` must include the time field {tf!r} (it is not added for you)")
+        cf = params.get("context_filter")
+        if cf is None:
+            role = cfg["entity_role"]
+            exact = [p for p in ck.entry.role_paths(role)
+                     if p in ck.view.allowed_fields and OP_TERM in ck.view.allowed_fields[p].ops]
+            if not exact:
+                _fail(CODE_ANALYSIS, f"{atype}: without a `context_filter` the window is scoped to the same "
+                                     f"{role!r}, but that field supports no exact match in the live mapping")
+            if isinstance(src, list) and not set(exact) & set(src):
+                _fail(CODE_ANALYSIS, f"{atype}: `_source` must include the {role!r} field {exact} so each event's "
+                                     f"value can scope its window (it is not added for you)")
+        else:
+            if _has_time_range(cf, tf):
+                _fail(CODE_ANALYSIS, f"{atype}: `context_filter` must not contain a time range; the window around "
+                                     f"each event is added by the system")
+            sub = _Checker(ck.pc, lim, ck.now)
+            params["context_filter"] = sub.clause(cf, "analysis.context_filter", 2)
+            if sub.time_ranges:
+                _fail(CODE_ANALYSIS, f"{atype}: `context_filter` must not contain a time range")
+            ck.applied.extend(f"analysis.context_filter: {a}" for a in sub.applied)
+            ck.warnings.extend(sub.warnings)
+
+    elif atype in (ANALYSIS_INGEST_LAG, ANALYSIS_TEXT_RATIO_SHORTFALL):
+        if "aggs" in out or out["size"] == 0:
+            _fail(CODE_ANALYSIS, f"{atype}: this analysis reads returned rows, so it needs a rows query "
+                                 f"(no aggregations, size 1-{lim.max_hits_size})")
+        src = out.get("_source") or []
+        if atype == ANALYSIS_INGEST_LAG:
+            missing = [f for f in (tf, *cfg["event_time_fields"]) if f not in src]
+            if missing:
+                _fail(CODE_ANALYSIS, f"{atype}: `_source` must include {missing} to measure the lag (they are not "
+                                     f"added for you)")
+        else:
+            text_paths = [p for p in ck.entry.role_paths(cfg["text_role"]) if p in ck.view.allowed_fields]
+            if not text_paths:
+                _fail(CODE_ANALYSIS, f"{atype}: the {cfg['text_role']!r} field is not in the live mapping")
+            if not set(text_paths) & set(src):
+                _fail(CODE_ANALYSIS, f"{atype}: `_source` must include the message field {text_paths} (it is not "
+                                     f"added for you)")
+
+    elif atype == ANALYSIS_RECURRENCE:
+        what = f"the {cfg['entity_role']!r} field"
+        _, spec = _single_terms_agg(out, atype, what)
+        allowed = _role_group_paths(ck, cfg["entity_role"], atype)
+        if spec["terms"].get("field") not in allowed:
+            _fail(CODE_ANALYSIS, f"{atype}: the terms aggregation must group by {what}: {sorted(allowed)}")
+        subs = spec.get("aggs") or {}
+        hist = next(iter(subs.values()), {}).get("date_histogram") if len(subs) == 1 else None
+        if not isinstance(hist, dict):
+            _fail(CODE_ANALYSIS, f"{atype}: the terms aggregation needs exactly one sub-aggregation, a "
+                                 f"`date_histogram` on {tf!r}, to count separate intervals")
+        if hist.get("fixed_interval") != cfg["interval"]:
+            _fail(CODE_ANALYSIS, f"{atype}: the date_histogram interval must be {cfg['interval']!r}, the registry's "
+                                 f"definition of a separate occurrence (got {hist.get('fixed_interval')!r})")
+    return params

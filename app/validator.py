@@ -985,7 +985,7 @@ def _validate_opensearch_entry(entry: dict, query, opensearch_context=None) -> V
     result = guard.check_entry(entry, opensearch_context)
     if not result.ok:
         return ValidationResult(False, f"OpenSearch query rejected ({result.code}): {result.reason}")
-    if result.query != query or (entry.get("index") not in (None, "", result.index)):
+    if result.query != query or (entry.get("index") not in (None, "", result.index))             or result.analysis != entry.get("analysis"):
         return ValidationResult(False, "OpenSearch query was not in canonical form (internal canonicalisation was "
                                         "skipped); refusing to run an unnormalised query.")
     return ValidationResult(True, warnings=list(result.warnings))

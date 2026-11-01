@@ -59,6 +59,21 @@ class Settings(BaseSettings):
         description="Server-side search timeout added to every OpenSearch query "
                     "(an expired timeout yields a partial result that is flagged).")
 
+    # --- OpenSearch multi-step analyses (opensearch_catalog.analysis) ---
+    opensearch_analysis_max_terms: int = Field(
+        default=500, ge=1,
+        description="Terms-aggregation size allowed ONLY for the 'absence' analysis (who stopped "
+                    "reporting), where a truncated entity list would give a wrong answer. Every "
+                    "other query keeps opensearch_max_terms_size.")
+    opensearch_analysis_anchor_limit: int = Field(
+        default=3, ge=1,
+        description="At most this many matching events are expanded by a 'context_window' "
+                    "(before/after) analysis; each costs one extra bounded query.")
+    opensearch_analysis_context_max_minutes: int = Field(
+        default=60, ge=1,
+        description="Longest span, before or after an event, a 'context_window' analysis may "
+                    "ask for. A longer span is rejected, never shortened.")
+
     # --- OpenSearch result redaction (opensearch_catalog.redaction) ---
     opensearch_redact_usernames: bool = Field(default=True)
     opensearch_redact_ip_mode: str = Field(

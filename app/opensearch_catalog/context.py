@@ -45,6 +45,11 @@ class Limits:
     max_query_chars: int = 20000
     max_track_total_hits: int = 1_000_000
     search_timeout: str = "10s"
+    # Multi-step analyses (analysis.py). analysis_max_terms applies ONLY to the
+    # 'absence' set difference; every other terms aggregation keeps max_terms_size.
+    analysis_max_terms: int = 500
+    analysis_anchor_limit: int = 3
+    analysis_context_max_minutes: int = 60
 
     @classmethod
     def from_settings(cls, settings) -> "Limits":
@@ -55,6 +60,9 @@ class Limits:
             max_terms_size=settings.opensearch_max_terms_size,
             max_histogram_buckets=settings.opensearch_max_histogram_buckets,
             search_timeout=settings.opensearch_search_timeout,
+            analysis_max_terms=settings.opensearch_analysis_max_terms,
+            analysis_anchor_limit=settings.opensearch_analysis_anchor_limit,
+            analysis_context_max_minutes=settings.opensearch_analysis_context_max_minutes,
         )
 
     @property
@@ -171,6 +179,13 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "write your own severity value lists or must_not on severity fields.",
         "- Set `measurement_used` to {\"type\": \"raw_metric\", \"name\": \"<short descriptor of what is searched>\", "
         "\"source_metrics\": []} and `reference_used` to the family's reference path.",
+        "- Optional `intent`: one of rows, count, top_n, trend, distinct (descriptive only), or an analysis name below.",
+        "- Questions ONE query cannot answer (who STOPPED reporting, what happened BEFORE AND AFTER an event, how long "
+        "after creation events were INGESTED, messages with FEWER n/m available than expected, which entities keep "
+        "RECURRING) use an `analysis` object, ONLY where the pattern lists it under `analyses` below: write the ordinary "
+        "query exactly as described there plus `\"analysis\": {\"type\": \"<name>\", ...parameters}`. Python runs the "
+        "follow-up queries itself. Parameters outside the stated limits are rejected, never adjusted. If the pattern "
+        "does not list the analysis, return \"unmapped\" instead of approximating it.",
     ]
     for pid in sorted(ctx.patterns):
         pc = ctx.patterns[pid]
@@ -216,8 +231,68 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
                 if f.verification == "provisional":
                     L.append(f"      NOTE: the vocabulary of {f.path} is PROVISIONAL (unverified); if you rely on it, "
                              f"say so in the explanation.")
+        for line in _analysis_lines(e, v, lim):
+            L.append(line)
         if e.known_caveats:
             L.append("  caveats an answer must respect: " + ", ".join(e.known_caveats))
         for w in v.warnings:
             L.append(f"  warning: {w}")
     return "\n".join(L)
+
+
+def _dur(seconds: int) -> str:
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size and seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _effective(view: PatternFieldView, path: str, op: str) -> str | None:
+    info = view.allowed_fields.get(path)
+    return info.ops.get(op) if info is not None else None
+
+
+def _analysis_lines(e: PatternEntry, v: PatternFieldView, lim: Limits) -> list[str]:
+    """How to ask for each analysis this pattern supports, with the live effective
+    field paths, the registry's parameters and the limits. Nothing here is a value
+    the model must invent: every name comes from the registry and the catalog."""
+    if not e.analyses:
+        return ["  analyses: none (questions about missing entities, before/after context, ingest lag, n/m "
+                "shortfalls or recurrence for this family are \"unmapped\")"]
+    out = ["  analyses (add `analysis`; parameters not listed are rejected):"]
+    for atype in sorted(e.analyses):
+        cfg = e.analyses[atype]
+        ver = "verified" if cfg.get("verified") else "UNVERIFIED placeholder -- say so in the explanation"
+        if atype == "absence":
+            group = [v.group_by_fields[p] for p in e.role_paths(cfg["entity_role"]) if p in v.group_by_fields]
+            default = cfg["heartbeat_interval_seconds"] * cfg["dead_after_intervals"]
+            out.append(f"    - absence: size 0 + ONE terms aggregation (no sub-aggregations) on {'|'.join(group) or '(unavailable)'} "
+                       f"over the baseline window, filtered to the reporting documents; terms size up to "
+                       f"{lim.analysis_max_terms} (default {lim.analysis_max_terms}). analysis = {{\"type\": \"absence\", "
+                       f"\"recent_window\": optional, default {_dur(default)} from the registry heartbeat settings, at least "
+                       f"{cfg['heartbeat_interval_seconds']}s and shorter than the window}}. ({ver})")
+        elif atype == "context_window":
+            exact = [_effective(v, p, "term") for p in e.role_paths(cfg["entity_role"])]
+            out.append(f"    - context_window: a rows query that finds the event(s), size 1-{lim.analysis_anchor_limit} "
+                       f"(default {lim.analysis_anchor_limit}). analysis = {{\"type\": \"context_window\", \"before\": "
+                       f"default {cfg['default_before']}, \"after\": default {cfg['default_after']} (each at most "
+                       f"{lim.analysis_context_max_minutes}m), \"context_filter\": optional ONE clause (no time range) that "
+                       f"selects the surrounding rows; without it they are scoped to the event's own "
+                       f"{'|'.join(x for x in exact if x) or cfg['entity_role']}}}. ({ver})")
+        elif atype == "ingest_lag":
+            out.append(f"    - ingest_lag: a rows query (size 1-{lim.max_hits_size}); `_source`, if given, must include "
+                       f"{e.time_field} and {', '.join(cfg['event_time_fields'])}. analysis = {{\"type\": \"ingest_lag\"}}. "
+                       f"The lag is measured on the returned rows only. ({ver})")
+        elif atype == "text_ratio_shortfall":
+            text = [p for p in e.role_paths(cfg["text_role"])]
+            out.append(f"    - text_ratio_shortfall: a rows query (size 1-{lim.max_hits_size}) with a match_phrase on "
+                       f"{'|'.join(text)} for the message; `_source`, if given, must include it. analysis = "
+                       f"{{\"type\": \"text_ratio_shortfall\"}}; Python keeps rows whose 'n/m' count has n "
+                       f"{ {'lt': '<', 'gt': '>', 'ne': '!='}[cfg['compare']] } m. ({ver})")
+        elif atype == "recurrence":
+            group = [v.group_by_fields[p] for p in e.role_paths(cfg["entity_role"]) if p in v.group_by_fields]
+            out.append(f"    - recurrence: size 0 + ONE terms aggregation on {'|'.join(group) or '(unavailable)'} with ONE "
+                       f"sub-aggregation date_histogram on {e.time_field} with fixed_interval exactly "
+                       f"\"{cfg['interval']}\". analysis = {{\"type\": \"recurrence\"}}; results rank entities by how "
+                       f"many separate intervals they appear in. ({ver})")
+    return out

@@ -107,6 +107,23 @@
             "verification": "observed"
           }
         }
+      },
+      "analyses": {
+        "absence": {
+          "entity_role": "entity_switch",
+          "normalise_lowercase": true,
+          "normalise_strip_suffix_regex": "b\\d+$",
+          "heartbeat_interval_seconds": 60,
+          "dead_after_intervals": 3,
+          "verified": false,
+          "source": "PLACEHOLDER. About one heartbeat per switch per minute was seen in one sampled day (fabric-health.md); 'dead after 3 missed heartbeats' is an assumption. Heartbeat documents name the switch with an ASIC suffix (b0, b1), so the suffix is stripped before comparing."
+        },
+        "recurrence": {
+          "entity_role": "entity_location",
+          "interval": "1h",
+          "verified": false,
+          "source": "PLACEHOLDER. 'Recurring' is undefined by the source team; here it means 'seen in several separate one-hour intervals'. Faults are re-emitted hourly, so the interval choice changes the answer."
+        }
       }
     },
     {
@@ -206,6 +223,22 @@
             "source": "info/error/critical (and notice/warning) observed in sampled data; the remaining names (debug, warn, err, crit, alert, emerg) come from the syslog severity names (RFC 5424) and are not observed here.",
             "verification": "documented"
           }
+        }
+      },
+      "analyses": {
+        "context_window": {
+          "entity_role": "entity_host",
+          "default_before": "5m",
+          "default_after": "5m",
+          "verified": false,
+          "source": "Five minutes either side is a documented default, not an observed value; the person may ask for another span up to the configured maximum."
+        },
+        "text_ratio_shortfall": {
+          "text_role": "text",
+          "regex": "(?i)(\\d+)\\s*/\\s*(\\d+)\\s+switches\\s+available",
+          "compare": "lt",
+          "verified": false,
+          "source": "PLACEHOLDER. The real wording of the fabric-manager 'n/m switches available' message has not been confirmed; check it on the real cluster."
         }
       }
     },
@@ -323,6 +356,15 @@
             "source": "Only Informational observed (120,645 documents). HPE's iLO log-services documentation names Caution and Critical (as severities of events that can be marked repaired); Warning is NOT documented there and is an assumption. The full vocabulary is unverified.",
             "verification": "provisional"
           }
+        }
+      },
+      "analyses": {
+        "ingest_lag": {
+          "event_time_fields": [
+            "Created"
+          ],
+          "verified": false,
+          "source": "Created is the event's creation time at the BMC (display-only, never filtered on); whether it is reliable enough to measure lag is unconfirmed."
         }
       }
     }

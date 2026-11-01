@@ -127,6 +127,9 @@ class PatternEntry:
     sensitivity: dict = field(default_factory=dict)
     date_rotation: dict = field(default_factory=dict)
     severity_semantics: SeveritySemantics | None = None
+    # Multi-step analyses this family supports (see analysis.py), keyed by analysis
+    # type, with their validated, registry-owned parameters. Empty = none.
+    analyses: dict[str, dict] = field(default_factory=dict)
 
     @property
     def max_window_seconds(self) -> int:
@@ -134,6 +137,9 @@ class PatternEntry:
 
     def role_paths(self, role: str) -> tuple[str, ...]:
         return self.roles.get(role, ())
+
+    def analysis(self, analysis_type: str) -> dict | None:
+        return self.analyses.get(analysis_type)
 
 
 @dataclass(frozen=True)
@@ -272,6 +278,130 @@ def _build_severity(raw, where: str, roles: dict[str, tuple[str, ...]]) -> Sever
     return SeveritySemantics(mode=mode, combine=combine, fields=tuple(out))
 
 
+# ---- analyses (multi-step questions; algorithms in analysis.py, parameters here) ------
+
+ANALYSIS_ABSENCE = "absence"
+ANALYSIS_CONTEXT_WINDOW = "context_window"
+ANALYSIS_INGEST_LAG = "ingest_lag"
+ANALYSIS_TEXT_RATIO_SHORTFALL = "text_ratio_shortfall"
+ANALYSIS_RECURRENCE = "recurrence"
+ANALYSIS_TYPES = frozenset({ANALYSIS_ABSENCE, ANALYSIS_CONTEXT_WINDOW, ANALYSIS_INGEST_LAG,
+                            ANALYSIS_TEXT_RATIO_SHORTFALL, ANALYSIS_RECURRENCE})
+
+# Short duration grammar for analysis parameters ('90s', '5m', '1h', '1d').
+_SHORT_DURATION_RE = re.compile(r"^(?P<n>[1-9][0-9]*)(?P<unit>[smhd])$")
+_SHORT_DURATION_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_SHORTFALL_COMPARES = frozenset({"lt", "gt", "ne"})
+
+# key -> (required, kind). Every analysis carries `verified` (a parameter is a
+# placeholder until someone confirms it on the real cluster) and an optional
+# `source` saying where the value came from.
+_ANALYSIS_SPECS: dict[str, dict[str, tuple[bool, str]]] = {
+    ANALYSIS_ABSENCE: {
+        "entity_role": (True, "role_groupable"),
+        "heartbeat_interval_seconds": (True, "pos_int"),
+        "dead_after_intervals": (True, "pos_int"),
+        "normalise_lowercase": (False, "bool"),
+        "normalise_strip_suffix_regex": (False, "regex"),
+    },
+    ANALYSIS_CONTEXT_WINDOW: {
+        "entity_role": (True, "role_projected"),
+        "default_before": (True, "short_duration"),
+        "default_after": (True, "short_duration"),
+    },
+    ANALYSIS_INGEST_LAG: {
+        "event_time_fields": (True, "display_time_projected"),
+    },
+    ANALYSIS_TEXT_RATIO_SHORTFALL: {
+        "text_role": (True, "role_projected"),
+        "regex": (True, "regex_two_groups"),
+        "compare": (True, "compare"),
+    },
+    ANALYSIS_RECURRENCE: {
+        "entity_role": (True, "role_groupable"),
+        "interval": (True, "short_duration"),
+    },
+}
+
+
+def parse_short_duration_seconds(value) -> int:
+    """'90s' / '5m' / '1h' / '1d' -> seconds. Raises ValueError otherwise."""
+    m = _SHORT_DURATION_RE.match(value) if isinstance(value, str) else None
+    if not m:
+        raise ValueError(f"{value!r} is not a duration like '90s', '5m', '1h' or '1d'")
+    return int(m.group("n")) * _SHORT_DURATION_SECONDS[m.group("unit")]
+
+
+def _build_analyses(raw, where: str, roles: dict[str, tuple[str, ...]], groupable: set[str],
+                    projection: set[str], display_time: set[str]) -> dict[str, dict]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        _fail(where, "'analyses' must be an object keyed by analysis type")
+    out: dict[str, dict] = {}
+    for atype, body in raw.items():
+        w = f"{where}: analyses.{atype}"
+        if atype not in _ANALYSIS_SPECS:
+            _fail(where, f"unknown analysis type {atype!r} (known: {sorted(ANALYSIS_TYPES)})")
+        if not isinstance(body, dict):
+            _fail(w, "must be an object")
+        spec = _ANALYSIS_SPECS[atype]
+        extra = set(body) - set(spec) - {"verified", "source"}
+        if extra:
+            _fail(w, f"unknown parameter(s) {sorted(extra)}")
+        if not isinstance(body.get("verified"), bool):
+            _fail(w, "'verified' is required and must be true or false (false until confirmed on the real cluster)")
+        if "source" in body and (not isinstance(body["source"], str) or not body["source"]):
+            _fail(w, "'source' must be a non-empty string when present")
+        for key, (required, kind) in spec.items():
+            if key not in body:
+                if required:
+                    _fail(w, f"'{key}' is required")
+                continue
+            v = body[key]
+            if kind in ("role_groupable", "role_projected"):
+                if not isinstance(v, str) or v not in roles:
+                    _fail(w, f"'{key}' must name a role of this family (roles: {sorted(roles)})")
+                paths = set(roles[v])
+                if kind == "role_groupable" and not paths <= groupable:
+                    _fail(w, f"'{key}' role {v!r} binds fields that are not groupable: {sorted(paths - groupable)}")
+                if kind == "role_projected" and not paths <= projection:
+                    _fail(w, f"'{key}' role {v!r} binds fields that are not in output_projection "
+                             f"(rows must carry them): {sorted(paths - projection)}")
+            elif kind == "pos_int":
+                if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                    _fail(w, f"'{key}' must be a positive integer")
+            elif kind == "bool":
+                if not isinstance(v, bool):
+                    _fail(w, f"'{key}' must be true or false")
+            elif kind in ("regex", "regex_two_groups"):
+                if not isinstance(v, str) or not v:
+                    _fail(w, f"'{key}' must be a non-empty regular expression")
+                try:
+                    compiled = re.compile(v)
+                except re.error as e:
+                    _fail(w, f"'{key}' does not compile: {e}")
+                if kind == "regex_two_groups" and compiled.groups != 2:
+                    _fail(w, f"'{key}' must have exactly two capture groups (the two numbers to compare)")
+            elif kind == "short_duration":
+                try:
+                    parse_short_duration_seconds(v)
+                except ValueError as e:
+                    _fail(w, f"'{key}': {e}")
+            elif kind == "compare":
+                if v not in _SHORTFALL_COMPARES:
+                    _fail(w, f"'{key}' must be one of {sorted(_SHORTFALL_COMPARES)}")
+            elif kind == "display_time_projected":
+                if not isinstance(v, list) or not v or not all(isinstance(x, str) and x for x in v):
+                    _fail(w, f"'{key}' must be a non-empty list of field paths")
+                bad = [x for x in v if x not in display_time or x not in projection]
+                if bad:
+                    _fail(w, f"'{key}' fields must be display-only time fields that rows return "
+                             f"(display_time_fields and output_projection): {bad}")
+        out[atype] = dict(body)
+    return out
+
+
 def _build_entry(raw: dict, index: int, skills_root: Path | None) -> PatternEntry:
     if not isinstance(raw, dict):
         _fail(f"patterns[{index}]", "must be an object")
@@ -366,6 +496,8 @@ def _build_entry(raw: dict, index: int, skills_root: Path | None) -> PatternEntr
         sensitivity=dict(sensitivity),
         date_rotation=dict(date_rotation),
         severity_semantics=_build_severity(raw.get("severity_semantics"), where, roles),
+        analyses=_build_analyses(raw.get("analyses"), where, roles, set(groupable) - set(never_group),
+                                 set(projection), set(display_time)),
     )
 
 

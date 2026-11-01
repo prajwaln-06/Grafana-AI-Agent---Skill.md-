@@ -235,6 +235,9 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
         return _error_block("not_executed", f"Query rejected before execution: {problem}.", base_url,
                             resolved_time_range=window)
 
+    if entry.get("analysis") is not None:
+        return _execute_opensearch_analysis(entry, pattern, dsl_body, window, settings, policy, limits, base_url)
+
     outcome = opensearch_client.search(
         base_url, pattern.index_pattern, dsl_body,
         timeout=max(settings.opensearch_timeout_seconds, limits.search_timeout_seconds),
@@ -276,6 +279,81 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
     # total in metadata.count. Only "matched nothing" is an empty result.
     if block["execution_status"] == "empty_result" and ((normalized.metadata.get("count") or {}).get("value") or 0) > 0:
         block["execution_status"] = "success"
+    return block
+
+
+def _execute_opensearch_analysis(entry: dict, pattern, dsl_body: dict, window: dict | None, settings: Settings,
+                                 policy, limits, base_url: str) -> dict:
+    """A multi-step analysis (app/opensearch_catalog/analysis.py). The entry is first
+    re-validated by the guard against the live field catalog (defence in depth: the
+    analysis parameters must be exactly the canonical ones the validator accepted).
+    Every query -- the model's and each follow-up Python builds -- then goes through
+    `runner`, which checks it with the guard again and sends it through
+    opensearch_client, so this module stays the only caller of OpenSearch. The
+    combined answer is normalised through results.py like any other result."""
+    from app.opensearch_catalog import analysis as os_analysis, guard, runtime
+    from app.opensearch_catalog.context import OpenSearchContext, PatternContext
+    from app.opensearch_catalog.field_catalog import build_field_view
+    from app.opensearch_catalog.redaction import redact_value, safe_diagnostic
+    from app.opensearch_catalog.results import all_shards_failed, normalize_search_response
+
+    atype = (entry.get("analysis") or {}).get("type") if isinstance(entry.get("analysis"), dict) else None
+    view = build_field_view(pattern, runtime.get_field_cache(settings).get(pattern))
+    pc = PatternContext(entry=pattern, view=view)
+    if not pc.usable:
+        return _error_block("not_executed", "Live field discovery is unavailable for this index family, so the "
+                                            "analysis was not run.", base_url, resolved_time_range=window)
+    ctx = OpenSearchContext(patterns={pattern.pattern_id: pc}, limits=limits)
+    check = guard.check_entry({**entry, "pattern_id": pattern.pattern_id}, ctx)
+    if not check.ok or check.query != dsl_body or check.analysis != entry.get("analysis"):
+        why = f"({check.code}) {check.reason}" if not check.ok else "the analysis entry was not in canonical form"
+        return _error_block("not_executed", f"Analysis rejected before execution: {safe_diagnostic(why, policy)}",
+                            base_url, resolved_time_range=window)
+
+    purposes: list[str] = []
+    timeout = max(settings.opensearch_timeout_seconds, limits.search_timeout_seconds)
+
+    def runner(dsl: dict, purpose: str) -> dict:
+        follow = {"status": "ok", "data_source": "opensearch", "pattern_id": pattern.pattern_id, "query": dsl}
+        checked = guard.check_entry(follow, ctx, followup_of=atype)
+        if not checked.ok:
+            raise os_analysis.AnalysisError(
+                "not_executed", f"{purpose}: query rejected before execution ({checked.code}): "
+                                f"{safe_diagnostic(checked.reason, policy)}")
+        purposes.append(purpose)
+        outcome = opensearch_client.search(base_url, pattern.index_pattern, checked.query, timeout=timeout,
+                                           auth=settings.opensearch_auth)
+        if outcome.status not in ("success", "empty_result"):
+            raise os_analysis.AnalysisError(outcome.status, f"{purpose}: {safe_diagnostic(outcome.error, policy)}")
+        raw = outcome.raw_body or {}
+        if all_shards_failed(raw):
+            raise os_analysis.AnalysisError("endpoint_error", f"{purpose}: every shard failed; no results are available")
+        return raw
+
+    try:
+        res = os_analysis.run_analysis(entry, pattern, view, limits, runner, window or {})
+    except os_analysis.AnalysisError as exc:
+        block = _error_block(exc.status, exc.message, base_url, resolved_time_range=window)
+        block["analysis"] = {"type": atype, "queries_executed": len(purposes), "query_purposes": purposes,
+                             "completed": False}
+        return block
+
+    normalized = normalize_search_response(
+        res.raw, entry=pattern, query=res.query, policy=policy,
+        max_series=settings.max_series_per_result, max_hits=settings.max_hits_per_result,
+    )
+    if res.row_annotations is not None and normalized.result_type == "hits":
+        for hit, note in zip(normalized.hits, res.row_annotations):
+            hit.analysis = note
+    normalized.metadata["query_window"] = window
+    block = _success_block(normalized, base_url, resolved_time_range=window)
+    # An analysis that had data to work on and found nothing to report ("no switch is
+    # missing", "no shortfall") has answered the question: that is a success.
+    if block["execution_status"] == "empty_result" and res.has_input:
+        block["execution_status"] = "success"
+    summary = {**res.summary, "queries_executed": len(purposes), "query_purposes": purposes,
+               "warnings": res.warnings, "completed": True}
+    block["analysis"] = redact_value(summary, policy)
     return block
 
 

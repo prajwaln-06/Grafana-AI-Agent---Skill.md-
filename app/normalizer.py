@@ -115,6 +115,10 @@ class Hit:
     # legacy rows so their serialised shape is unchanged.
     fields: dict[str, Any] | None = None
     severity_assessment: dict | None = None
+    # Per-row annotation added by a multi-step OpenSearch analysis
+    # (app/opensearch_catalog/analysis.py), e.g. {"position": "before"} or
+    # {"lag_seconds": 300.0}. None for every other row, so their shape is unchanged.
+    analysis: dict | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -128,6 +132,8 @@ class Hit:
             d["fields"] = self.fields
         if self.severity_assessment is not None:
             d["severity_assessment"] = self.severity_assessment
+        if self.analysis is not None:
+            d["analysis"] = self.analysis
         return d
 
 

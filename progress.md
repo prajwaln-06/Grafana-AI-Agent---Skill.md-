@@ -114,6 +114,99 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
   referenced by the friend's tests. **FLAG F-3:** if the real cluster uses
   HTTPS with a private certificate, TLS options will be needed.
 
+### Stage 2 — the five analyses
+
+- **D-15 Two new optional contract keys, nothing else changed.** `intent` (one
+  of `rows`, `count`, `top_n`, `trend`, `distinct`, or an analysis name) and
+  `analysis` (`{"type": "<analysis>", ...parameters}`). `pattern_id`,
+  `raw_metric`, `query` and "never write an index" keep their meaning. A simple
+  question carries neither key and is checked exactly as before (a test proves
+  it). A simple `intent` is descriptive only; it changes no check.
+- **D-16 Two new rejection codes in the friend's style:** `intent_invalid` (an
+  unknown intent value) and `analysis_invalid` (everything about the analysis
+  object). They are produced inside her guard, so the validator, the
+  canonicalisation hook and the retry path treat them like her other codes.
+- **D-17 Reject, never repair, for analysis parameters too.** Examples: a
+  context window of `before: "9h"` is rejected with "longer than the maximum of
+  60m; it has not been shortened" (the reference clamped it to 60m); a
+  `recent_window` of `30s` for heartbeats is rejected because it is shorter
+  than one heartbeat interval; a missing `_source` field needed to measure
+  ingest lag is rejected, never added. Only documented defaults are filled, and
+  only when the key is absent, and each is recorded in `applied`:
+  `recent_window` (= heartbeat interval × missed beats from the registry, today
+  3m), `before`/`after` (registry default 5m), the anchor query size (3), and
+  the absence terms size (500).
+- **D-18 Registry `analyses` block per family, validated at load.** Unknown
+  analysis types or parameters, roles that do not exist, a role that is not
+  groupable (for set differences and recurrence) or not returned in rows, a
+  regex that does not compile or does not have exactly two capture groups, a
+  bad duration, and a missing `verified` flag all stop the registry from
+  loading (12 tests, one per mistake). Every analysis is `"verified": false`
+  and carries a `source` note saying what is a placeholder.
+  Fabric: `absence` (switch, ASIC suffix `b<digits>` ignored, lower-cased,
+  heartbeat 60 s × 3) and `recurrence` (location, 1-hour intervals).
+  Controller: `context_window` (same host, ±5 minutes) and
+  `text_ratio_shortfall` (case-insensitive `n / m switches available`, keep
+  n < m). iLO: `ingest_lag` (`@timestamp` minus `Created`).
+  **FLAG F-4:** heartbeat 60 s × 3, the `n/m` wording, the 1-hour meaning of
+  "recurring" and whether `Created` is trustworthy are placeholders. Only the
+  real cluster can confirm them.
+- **D-19 The model writes the ordinary query; Python builds every follow-up
+  from it, and the friend's guard checks each follow-up again before it is
+  sent.** The executor builds one `runner` that (1) re-validates the query
+  with `guard.check_entry` against the live field catalog and (2) sends it
+  through the friend's `opensearch_client`. So the executor is still the only
+  code that talks to OpenSearch, and a follow-up can never use a field, size or
+  window the guard would refuse. Before any query, the executor also
+  re-validates the whole analysis entry and refuses it if it is not exactly the
+  canonical form the validator accepted. Only plain scalar values (string,
+  number, true/false) are copied from a returned document into a follow-up; a
+  nested object is never copied (tested).
+- **D-20 The larger terms size (500) applies only to `absence`.** A truncated
+  entity list would make "who is missing" wrong. Every other query keeps the
+  friend's 50. If even 500 is not enough, OpenSearch reports the cut-off
+  (`sum_other_doc_count`) and the answer says `complete: false` with a warning.
+- **D-21 New limits next to the friend's `Limits`, all env-driven:**
+  `OPENSEARCH_ANALYSIS_MAX_TERMS` (500), `OPENSEARCH_ANALYSIS_ANCHOR_LIMIT` (3
+  events expanded per before/after question),
+  `OPENSEARCH_ANALYSIS_CONTEXT_MAX_MINUTES` (60).
+- **D-22 Analysis output goes through the friend's `results.py`.** Each
+  analysis produces a `_search`-shaped body, so redaction (a user name in a
+  context row is masked), severity assessment, count exactness (`eq`/`gte`),
+  partial-shard and timeout flags and the observed range apply to analysis
+  rows exactly as to ordinary rows. Added on top (additive only): an
+  `execution.analysis` summary block (type, counts, parameters, whether the
+  parameters are verified, warnings, how many queries ran and why), and a
+  per-row `analysis` annotation on hits (`{"position": "before"}`,
+  `{"lag_seconds": 300}`, `{"available": 30, "expected": 32}`). A row without an
+  annotation has exactly the old shape.
+- **D-23 "Nothing to report" is a success for an analysis that had data.**
+  Example: every switch that reported in the last day also reported in the last
+  3 minutes, so the answer is "no switch is missing". That is
+  `execution_status: "success"` with an empty bucket list and
+  `analysis.missing_count: 0`, not `empty_result` (which would read "no data
+  for this range"). When the analysis had no input at all (no event found, no
+  rows), it stays `empty_result`.
+- **D-24 `recurrence` uses exactly the registry interval.** A
+  `date_histogram` with another interval is rejected, so "recurring" has one
+  definition the owner can change in one place (see F-4).
+- **D-25 The Generator is told about analyses only for the selected family**,
+  with the live exact-match field paths, the defaults and the limits, and it is
+  told to answer `unmapped` when the family does not list the analysis (no
+  approximation). Unverified parameters are labelled "UNVERIFIED placeholder --
+  say so in the explanation".
+- **D-26 Tests.** `tests/os_fixtures.py` adds a fake cluster that replaces only
+  the HTTP session, so the friend's real client code runs, serving her
+  synthetic fixture mappings. `tests/test_opensearch_analysis.py` has 57 tests
+  (registry validation, guard rules, idempotency, all five analyses end to end,
+  follow-up re-checks, failures, partial results). `tests/test_opensearch_mentor_questions.py`
+  runs the mentor's 35 questions through the whole pipeline with the friend's
+  real skill files, plus checks that a `must_not` on severity, a wrong severity
+  case and an over-limit analysis parameter are rejected, not fixed. Two
+  questions stay `unmapped` because the friend's skill files say so: "unusually
+  frequent logins" (no baseline is defined) and "failed logins" (the wording is
+  not confirmed).
+
 ---
 
 ## 3. Open flags (summary)
@@ -123,3 +216,4 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
 | F-1 | Label sets are cached for 5 minutes (D-04). |
 | F-2 | With `API_KEY` unset the service is open (D-09). |
 | F-3 | No TLS options for OpenSearch yet (D-14). |
+| F-4 | Analysis parameters are placeholders: heartbeat 60 s × 3, the `n/m switches available` wording, "recurring" = 1-hour intervals, `Created` as the iLO event time (D-18, D-24). |
