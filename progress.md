@@ -260,9 +260,67 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
   to the intended rows and writes these shapes. Tests fake the Router and
   Generator. See the smoke test in Stage 4.
 
+### Stage 4 — docs and tools
+
+- **D-31 One live tool, not two.** The friend's
+  `scripts/smoke_test_opensearch.py` stays the live check. The reference's
+  separate `check_opensearch_registry.py` was folded into it as
+  `--check-skills` (offline, no network: registry loads, every family has a
+  routing row with data source `opensearch`, its domain file states its
+  `pattern_id`, documents exactly the analyses the registry configures, and
+  has valid JSON examples that name no index; then it lists every registry fact
+  that is still unverified). Two live additions: `--examples` checks every
+  skill-file example against the **real** mapping (catches a `.keyword` that
+  only exists in the synthetic fixtures), and `--analyses` runs each analysis
+  example once and prints only counts and booleans (never a name or value; a
+  test plants a secret name and proves it is not printed). Those counts are
+  how the placeholder parameters get confirmed (F-4).
+- **D-32 `docs/SMOKE_TEST.md` and `docs/NEXT_PHASE.md` were taken from the
+  reference and rewritten for the merged code.** The smoke test uses the
+  friend's tool and her result fields (`metadata.count.exact`,
+  `guard_notes.applied`, `severity_vocabulary_provisional`, ...). NEXT_PHASE
+  keeps all 63 open questions word for word, each with an empty answer slot;
+  its "hooks" and "where answers land" sections now point at the merged code.
+- **D-33 `docs/SKILL_AUTHOR_CONTRACT.md` describes the merged contract**
+  (`pattern_id`, `raw_metric`, reject-never-repair, the two optional keys and a
+  table of the five analyses with their limits). Its three JSON examples are
+  run through the guard by `tests/test_skill_examples.py`.
+- **D-34 `currentstatus.md` was written from scratch** as a plain-language
+  tour of the whole OpenSearch part, including the friend's severity,
+  redaction and results modules. Every JSON example in it is real output of
+  the code (fixture mappings, fake network), not invented.
+- **D-35 `HANDOFF.md` and `README.md` were corrected, not rewritten.** §7 of
+  HANDOFF ("OpenSearch questions currently come back as `unmapped`") was
+  replaced with what the frontend now receives (OpenSearch entry fields,
+  `metadata`, `severity_assessment`, and the new optional `execution.analysis`
+  and per-row `analysis`). Also updated: the API-key/CORS paragraph, the
+  `unmapped` row of the status table, "not live yet" notes on buckets/hits,
+  the test command and environment note, the compound-question live test, and
+  the file manifest. **FLAG F-5:** tell the frontend about the new optional
+  fields; no existing field changed meaning.
+
 ---
 
-## 3. Open flags (summary)
+## 3. What could NOT be verified (stated plainly)
+
+- Nothing touched the real OpenSearch, Grafana or Gemini. Every test fakes the
+  two AI calls and the network (the real client code still runs).
+- The field mappings used by every OpenSearch test are **synthetic**
+  (`tests/fixtures/opensearch/README.md`); real `.keyword` sub-fields, types
+  and daily drift are unknown until `--save-mappings` is run on the cluster.
+- The analysis parameters (F-4), severity vocabularies other than fabric's
+  observed `HEALTHY`/`CRITICAL`, and the daily index rotation are unconfirmed.
+- Whether the real Router sends the new phrasings to the right family, and
+  whether the real Generator writes the `analysis` shapes, is unproven; the
+  regression cases 11e–11k in `skills/evals/regression-cases.md` are the
+  manual check.
+- The Linux test count. On this Windows laptop one test
+  (`test_reviews.py::test_round_trip_is_deterministic_and_sorted`) fails
+  because it checks a Linux file permission; Stage 5 records the exact count.
+
+---
+
+## 4. Open flags (summary)
 
 | Flag | Decision to confirm |
 |---|---|
@@ -270,3 +328,5 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
 | F-2 | With `API_KEY` unset the service is open (D-09). |
 | F-3 | No TLS options for OpenSearch yet (D-14). |
 | F-4 | Analysis parameters are placeholders: heartbeat 60 s × 3, the `n/m switches available` wording, "recurring" = 1-hour intervals, `Created` as the iLO event time (D-18, D-24). |
+| F-5 | The frontend should learn the new optional fields `intent`, `analysis`, `execution.analysis` and a row's `analysis` note (D-22, D-35). |
+| F-6 | One test fails on Windows only (Linux file permissions); confirm the full suite on Linux (D-03). |

@@ -19,6 +19,17 @@ OPENSEARCH_AUTH_USERNAME / OPENSEARCH_AUTH_PASSWORD):
     python3 scripts/smoke_test_opensearch.py --queries            # + one bounded count query per family
     python3 scripts/smoke_test_opensearch.py --rows [--rows-size N]  # + a few rows per family: are the projected fields returned?
     python3 scripts/smoke_test_opensearch.py --save-mappings DIR  # write mapping snapshots (field names/types only)
+    python3 scripts/smoke_test_opensearch.py --check-skills       # OFFLINE: registry <-> skill files, no network
+    python3 scripts/smoke_test_opensearch.py --examples           # + every skill-file example vs the LIVE mapping
+    python3 scripts/smoke_test_opensearch.py --analyses           # + run each analysis example once (counts only)
+
+--check-skills needs no cluster: it checks the registry against the skill package (routing row,
+domain file, pattern_id, the analyses each file documents, valid JSON examples) and lists the
+registry facts that are still unverified. --examples checks each skill-file JSON example against the
+REAL mapping (a `.keyword` sub-field that only exists in the synthetic fixtures shows up here).
+--analyses executes each analysis example once and prints only counts and booleans (for example how
+many messages matched the 'n/m switches available' pattern, or how many switches reported in the
+last 3 minutes), which is how the placeholder analysis parameters get confirmed.
 
 --rows runs the SAME guard -> executor path the app uses, with the family's registered
 output projection, a 24h window and at most ROWS_HARD_MAX (10) rows, newest first. It reports ONLY
@@ -190,6 +201,150 @@ def save_mapping(entry, cache_fetch, directory: Path) -> Path | None:
     return out
 
 
+# ---- offline: registry <-> skill package consistency (folded in from the reference's checker) -------------------
+
+_JSON_BLOCK = re.compile(r"```json\s*\n(.*?)```", re.S)
+
+
+def _analysis_types():
+    from app.opensearch_catalog.registry import ANALYSIS_TYPES
+    return sorted(ANALYSIS_TYPES)
+
+
+def check_skill_files(settings) -> list[str]:
+    """OFFLINE (no network). Problems with the registry or with how the skill package matches it:
+    the registry loads under the server's strict rules (which also proves each domain file exists);
+    SKILL.md has an `opensearch` routing row per enabled family; each domain file names its
+    pattern_id; it documents exactly the analyses the registry configures for it (an example with
+    `"type": "<analysis>"`); and every JSON example is real JSON that names no index and no other
+    family. Returns a list of plain-language problems (empty = consistent)."""
+    from app.opensearch_catalog.registry import RegistryError, load_registry
+    from app.skill_index import SkillIndex, SkillIndexError
+    skills_root = Path(settings.skills_root)
+    try:
+        registry = load_registry(runtime.registry_path(settings), skills_root=skills_root)
+    except RegistryError as exc:
+        return [f"registry: {exc}"]
+    try:
+        index = SkillIndex.load(skills_root, settings.catalog_path)
+    except SkillIndexError as exc:
+        return [f"skill package does not load: {exc}"]
+    rows = {r.reference_path: r for r in index.routing_rows}
+    problems: list[str] = []
+    for p in registry.enabled_patterns:
+        row = rows.get(p.domain_reference)
+        if row is None:
+            problems.append(f"{p.pattern_id}: SKILL.md section 4 has no routing row for {p.domain_reference}")
+        elif tuple(d.lower() for d in row.data_sources) != ("opensearch",):
+            problems.append(f"{p.pattern_id}: its routing row says data source {row.data_sources}, expected opensearch")
+        text = (skills_root / p.domain_reference).read_text(encoding="utf-8")
+        if f"`pattern_id: {p.pattern_id}`" not in text:
+            problems.append(f"{p.pattern_id}: {p.domain_reference} never states `pattern_id: {p.pattern_id}`")
+        for name in _analysis_types():
+            documented = f'"type": "{name}"' in text
+            if documented and name not in p.analyses:
+                problems.append(f"{p.pattern_id}: {p.domain_reference} shows the {name!r} analysis, which the registry "
+                                f"does not configure for this family")
+            if name in p.analyses and not documented:
+                problems.append(f"{p.pattern_id}: the registry configures the {name!r} analysis but "
+                                f"{p.domain_reference} has no example of it")
+        for i, block in enumerate(_JSON_BLOCK.findall(text), 1):
+            try:
+                obj = json.loads(block)
+            except ValueError as exc:
+                problems.append(f"{p.pattern_id}: JSON example {i} in {p.domain_reference} is not valid JSON ({exc})")
+                continue
+            if isinstance(obj, dict) and obj.get("pattern_id", p.pattern_id) != p.pattern_id:
+                problems.append(f"{p.pattern_id}: JSON example {i} names another family ({obj['pattern_id']!r})")
+            if isinstance(obj, dict) and ("index" in obj or "index" in (obj.get("query") or {})):
+                problems.append(f"{p.pattern_id}: JSON example {i} writes an index; examples must use pattern_id")
+    return problems
+
+
+def unverified_facts(registry) -> list[str]:
+    """Registry facts that are still assumptions, in plain words: these are what the live checks
+    (and a person comparing with OpenSearch Dashboards) must confirm."""
+    out = []
+    for p in registry.enabled_patterns:
+        if not (p.date_rotation or {}).get("verified", True):
+            out.append(f"{p.pattern_id}: daily index rotation {p.date_rotation.get('suffix')!r}")
+        sem = p.severity_semantics
+        for f in (sem.fields if sem else ()):
+            if f.verification != "observed":
+                out.append(f"{p.pattern_id}: severity vocabulary of {f.path} is {f.verification}")
+        for name, cfg in sorted(p.analyses.items()):
+            if not cfg.get("verified"):
+                params = {k: v for k, v in cfg.items() if k not in ("verified", "source")}
+                out.append(f"{p.pattern_id}: analysis {name} parameters {params}")
+    return out
+
+
+# ---- live: skill-file examples against the REAL mapping, analyses executed once ---------------------------------
+
+# Only these analysis-summary keys are printed: counts, booleans and durations. Never a name or a value.
+_SAFE_SUMMARY_KEYS = (
+    "type", "queries_executed", "completed", "baseline_entities", "recent_entities", "missing_count", "complete",
+    "recent_window", "threshold_verified", "anchors_found", "anchors_expanded", "rows_returned", "rows_measured",
+    "min_seconds", "median_seconds", "p90_seconds", "max_seconds", "negative_lag_rows", "rows_scanned",
+    "rows_matching_pattern", "rows_flagged", "scan_complete", "pattern_verified", "interval", "intervals_in_window",
+    "interval_verified", "event_time_verified")
+
+
+def safe_analysis_summary(block: dict) -> dict:
+    a = block.get("analysis") or {}
+    out = {k: a[k] for k in _SAFE_SUMMARY_KEYS if k in a}
+    out["warnings"] = [str(w).split(":", 1)[0] for w in a.get("warnings") or []]   # the warning CODE only
+    out["result_count"] = len(block.get("buckets") or block.get("hits") or [])
+    return out
+
+
+def skill_examples(settings, registry) -> list[tuple[object, int, dict]]:
+    """(pattern entry, example number, contract entry) for every JSON example in the domain files."""
+    out = []
+    for p in registry.enabled_patterns:
+        text = (Path(settings.skills_root) / p.domain_reference).read_text(encoding="utf-8")
+        for i, block in enumerate(_JSON_BLOCK.findall(text), 1):
+            try:
+                obj = json.loads(block)
+            except ValueError:
+                continue   # reported by check_skill_files
+            base = {"status": "ok", "data_source": "opensearch", "pattern_id": p.pattern_id,
+                    "reference_used": p.domain_reference, "explanation": "smoke test",
+                    "measurement_used": {"type": "raw_metric", "name": f"{p.pattern_id}_example_{i}", "source_metrics": []}}
+            entry = {**base, **obj} if "pattern_id" in obj else {**base, "query": obj}
+            out.append((p, i, entry))
+    return out
+
+
+def run_examples(registry, ctx, settings, *, execute_analyses: bool) -> list[dict]:
+    """Every skill-file example through the guard against the LIVE field catalog. With
+    execute_analyses, each analysis example is also executed once (bounded, read-only) and only
+    counts are reported (safe_analysis_summary)."""
+    from app import executor
+    from app.opensearch_catalog import guard
+    results = []
+    for p, i, entry in skill_examples(settings, registry):
+        r = {"pattern_id": p.pattern_id, "example": i, "analysis": (entry.get("analysis") or {}).get("type")}
+        try:
+            g = guard.check_entry(entry, ctx)
+            if not g.ok:
+                results.append({**r, "ok": False, "stage": "guard", "detail": _failure_text(f"{g.code}: {g.reason}", settings)})
+                continue
+            r.update(ok=True, stage="guard")
+            if execute_analyses and r["analysis"]:
+                e = {**entry, "query": g.query, "index": g.index, "analysis": g.analysis}
+                ex = executor.execute_contract(e, settings)["execution"]
+                status = ex.get("execution_status")
+                r.update(stage="executor", execution_status=status, ok=status in ("success", "empty_result"),
+                         summary=safe_analysis_summary(ex))
+                if not r["ok"]:
+                    r["detail"] = _failure_text(ex.get("error"), settings)
+        except Exception as exc:  # noqa: BLE001 -- report the type and a redacted message, never a traceback
+            r.update(ok=False, detail=_failure_text(exc, settings))
+        results.append(r)
+    return results
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--queries", action="store_true", help="also run one bounded size-0 count query per family")
@@ -199,9 +354,28 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--rows-size", type=int, default=ROWS_DEFAULT, metavar="N",
                     help=f"rows per family for --rows (default {ROWS_DEFAULT}, clamped to 1..{ROWS_HARD_MAX})")
     ap.add_argument("--save-mappings", metavar="DIR", help="write live mapping snapshots (field names/types only)")
+    ap.add_argument("--check-skills", action="store_true",
+                    help="OFFLINE only: check the registry against the skill package (routing rows, pattern_id, "
+                         "documented analyses, JSON examples) and list unverified registry facts; no network")
+    ap.add_argument("--examples", action="store_true",
+                    help="also check every skill-file JSON example against the LIVE mapping (guard only, nothing runs)")
+    ap.add_argument("--analyses", action="store_true",
+                    help="also run each analysis example once (bounded, read-only); prints counts only")
     args = ap.parse_args(argv)
 
     settings = get_settings()
+    if args.check_skills:
+        problems = check_skill_files(settings)
+        print("Registry <-> skill package (offline):")
+        for x in problems:
+            print(f"   PROBLEM: {x}")
+        if not problems:
+            print("   consistent: every enabled family has its routing row, domain file, pattern_id and examples")
+            for fact in unverified_facts(runtime.get_registry(settings)):
+                print(f"   still unverified: {fact}")
+        print("\n" + ("FAILED: see above." if problems else "OK: registry and skill package agree."))
+        return 1 if problems else 0
+
     print(f"Testing against {settings.opensearch_url} (read-only; no documents are printed)\n")
     try:
         registry = runtime.get_registry(settings)
@@ -266,6 +440,19 @@ def main(argv: list[str] | None = None) -> int:
             if r["not_seen"]:
                 unverified = True
                 print(f"      NOT SEEN in the sample (may be optional; unverified): {', '.join(r['not_seen'])}")
+
+    if args.examples or args.analyses:
+        print("\nSkill-file examples against the LIVE mapping" + (" (analysis examples executed once)" if args.analyses else "")
+              + ":")
+        matched = [{"reference_path": e.domain_reference, "data_source": "opensearch"} for e in ctx_patterns.values()]
+        ctx = runtime.build_request_context(matched, settings)
+        for r in run_examples(registry, ctx, settings, execute_analyses=args.analyses):
+            failed |= not r["ok"]
+            label = f"   [{r['pattern_id']} example {r['example']}{' ' + r['analysis'] if r['analysis'] else ''}]"
+            print(f"{label} ok={r['ok']} stage={r['stage']}" + (f" status={r['execution_status']}" if "execution_status" in r else "")
+                  + (f" detail={r['detail']}" if r.get("detail") else ""))
+            if r.get("summary"):
+                print(f"      {json.dumps(r['summary'], sort_keys=True)}")
 
     tail = (" and its count query executed" if args.queries else "") + (
         " and its rows came back with the projected @timestamp" if args.rows else "")

@@ -1,4 +1,4 @@
-"""Every JSON example in the OpenSearch skill files is a valid query.
+"""Every JSON example in the OpenSearch skill files (and in docs/SKILL_AUTHOR_CONTRACT.md) is a valid query.
 
 Each ```json block in skills/references/opensearch-logs/*.md, and each concrete OpenSearch example in
 skills/SKILL.md, is parsed and run through the friend's guard (guard.check_entry) against the SYNTHETIC
@@ -38,6 +38,10 @@ def _examples():
         # SKILL.md mostly holds shape templates with <placeholders>; only concrete OpenSearch examples run.
         if '"opensearch"' in block and "<" not in block:
             out.append(pytest.param("SKILL.md", None, block, id=f"SKILL.md-{i}"))
+    contract = SKILLS.parent / "docs" / "SKILL_AUTHOR_CONTRACT.md"
+    if contract.exists():
+        for i, block in enumerate(_BLOCK_RE.findall(contract.read_text(encoding="utf-8"))):
+            out.append(pytest.param("docs/SKILL_AUTHOR_CONTRACT.md", None, block, id=f"contract-{i}"))
     return out
 
 
@@ -49,7 +53,8 @@ def test_examples_were_found_in_every_family_file_and_in_skill_md():
     for pid in FAMILY_FILES:
         assert any(i.startswith(pid) for i in ids), pid
     assert any(i.startswith("SKILL.md") for i in ids)
-    assert len(EXAMPLES) >= 9
+    assert sum(i.startswith("contract") for i in ids) == 3
+    assert len(EXAMPLES) >= 12
 
 
 @pytest.mark.parametrize("rel,file_pid,block", EXAMPLES)

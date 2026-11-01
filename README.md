@@ -70,10 +70,10 @@ curl -X POST http://localhost:8000/api/v1/query \
 ## Running tests
 
 ```bash
-pytest
+python -m pytest tests -q
 ```
 
-All tests are deterministic (every backend and LLM call is mocked) — no live
+Always pass the path `tests`. All tests are deterministic (every backend and LLM call is mocked) — no live
 Prometheus/OpenSearch/Gemini connection required to run the suite. Run
 `pytest -q` and check the final count yourself; don't trust a number typed
 here, since it drifts every time a test is added.
@@ -98,7 +98,13 @@ app/
   opensearch_client.py   OpenSearch HTTP client: search/aggregation
                           execution, plus live index/mapping discovery.
   label_discovery.py     Live Prometheus label-key discovery (Principle 9).
-  field_discovery.py     Live OpenSearch Attributes.* key discovery.
+  field_discovery.py     Legacy OpenSearch Attributes.* key discovery (superseded
+                          by opensearch_catalog/field_catalog.py; kept for its tests).
+  opensearch_catalog/     The OpenSearch part: index registry (the only place
+                          index and field names live), live field catalog,
+                          guard (reject-and-explain query checker), severity,
+                          redaction, result metadata, and the five multi-step
+                          analyses (analysis.py). See currentstatus.md.
   normalizer.py          Converts raw backend responses into the three
                           frontend-facing shapes: series / buckets / hits.
                           Also where NaN/Infinity sanitization happens.
@@ -129,7 +135,10 @@ skills/                    The observability-query-builder skill package
                             wholesale to update the skill; nothing in app/
                             needs to change for routing-table-level updates.
 tests/                     Unit + integration tests for every module above,
-                            run with `pytest`.
+                            run with `python -m pytest tests -q`.
+docs/                      SKILL_AUTHOR_CONTRACT.md, SMOKE_TEST.md, NEXT_PHASE.md.
+currentstatus.md           Plain-language tour of the OpenSearch part.
+progress.md                Every decision of the OpenSearch merge, and open flags.
 ```
 
 ## API
@@ -230,15 +239,21 @@ on `POST /api/v1/admin/reload-skill`.
 
 ## What's implemented vs. pending
 
-See `HANDOFF.md` for the full breakdown. Short version: the entire
-Prometheus path is implemented end-to-end. The OpenSearch EXECUTION layer
-(client, discovery, normalizer) is implemented and unit-tested against
-realistic mocked responses — but no `opensearch-*` domain rows exist in
-SKILL.md's routing table yet, so the pipeline can't currently route a real
-question to OpenSearch data. A question that needs OpenSearch-backed data
-gets an explicit `unmapped` result explaining that, rather than silently
-failing or being dropped — including when it's only PART of a larger
-question that also needs Prometheus data (see `HANDOFF.md`).
+See `HANDOFF.md` for the full breakdown. Short version: the Prometheus path
+and the OpenSearch path are both implemented end to end. OpenSearch questions
+route to three registered log families (`fabric_health`, `controller_log`,
+`ilo_events`; see `skills/references/opensearch-logs/`), are checked by a
+deterministic guard that rejects rather than repairs, and return results with
+metadata about exactness, partial results and redaction. Five questions that
+one query cannot answer (switches that stopped sending heartbeats, before/after
+an event, ingest lag, "fewer switches available than expected", recurring
+faults) run as multi-step analyses. Logs from other sources, correlations
+across families or with metrics, "unusually frequent" and failed logins come
+back `unmapped`. Nothing has been verified against the real cluster yet: see
+`docs/SMOKE_TEST.md`, and `currentstatus.md` for the plain-language tour.
+
+`API_KEY` (header `X-API-Key`) and `CORS_ALLOW_ORIGINS` are enforced when set;
+with `API_KEY` unset the service is open and logs a warning at startup.
 
 Alert-rule CREATION (SKILL.md §12) is implemented end-to-end but disabled by
 default (`ALERT_RULE_CREATION_ENABLED=false`) — see `.env.example`'s

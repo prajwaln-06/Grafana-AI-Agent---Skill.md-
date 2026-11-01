@@ -305,3 +305,86 @@ def test_main_queries_behaviour_is_unchanged_and_runs_no_rows(smoke, monkeypatch
 def test_main_rows_flag_defaults_do_not_change_plain_run(smoke):
     import argparse
     assert smoke.ROWS_DEFAULT == 3 and smoke.ROWS_HARD_MAX == 10
+
+
+# ---- folded-in registry <-> skill package check (offline) and the live example / analysis checks ----------------
+
+def _copy_skills(tmp_path, skills_root):
+    import shutil
+    dst = tmp_path / "skills"
+    shutil.copytree(skills_root, dst)
+    return dst
+
+
+def test_check_skills_passes_on_the_real_package(smoke, settings):
+    assert smoke.check_skill_files(settings) == []
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda root: (root / "references/opensearch-logs/fabric-health.md").write_text(
+        (root / "references/opensearch-logs/fabric-health.md").read_text(encoding="utf-8")
+        .replace('"type": "absence"', '"type": "absent"'), encoding="utf-8"), "has no example of it"),
+    (lambda root: (root / "references/opensearch-logs/ilo-events.md").write_text(
+        (root / "references/opensearch-logs/ilo-events.md").read_text(encoding="utf-8")
+        + '\n```json\n{"pattern_id": "ilo_events", "analysis": {"type": "absence"}}\n```\n', encoding="utf-8"),
+     "which the registry does not configure"),
+    (lambda root: (root / "references/opensearch-logs/controller-log.md").write_text(
+        (root / "references/opensearch-logs/controller-log.md").read_text(encoding="utf-8")
+        + "\n```json\n{ not json }\n```\n", encoding="utf-8"), "is not valid JSON"),
+    (lambda root: (root / "references/opensearch-logs/controller-log.md").write_text(
+        (root / "references/opensearch-logs/controller-log.md").read_text(encoding="utf-8")
+        .replace("`pattern_id: controller_log`", "`pattern: controller_log`"), encoding="utf-8"), "never states"),
+    (lambda root: (root / "references/opensearch-logs/ilo-events.md").write_text(
+        (root / "references/opensearch-logs/ilo-events.md").read_text(encoding="utf-8")
+        + '\n```json\n{"index": "log_iml-*", "query": {}}\n```\n', encoding="utf-8"), "writes an index"),
+])
+def test_check_skills_reports_each_kind_of_drift(smoke, settings, skills_root, tmp_path, edit, needle):
+    root = _copy_skills(tmp_path, skills_root)
+    edit(root)
+    problems = smoke.check_skill_files(settings.model_copy(update={"skills_root": root}))
+    assert any(needle in p for p in problems), problems
+
+
+def test_check_skills_reports_a_missing_domain_file_as_a_registry_problem(smoke, settings, skills_root, tmp_path):
+    root = _copy_skills(tmp_path, skills_root)
+    (root / "references/opensearch-logs/ilo-events.md").unlink()
+    problems = smoke.check_skill_files(settings.model_copy(update={"skills_root": root}))
+    assert problems and problems[0].startswith("registry:") and "does not exist" in problems[0]
+
+
+def test_unverified_facts_lists_every_placeholder(smoke, os_registry):
+    facts = "\n".join(smoke.unverified_facts(os_registry))
+    for needle in ("analysis absence", "analysis recurrence", "analysis context_window", "analysis text_ratio_shortfall",
+                   "analysis ingest_lag", "Oem.Hpe.Severity is provisional", "daily index rotation"):
+        assert needle in facts, needle
+
+
+def test_examples_are_checked_against_the_live_mapping(smoke, settings, os_registry, monkeypatch):
+    from tests.os_fixtures import FakeCluster
+    FakeCluster().install(monkeypatch)
+    matched = [{"reference_path": p.domain_reference, "data_source": "opensearch"} for p in os_registry.enabled_patterns]
+    ctx = runtime.build_request_context(matched, settings)
+    results = smoke.run_examples(os_registry, ctx, settings, execute_analyses=False)
+    assert len(results) == 8 and all(r["ok"] and r["stage"] == "guard" for r in results), results
+    assert {r["analysis"] for r in results} >= {"absence", "recurrence", "context_window", "text_ratio_shortfall", "ingest_lag"}
+
+
+def test_analysis_examples_run_once_and_report_counts_never_names(smoke, settings, os_registry, monkeypatch):
+    from tests.os_fixtures import FakeCluster, agg_body, hits_body
+
+    def handler(index, dsl):
+        if dsl.get("aggs"):
+            return agg_body({k: {"buckets": [{"key": "x1000c0r1b0-SECRETNAME", "doc_count": 3}]} for k in dsl["aggs"]})
+        return hits_body([{"@timestamp": "2026-10-28T10:00:00Z", "Created": "2026-10-28T09:59:00Z",
+                           "Body": "30/32 switches available", "host": "bmc-SECRETNAME",
+                           "Resource": {"host": {"name": "SECRETNAME"}}}])
+    cluster = FakeCluster(handler=handler).install(monkeypatch)
+    matched = [{"reference_path": p.domain_reference, "data_source": "opensearch"} for p in os_registry.enabled_patterns]
+    ctx = runtime.build_request_context(matched, settings)
+    results = smoke.run_examples(os_registry, ctx, settings, execute_analyses=True)
+    ran = [r for r in results if r["analysis"]]
+    assert len(ran) == 5 and all(r["stage"] == "executor" and r["ok"] for r in ran), ran
+    assert "SECRETNAME" not in json.dumps(results)                       # only counts and booleans are reported
+    shortfall = next(r for r in ran if r["analysis"] == "text_ratio_shortfall")
+    assert shortfall["summary"]["rows_matching_pattern"] == 1 and shortfall["summary"]["rows_flagged"] == 1
+    assert cluster.searches                                               # it really went through the client
