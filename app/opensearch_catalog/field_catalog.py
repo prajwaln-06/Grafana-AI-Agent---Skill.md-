@@ -392,6 +392,37 @@ class FieldCatalogCache:
                 self._last_failure.pop(pattern_id, None)
                 self._last_failure_reason.pop(pattern_id, None)
 
+    def snapshot(self) -> dict[str, dict]:
+        """Read-only view of what is cached, per pattern_id, for an operator status
+        page. Never fetches anything (calling it cannot reach OpenSearch)."""
+        now = self._clock()
+        with self._lock:
+            good = dict(self._good)
+            fails = dict(self._last_failure)
+            reasons = dict(self._last_failure_reason)
+        out: dict[str, dict] = {}
+        for pid in sorted(set(good) | set(fails)):
+            cat = good.get(pid)
+            age = (now - cat.discovered_at) if cat is not None and cat.discovered_at is not None else None
+            if cat is None:
+                state = STATUS_UNAVAILABLE
+            elif age is not None and age < self._ttl:
+                state = STATUS_FRESH
+            elif age is not None and age <= self._stale_ttl:
+                state = STATUS_STALE
+            else:
+                state = STATUS_UNAVAILABLE
+            out[pid] = {
+                "cached_status": state,
+                "age_seconds": round(age, 1) if age is not None else None,
+                "fields": len(cat.fields) if cat is not None else 0,
+                "concrete_indices_seen": list(cat.concrete_indices_seen) if cat is not None else [],
+                "mapping_variation": cat.mapping_variation if cat is not None else None,
+                "last_failure_seconds_ago": round(now - fails[pid], 1) if pid in fails else None,
+                "last_failure_reason": reasons.get(pid),
+            }
+        return out
+
     def get(self, entry: PatternEntry) -> FieldCatalog:
         pid = entry.pattern_id
         now = self._clock()

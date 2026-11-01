@@ -1,9 +1,13 @@
+import asyncio
+import hmac
 import json
 import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 
@@ -16,7 +20,6 @@ from google.adk.evaluation.local_eval_set_results_manager import LocalEvalSetRes
 from google.genai import types
 
 from app.config import get_settings
-from app.skill_index import SkillIndex
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,24 @@ adk_web_server = ApiServer(
 )
 
 
+def _log_opensearch_readiness(settings) -> None:
+    """Tells the operator at startup, in the log, whether the OpenSearch part is usable.
+    Loading the registry with the skills root also proves every family's skill file exists.
+    Never raises: a problem here must not stop Prometheus questions from being served."""
+    from app.opensearch_catalog import runtime as os_runtime
+    from app.opensearch_catalog.registry import RegistryError
+    try:
+        reg = os_runtime.get_registry(settings)
+    except RegistryError as e:
+        logger.error("OpenSearch is DISABLED (every OpenSearch question will be refused): %s", e)
+        return
+    except Exception:  # noqa: BLE001 -- startup logging must never crash the server
+        logger.exception("Could not check the OpenSearch registry at startup")
+        return
+    names = ", ".join(p.pattern_id for p in reg.enabled_patterns)
+    logger.info("OpenSearch registry loaded: %d enabled index families (%s).", len(reg.enabled_patterns), names)
+
+
 @asynccontextmanager
 async def _catalog_runtime_lifespan(_app: FastAPI):
     """Starts the background catalog refresh when
@@ -53,6 +74,7 @@ async def _catalog_runtime_lifespan(_app: FastAPI):
 
     worker_runtime = None
     settings = get_settings()
+    _log_opensearch_readiness(settings)
     if settings.catalog_runtime_reconciliation_enabled:
         try:
             worker_runtime = catalog_runtime.get_runtime(settings)
@@ -68,6 +90,40 @@ async def _catalog_runtime_lifespan(_app: FastAPI):
 
 
 app = adk_web_server.get_fast_api_app(lifespan=_catalog_runtime_lifespan)
+
+# ---- security: API key + CORS ----------------------------------------------------------
+# Both settings existed in config.py but nothing enforced them, so every route
+# (including the admin reload) was open. Now:
+#   * API_KEY set    -> every route except the health probes needs header X-API-Key
+#                       (compared in constant time).
+#   * API_KEY unset  -> open (local development), and a warning is logged once.
+#   * CORS_ALLOW_ORIGINS -> applied for real. The default "*" is only sensible locally.
+_PUBLIC_PATHS = {"/readyz", "/health"}
+_startup_settings = get_settings()
+if not _startup_settings.api_key:
+    logger.warning("API_KEY is not set: every endpoint is unauthenticated. Set API_KEY before exposing this service.")
+
+
+@app.middleware("http")
+async def _require_api_key(request: Request, call_next):
+    expected = get_settings().api_key
+    if not expected or request.method == "OPTIONS" or request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+    supplied = request.headers.get("x-api-key", "")
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        return JSONResponse(status_code=401, content={"detail": "Missing or invalid API key."})
+    return await call_next(request)
+
+
+# Added AFTER the auth middleware so it wraps it: browser preflight (OPTIONS)
+# requests get their CORS headers without needing a key.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_startup_settings.cors_allow_origins,
+    allow_credentials=_startup_settings.cors_allow_origins != ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # Backwards compatible API schemas
@@ -106,9 +162,36 @@ async def capabilities():
     }
 
 
+@app.get("/api/v1/opensearch/status")
+async def opensearch_status():
+    """Read-only operational view of the OpenSearch part: is the registry valid (which also
+    proves each family's skill file exists), which families are enabled, which analyses each
+    supports, the query limits in force, and what the field-catalog cache currently holds.
+    Never queries OpenSearch itself."""
+    import dataclasses
+    from app.opensearch_catalog import runtime as os_runtime
+    from app.opensearch_catalog.context import Limits
+    from app.opensearch_catalog.registry import RegistryError
+    settings = get_settings()
+    info: dict = {"registry_path": str(os_runtime.registry_path(settings))}
+    try:
+        reg = os_runtime.get_registry(settings)
+        info["registry_valid"] = True
+        info["registry_version"] = reg.registry_version
+        info["patterns"] = [{"pattern_id": p.pattern_id, "index_pattern": p.index_pattern, "enabled": p.enabled,
+                             "domain_reference": p.domain_reference, "max_window": p.max_window,
+                             "analyses": sorted(getattr(p, "analyses", {}) or {})}
+                            for p in reg.patterns]
+    except RegistryError as e:
+        info["registry_valid"] = False
+        info["registry_error"] = str(e)
+    info["limits"] = dataclasses.asdict(Limits.from_settings(settings))
+    info["field_catalogs"] = os_runtime.field_cache_snapshots()
+    return info
+
+
 @app.post("/api/v1/admin/reload-skill")
 async def reload_skill():
-    import dataclasses
     from app.agent import root_agent
     from app.skill_index import SkillIndexError
     try:
@@ -152,7 +235,7 @@ async def query(body: QueryRequest, request: Request) -> QueryResponse:
             new_message=types.Content(parts=[types.Part(text=body.question)]),
         ):
             events.append(event)
-    except Exception as e:
+    except Exception:
         logger.exception("Agent run failed")
         raise HTTPException(status_code=502, detail="The query pipeline failed unexpectedly. Please try again.")
 
@@ -196,13 +279,15 @@ async def confirm_alert(body: ConfirmAlertRequest):
             detail="This session has expired or doesn't exist."
         )
 
+    # The feature flag is re-checked on EVERY confirm, not only when no proposal exists:
+    # turning the feature off must stop creation even for a proposal made earlier.
+    if body.confirm and not settings.alert_rule_creation_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Alert-rule creation is currently disabled on this deployment."
+        )
     pending_proposal = session.state.get("pending_alert_proposal")
     if not pending_proposal:
-        if not settings.alert_rule_creation_enabled:
-            raise HTTPException(
-                status_code=403,
-                detail="Alert-rule creation is currently disabled on this deployment."
-            )
         raise HTTPException(
             status_code=409,
             detail="This session does not contain a pending alert proposal."
@@ -226,7 +311,9 @@ async def confirm_alert(body: ConfirmAlertRequest):
     from app import grafana_client
     alert_rule = pending_proposal.get("alert_rule")
     try:
-        outcome = grafana_client.create_alert_rule(
+        # Blocking HTTP call to Grafana: keep it off the event loop.
+        outcome = await asyncio.to_thread(
+            grafana_client.create_alert_rule,
             title=alert_rule["title"],
             condition_query=alert_rule["condition_query"],
             comparison_operator=alert_rule["comparison"]["operator"],
@@ -238,18 +325,22 @@ async def confirm_alert(body: ConfirmAlertRequest):
             service_account_token=settings.grafana_service_account_token,
         )
 
-        from google.adk.events.event import Event
-        import uuid
-        clear_event = Event(
-            invocation_id="p-" + str(uuid.uuid4()),
-            author="app",
-            state={
-                "pending_alert_proposal": None,
-                "previous_question": None,
-                "previous_result": None,
-            }
-        )
-        await adk_web_server.session_service.append_event(session=session, event=clear_event)
+        # Clear the proposal only when it is finished with (created, or a rule with this
+        # identity already exists). If Grafana was unreachable or misconfigured the
+        # proposal is KEPT so the person can simply confirm again once it is fixed.
+        if outcome.status in ("success", "conflict"):
+            from google.adk.events.event import Event
+            import uuid
+            clear_event = Event(
+                invocation_id="p-" + str(uuid.uuid4()),
+                author="app",
+                state={
+                    "pending_alert_proposal": None,
+                    "previous_question": None,
+                    "previous_result": None,
+                }
+            )
+            await adk_web_server.session_service.append_event(session=session, event=clear_event)
 
         if outcome.status == "success":
             return {

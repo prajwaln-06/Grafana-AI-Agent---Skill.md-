@@ -70,6 +70,17 @@ def get_field_cache(settings) -> FieldCatalogCache:
         return cache
 
 
+def field_cache_snapshots() -> dict[str, dict]:
+    """Status of every field-catalog cache built so far in this process (normally
+    one). Never fetches; used by the read-only status endpoint."""
+    with _lock:
+        caches = list(_caches.values())
+    merged: dict[str, dict] = {}
+    for cache in caches:
+        merged.update(cache.snapshot())
+    return merged
+
+
 def build_request_context(matched: list[dict], settings) -> OpenSearchContext:
     """The ONLY entry the pipeline uses. Never raises: any failure becomes an
     explicit unusable context (fail closed)."""

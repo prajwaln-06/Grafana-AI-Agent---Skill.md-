@@ -24,7 +24,6 @@ caller surfaces it); if none remain the condition cannot be built.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from app.opensearch_catalog.field_catalog import OP_TERM, PatternFieldView

@@ -19,10 +19,9 @@ from dataclasses import dataclass, field
 
 from app.opensearch_catalog.field_catalog import (
     OP_EXISTS, OP_GROUP_BY, OP_MATCH, OP_RANGE, OP_SORT, OP_TERM,
-    STATUS_UNAVAILABLE, FieldCatalogCache, PatternFieldView, build_field_catalog,
-    build_field_view,
+    FieldCatalogCache, PatternFieldView, build_field_view,
 )
-from app.opensearch_catalog.registry import IndexRegistry, PatternEntry, RegistryError
+from app.opensearch_catalog.registry import IndexRegistry, PatternEntry
 
 logger = logging.getLogger(__name__)
 

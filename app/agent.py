@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import AsyncGenerator
@@ -36,7 +37,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         settings = get_settings()
-        skill_index = self._get_get_skill_index_or_reload()
+        skill_index = self._get_skill_index_or_reload()
 
         # 1. Retrieve the question from the user message
         question = ""
@@ -50,11 +51,20 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         clean_question = question.strip().lower()
 
         if pending_proposal and clean_question in ("yes", "confirm", "y", "no", "discard", "cancel", "n"):
-            if clean_question in ("yes", "confirm", "y"):
+            # The proposal is kept (so the person can just say "yes" again) when creation failed for
+            # a reason that may go away: feature switched off, Grafana unreachable or misconfigured.
+            retain_proposal = False
+            if clean_question in ("yes", "confirm", "y") and not settings.alert_rule_creation_enabled:
+                # Same rule as the HTTP confirm endpoint: switching the feature off stops creation
+                # even for a proposal that was made before it was switched off.
+                result = {"error": "Alert-rule creation is currently disabled on this deployment."}
+                retain_proposal = True
+            elif clean_question in ("yes", "confirm", "y"):
                 from app import grafana_client
                 alert_rule = pending_proposal.get("alert_rule")
                 try:
-                    outcome = grafana_client.create_alert_rule(
+                    outcome = await asyncio.to_thread(
+                        grafana_client.create_alert_rule,
                         title=alert_rule["title"],
                         condition_query=alert_rule["condition_query"],
                         comparison_operator=alert_rule["comparison"]["operator"],
@@ -73,9 +83,11 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                         }
                     else:
                         result = {"error": f"Grafana error ({outcome.status}): {outcome.error}"}
+                        retain_proposal = outcome.status != "conflict"
                 except Exception as e:
                     logger.exception("Failed to create alert rule")
                     result = {"error": f"Unexpected error: {str(e)}"}
+                    retain_proposal = True
             else:
                 result = {"status": "discarded"}
 
@@ -84,7 +96,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                 invocation_id=ctx.invocation_id,
                 author=self.name,
                 message=json.dumps({"result": result, "session_id": None}),
-                state={
+                state={} if retain_proposal else {
                     "pending_alert_proposal": None,
                     "previous_question": None,
                     "previous_result": None,
@@ -107,7 +119,6 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
 
         # 4. Run the pipeline
         try:
-            import asyncio
             contract = await asyncio.wait_for(
                 run_pipeline(question, skill_index, settings, context=pipeline_context),
                 timeout=settings.pipeline_timeout_seconds,
@@ -181,7 +192,8 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
 
         # 6. Execute contract (unless the dependency-aware path already did
         # this for us -- see 4b above).
-        executed = contract if already_executed else executor.execute_contract(contract, settings)
+        # execute_contract does blocking HTTP; keep it off the event loop.
+        executed = contract if already_executed else await asyncio.to_thread(executor.execute_contract, contract, settings)
         yield Event(
             invocation_id=ctx.invocation_id,
             author=self.name,
@@ -193,7 +205,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             }
         )
 
-    def _get_get_skill_index_or_reload(self) -> SkillIndex:
+    def _get_skill_index_or_reload(self) -> SkillIndex:
         return self._get_skill_index()
 
     def reload_skill(self) -> None:

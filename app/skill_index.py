@@ -19,6 +19,9 @@ this module is a thin, generic reader of it.
 """
 from __future__ import annotations
 
+import os
+import threading
+
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,12 +94,33 @@ class SkillMetadata:
     version: str
 
 
+_text_cache: dict[str, tuple[int, int, str]] = {}
+_text_cache_lock = threading.Lock()
+
+
+def _read_text_cached(path: str) -> str:
+    """Reads a reference file, re-using the previous read while the file has not
+    changed (same modification time and size). Reference files are read on every
+    request; this keeps the disk out of the hot path without ever serving stale
+    text after an edit."""
+    st = os.stat(path)
+    key = (st.st_mtime_ns, st.st_size)
+    with _text_cache_lock:
+        hit = _text_cache.get(path)
+        if hit and (hit[0], hit[1]) == key:
+            return hit[2]
+    text = open(path, encoding="utf-8").read()
+    with _text_cache_lock:
+        _text_cache[path] = (key[0], key[1], text)
+    return text
+
+
 @dataclass
 class SkillIndex:
     """Loaded, parsed view of one skill package. Build once via
     SkillIndex.load(skills_root, catalog_path); reuse across requests.
     Nothing here is request-specific -- this is static skill content, not
-    runtime schema (that's label_discovery.py / field_discovery.py's job).
+    runtime schema (that's label_discovery.py / opensearch_catalog/field_catalog.py's job).
 
     `catalog_path` (defaults to app/catalog/catalog.json next to the skills
     root) and `catalog_provider` are used only by metric_directory(): exporter
@@ -252,7 +276,7 @@ class SkillIndex:
                 f"changed underneath a running process; restart to re-load "
                 f"SKILL.md."
             )
-        return target.read_text(encoding="utf-8")
+        return _read_text_cached(str(target))
 
     def overview_path_for(self, reference_path: str) -> str | None:
         """Per SKILL.md §6 Step 3b: a domain file's Metric Directory lives in

@@ -118,8 +118,10 @@ class Settings(BaseSettings):
 
     # --- Response safety limits ---
     max_points_per_series: int = Field(default=11_000,
-                                        description="Prometheus's own default sample cap; also applied "
-                                                     "as the OpenSearch date_histogram bucket-count guard.")
+                                        description="Prometheus's own default sample cap, applied to "
+                                                     "Prometheus range queries only. The OpenSearch "
+                                                     "date_histogram bucket limit is "
+                                                     "opensearch_max_histogram_buckets.")
     max_series_per_result: int = Field(default=200,
                                         description="Hard cap on series/buckets returned per result, "
                                                      "protecting the frontend from an unbounded "
@@ -129,7 +131,10 @@ class Settings(BaseSettings):
     # --- HTTP API ---
     api_host: str = Field(default="0.0.0.0")
     api_port: int = Field(default=8000)
-    cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
+    cors_allow_origins: list[str] = Field(
+        default_factory=lambda: ["*"],
+        description="Browser origins allowed to call this API (CORS). Env form is a JSON list, "
+                    "e.g. [\"https://ui.example.com\"]. \"*\" is only sensible for local use.")
     api_key: str | None = Field(default=None,
                                  description="If set, required as the X-API-Key header on every "
                                              "request to this service. Unset (None) means open access "
@@ -141,6 +146,12 @@ class Settings(BaseSettings):
 
     # --- Pipeline ---
     label_discovery_lookback_hours: int = Field(default=6)
+    label_discovery_cache_ttl_seconds: float = Field(
+        default=300.0, ge=0.0,
+        description="How long a successfully discovered Prometheus label set per metric is "
+                    "reused. Failures are never cached. 0 disables caching.")
+    label_discovery_max_workers: int = Field(
+        default=8, ge=1, description="Parallel /api/v1/series calls during label discovery.")
     pipeline_timeout_seconds: float = Field(default=45.0,
                                              description="Overall budget across all LLM phases for one "
                                                           "request, independent of each call's own retry/"

@@ -32,6 +32,9 @@ a closed, confirmed set -- see LabelDetails.truncated_keys.
 """
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -132,14 +135,60 @@ def discover_label_details_for_metric(base_url: str, metric_name: str,
     return LabelDetails(keys=keys, values=values, truncated_keys=frozenset(truncated))
 
 
+# ---- cache + parallelism -------------------------------------------------------------
+#
+# Discovery used to make ONE blocking /api/v1/series call per metric, one after the
+# other, on every request. Label sets change rarely, so successful results are kept
+# for a short TTL, and the misses are fetched in parallel. Failures are never cached,
+# so a Prometheus hiccup heals on the next request instead of lingering.
+
+_cache_lock = threading.Lock()
+_cache: dict[tuple[str, str, int], tuple[float, "LabelDetails"]] = {}
+_cache_ttl_seconds: float = 300.0
+_max_workers: int = 8
+
+
+def configure(ttl_seconds: float | None = None, max_workers: int | None = None) -> None:
+    """Called with the values from Settings. ttl 0 disables caching."""
+    global _cache_ttl_seconds, _max_workers
+    if ttl_seconds is not None:
+        _cache_ttl_seconds = max(0.0, float(ttl_seconds))
+    if max_workers is not None:
+        _max_workers = max(1, int(max_workers))
+
+
+def clear_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+def _cached_details(base_url: str, name: str, lookback: timedelta, timeout: float) -> "LabelDetails | None":
+    key = (base_url, name, int(lookback.total_seconds()))
+    now = time.monotonic()
+    if _cache_ttl_seconds > 0:
+        with _cache_lock:
+            hit = _cache.get(key)
+        if hit and now - hit[0] < _cache_ttl_seconds:
+            return hit[1]
+    details = discover_label_details_for_metric(base_url, name, lookback=lookback, timeout=timeout)
+    if details is not None and _cache_ttl_seconds > 0:
+        with _cache_lock:
+            _cache[key] = (now, details)
+    return details
+
+
 def discover_label_details_for_metrics(base_url: str, metric_names: list[str],
                                         lookback: timedelta = DEFAULT_LOOKBACK,
                                         timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, LabelDetails | None]:
-    """Runs discover_label_details_for_metric for every metric name given.
-    Each metric is independent -- one metric's discovery failing never
-    blocks the others from resolving."""
-    return {name: discover_label_details_for_metric(base_url, name, lookback=lookback, timeout=timeout)
-            for name in metric_names}
+    """Runs discovery for every metric name given, from cache where fresh and in
+    parallel otherwise. Each metric is independent -- one metric's discovery
+    failing never blocks the others from resolving."""
+    names = list(dict.fromkeys(metric_names))
+    if len(names) <= 1 or _max_workers <= 1:
+        return {name: _cached_details(base_url, name, lookback, timeout) for name in names}
+    with ThreadPoolExecutor(max_workers=min(_max_workers, len(names))) as pool:
+        results = list(pool.map(lambda n: _cached_details(base_url, n, lookback, timeout), names))
+    return dict(zip(names, results))
 
 
 def discover_labels_for_metric(base_url: str, metric_name: str,

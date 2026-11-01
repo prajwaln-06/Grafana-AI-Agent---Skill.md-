@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 IP_MODE_MASK_ALL = "mask_all"

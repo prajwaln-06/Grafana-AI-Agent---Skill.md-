@@ -36,8 +36,8 @@ import copy
 import json
 import math
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from app import time_utils
@@ -586,7 +586,7 @@ class _Checker:
         if extra:
             _fail(CODE_AGGREGATION, f"{where}: unsupported key(s) {sorted(extra)}")
         field_ = body.get("field")
-        info = self.info(field_, OP_GROUP_BY, where)
+        self.info(field_, OP_GROUP_BY, where)
         if field_ not in self.group_by_effective:
             _fail(CODE_AGGREGATION,
                   f"{where}: {field_!r} may not be grouped on for this index family (free text, identifiers and "

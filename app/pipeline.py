@@ -308,6 +308,7 @@ query actually runs.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field, replace
@@ -440,7 +441,9 @@ async def _resolve_matched_group(question: str, matched: list[dict], panic_mode:
     `_run_dependency_aware_pipeline` additionally calls this with just a
     dependency plan's ROOT matched references, to resolve every root intent
     in one call before generating any dependent intent."""
-    generator_context = _build_generator_context(matched, skill_index, settings, question=question, catalog=catalog)
+    # Context building does blocking HTTP (label discovery, OpenSearch mappings): keep it off the event loop.
+    generator_context = await asyncio.to_thread(
+        _build_generator_context, matched, skill_index, settings, question=question, catalog=catalog)
 
     if generator_context.reference_universe_mismatch:
         # Batch 3 (Phase 5): a confident catalog decision shares zero
@@ -668,7 +671,8 @@ async def _run_level3_fallback(question: str, skill_index: SkillIndex, settings:
     # catalog=None: this attempt gets no metric_metadata at all (see the
     # docstring above) -- Level 3 is a single unconstrained attempt, never
     # its own Level-1/Level-2 cascade.
-    generator_context = _build_generator_context(matched, skill_index, settings, question=question, catalog=None)
+    generator_context = await asyncio.to_thread(
+        _build_generator_context, matched, skill_index, settings, question=question, catalog=None)
     known_references = set(generator_context.reference_texts.keys()) | set(generator_context.overview_texts.keys())
     known_datasources = {(m.get("data_source") or "").strip().lower() for m in matched}
 
@@ -1130,7 +1134,8 @@ async def _resolve_dependent_entry(question: str, dep_matched: dict, resolved_en
             "(it is never run across every instance instead).",
         )
 
-    generator_context = _build_generator_context(
+    generator_context = await asyncio.to_thread(
+        _build_generator_context,
         [dep_matched], skill_index, settings, question=question, catalog=catalog,
     )
     if generator_context.reference_universe_mismatch:
@@ -1227,7 +1232,7 @@ async def _resolve_dependent_entry(question: str, dep_matched: dict, resolved_en
                 },
             }
 
-    return executor.execute_contract({"mode": "single", **entry}, settings)
+    return await asyncio.to_thread(executor.execute_contract, {"mode": "single", **entry}, settings)
 
 
 def _describe_entry_for_synthesis(entry: dict) -> str | None:
@@ -1364,7 +1369,7 @@ async def _run_dependency_aware_pipeline(question: str, matched: list[dict], pla
             "can't be safely used to resolve the dependent part."
         )
 
-    executed_root = executor.execute_contract(root_contract, settings)
+    executed_root = await asyncio.to_thread(executor.execute_contract, root_contract, settings)
     root_entries_by_id = _index_executed_entries(executed_root, plan.roots)
     if root_entries_by_id is None:  # defensive: execution preserves count/order, so not expected
         return _dependency_stage_failure("the executed root result could not be attributed to its intent(s).")
@@ -1928,7 +1933,9 @@ async def _run_router(question: str, skill_index: SkillIndex, settings: Settings
         )
     prompt = "\n\n".join(prompt_parts)
 
-    response = llm_client.call_llm_json(
+    # The LLM SDK call is synchronous (and retries with time.sleep): run it in a worker thread.
+    response = await asyncio.to_thread(
+        llm_client.call_llm_json,
         prompt=prompt,
         system_instruction=_build_router_instructions(settings),
         api_key=settings.gemini_api_key,
@@ -2046,6 +2053,7 @@ def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
                             "construction will proceed without it.", ds)
 
     if "prometheus" in datasources and ctx.known_prometheus_metrics:
+        label_discovery.configure(settings.label_discovery_cache_ttl_seconds, settings.label_discovery_max_workers)
         label_details = label_discovery.discover_label_details_for_metrics(
             settings.prometheus_url, sorted(ctx.known_prometheus_metrics),
             lookback=timedelta(hours=settings.label_discovery_lookback_hours),
@@ -2460,7 +2468,8 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
         )
 
     prompt = "\n\n".join(prompt_parts)
-    response = llm_client.call_llm_json(
+    response = await asyncio.to_thread(
+        llm_client.call_llm_json,
         prompt=prompt,
         system_instruction=_build_generator_instructions(settings, action_intent),
         api_key=settings.gemini_api_key,
