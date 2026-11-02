@@ -113,12 +113,14 @@ def _hits(body: dict) -> list[dict]:
 
 
 def _total(body: dict) -> tuple[int | None, str]:
+    """(value, relation); (None, 'unknown') when the response has no total
+    (track_total_hits: false) -- an absent total is never reported as 0 or exact."""
     total = (body.get("hits") or {}).get("total")
-    if isinstance(total, dict):
-        return total.get("value"), total.get("relation") or "eq"
-    if isinstance(total, int):
+    if isinstance(total, dict) and isinstance(total.get("value"), int):
+        return total["value"], total.get("relation") or "eq"
+    if isinstance(total, int) and not isinstance(total, bool):
         return total, "eq"
-    return None, "eq"
+    return None, "unknown"
 
 
 def _merged_envelope(bodies: list[dict]) -> dict:
@@ -226,7 +228,7 @@ def run_absence(entry: dict, pattern: PatternEntry, limits: Limits, runner: Runn
                         "outage rather than every entity being down")
     base_total, base_rel = _total(baseline_body)
     raw = {**_merged_envelope([baseline_body, recent_body]),
-           "hits": {"total": {"value": base_total if base_total is not None else 0, "relation": base_rel}, "hits": []},
+           "hits": {"total": {"value": base_total, "relation": base_rel}, "hits": []},
            "aggregations": {agg_name: {"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0,
                                        "buckets": out_buckets}}}
     summary = {
@@ -451,6 +453,15 @@ def run_recurrence(entry: dict, pattern: PatternEntry, limits: Limits, runner: R
         ranked.append({"key": b.get("key_as_string", b["key"]), "doc_count": int(b.get("doc_count") or 0),
                        "active_intervals": {"value": active}})
     ranked.sort(key=lambda r: (-r["active_intervals"]["value"], -r["doc_count"]))
+    warnings: list[str] = []
+    if int(agg.get("sum_other_doc_count") or 0) > 0:
+        # OpenSearch picks the terms buckets by document count BEFORE the ranking by
+        # active intervals happens here, so an entity that recurs with few documents
+        # can be outside the returned set while a one-off burst is inside it.
+        warnings.append(
+            f"ranking_limited: only the {len(ranked)} entities with the most documents were ranked "
+            f"({agg.get('sum_other_doc_count')} documents belong to other entities); an entity that recurs "
+            f"regularly but with few documents may be missing. Narrow the time range or filter to see them")
     raw = {**_merged_envelope([body]), "hits": body.get("hits") or {"total": {"value": 0, "relation": "eq"}, "hits": []},
            "aggregations": {agg_name: {"doc_count_error_upper_bound": agg.get("doc_count_error_upper_bound", 0),
                                        "sum_other_doc_count": agg.get("sum_other_doc_count", 0), "buckets": ranked}}}
@@ -464,7 +475,7 @@ def run_recurrence(entry: dict, pattern: PatternEntry, limits: Limits, runner: R
                        "back; a high doc_count alone may be one burst or re-sent duplicates.",
     }
     return AnalysisResult(raw=raw, query={"aggs": {agg_name: {"terms": agg_spec["terms"]}}}, summary=summary,
-                          has_input=bool(ranked))
+                          has_input=bool(ranked), warnings=warnings)
 
 
 # ---- dispatch --------------------------------------------------------------------------------------------------

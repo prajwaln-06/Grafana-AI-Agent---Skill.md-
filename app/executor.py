@@ -17,7 +17,7 @@ load-bearing: an alert rule must never be created by this module or by
 anything in the Router -> Generator -> Validator -> Executor pipeline this
 file is the last stage of. Actual creation only ever happens via the
 separate, explicit confirmation endpoint described in SKILL.md §12.1 (see
-`app/api/routes_alerts.py` and `app/grafana_client.py`), which this module
+`POST /api/v1/alerts/confirm` in `run_server.py` and `app/grafana_client.py`), which this module
 has no dependency on and never imports.
 
 Two hardening properties this module guarantees that the pre-migration
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Deliberately does NOT include "alert_rule_proposed" (SKILL.md §12) -- that
 # status must stay pending, untouched by this module, until the separate
-# confirmation endpoint (app/api/routes_alerts.py) explicitly creates the
+# confirmation endpoint (POST /api/v1/alerts/confirm in run_server.py) explicitly creates the
 # rule via app/grafana_client.py. Adding it here would defeat the entire
 # propose/confirm safety boundary §12 exists to enforce; do not add it
 # without re-reading §12.1 first.
@@ -184,10 +184,19 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
     """Registry-governed OpenSearch execution. The index actually searched is
     ALWAYS resolved from the registry (by `pattern_id`, or by an exact match of
     a registered pattern string) -- an index named only by the LLM is never
-    queried. The body is re-checked here (defence in depth: this module has no
-    field catalog, so only the field-agnostic rules and the window cap)."""
+    queried.
+
+    Independent enforcement (defence in depth, not trust in the validator): the
+    entry is re-checked here, immediately before the search, by the FULL guard
+    against the live field view for its pattern (rebuilt from the process field
+    cache) -- confirmed fields and operations, closed grammar, bounded sizes and
+    aggregations, one bounded time window within the cap -- and the query must
+    EQUAL the guard's canonical form. A query that fails, or that is not the
+    canonical query the guard approves, is never sent. Unavailable field
+    discovery also blocks execution (fail closed)."""
     from app.opensearch_catalog import guard, runtime
-    from app.opensearch_catalog.context import Limits
+    from app.opensearch_catalog.context import Limits, OpenSearchContext, PatternContext
+    from app.opensearch_catalog.field_catalog import build_field_view
     from app.opensearch_catalog.redaction import RedactionPolicy, safe_diagnostic
     from app.opensearch_catalog.registry import RegistryError
     from app.opensearch_catalog.results import all_shards_failed, normalize_search_response, response_metadata
@@ -224,22 +233,37 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
                             base_url)
 
     limits = Limits.from_settings(settings)
+    rejected = "Analysis rejected before execution" if entry.get("analysis") is not None \
+        else "Query rejected before execution"
+    # 1. Field-agnostic rules first (no network needed to reject an obviously unsafe body).
     problem = guard.structural_check(dsl_body, limits)
-    window = guard.extract_window(dsl_body, pattern.time_field)
-    if problem is None:
-        if window is None:
-            problem = f"the query has no single bounded time range on {pattern.time_field}"
-        elif window["seconds"] > pattern.max_window_seconds:
-            problem = f"the time window exceeds the maximum of {pattern.max_window}"
     if problem:
-        return _error_block("not_executed", f"Query rejected before execution: {problem}.", base_url,
-                            resolved_time_range=window)
+        return _error_block("not_executed", f"{rejected}: {problem}.", base_url,
+                            resolved_time_range=guard.extract_window(dsl_body, pattern.time_field))
+
+    # 2. The full guard against the live field view, exactly as the validator ran it.
+    view = build_field_view(pattern, runtime.get_field_cache(settings).get(pattern))
+    pc = PatternContext(entry=pattern, view=view)
+    if not pc.usable:
+        return _error_block("not_executed", "Live field discovery is unavailable for this index family, so the "
+                                            "query could not be re-checked and was not run.", base_url,
+                            resolved_time_range=guard.extract_window(dsl_body, pattern.time_field))
+    ctx = OpenSearchContext(patterns={pattern.pattern_id: pc}, limits=limits)
+    check = guard.check_entry({**entry, "pattern_id": pattern.pattern_id}, ctx)
+    if not check.ok:
+        return _error_block("not_executed", f"{rejected} ({check.code}): {safe_diagnostic(check.reason, policy)}",
+                            base_url, resolved_time_range=guard.extract_window(dsl_body, pattern.time_field))
+    if check.query != dsl_body or check.analysis != entry.get("analysis"):
+        return _error_block("not_executed", f"{rejected}: it is not the canonical query the guard approves (it was "
+                                            f"changed or never canonicalised).", base_url,
+                            resolved_time_range=check.window)
+    window = check.window
 
     if entry.get("analysis") is not None:
-        return _execute_opensearch_analysis(entry, pattern, dsl_body, window, settings, policy, limits, base_url)
+        return _execute_opensearch_analysis(entry, pattern, view, ctx, window, settings, policy, limits, base_url)
 
     outcome = opensearch_client.search(
-        base_url, pattern.index_pattern, dsl_body,
+        base_url, pattern.index_pattern, check.query,
         timeout=max(settings.opensearch_timeout_seconds, limits.search_timeout_seconds),
         auth=settings.opensearch_auth,
     )
@@ -282,34 +306,20 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
     return block
 
 
-def _execute_opensearch_analysis(entry: dict, pattern, dsl_body: dict, window: dict | None, settings: Settings,
+def _execute_opensearch_analysis(entry: dict, pattern, view, ctx, window: dict | None, settings: Settings,
                                  policy, limits, base_url: str) -> dict:
-    """A multi-step analysis (app/opensearch_catalog/analysis.py). The entry is first
-    re-validated by the guard against the live field catalog (defence in depth: the
-    analysis parameters must be exactly the canonical ones the validator accepted).
-    Every query -- the model's and each follow-up Python builds -- then goes through
-    `runner`, which checks it with the guard again and sends it through
-    opensearch_client, so this module stays the only caller of OpenSearch. The
-    combined answer is normalised through results.py like any other result."""
-    from app.opensearch_catalog import analysis as os_analysis, guard, runtime
-    from app.opensearch_catalog.context import OpenSearchContext, PatternContext
-    from app.opensearch_catalog.field_catalog import build_field_view
+    """A multi-step analysis (app/opensearch_catalog/analysis.py). The caller has
+    already re-validated the entry with the full guard against the live field view
+    (`view`, `ctx`) and confirmed the query and analysis parameters are exactly the
+    canonical ones. Every query -- the model's and each follow-up Python builds --
+    then goes through `runner`, which checks it with the guard again and sends it
+    through opensearch_client, so this module stays the only caller of OpenSearch.
+    The combined answer is normalised through results.py like any other result."""
+    from app.opensearch_catalog import analysis as os_analysis, guard
     from app.opensearch_catalog.redaction import redact_value, safe_diagnostic
     from app.opensearch_catalog.results import all_shards_failed, normalize_search_response
 
     atype = (entry.get("analysis") or {}).get("type") if isinstance(entry.get("analysis"), dict) else None
-    view = build_field_view(pattern, runtime.get_field_cache(settings).get(pattern))
-    pc = PatternContext(entry=pattern, view=view)
-    if not pc.usable:
-        return _error_block("not_executed", "Live field discovery is unavailable for this index family, so the "
-                                            "analysis was not run.", base_url, resolved_time_range=window)
-    ctx = OpenSearchContext(patterns={pattern.pattern_id: pc}, limits=limits)
-    check = guard.check_entry({**entry, "pattern_id": pattern.pattern_id}, ctx)
-    if not check.ok or check.query != dsl_body or check.analysis != entry.get("analysis"):
-        why = f"({check.code}) {check.reason}" if not check.ok else "the analysis entry was not in canonical form"
-        return _error_block("not_executed", f"Analysis rejected before execution: {safe_diagnostic(why, policy)}",
-                            base_url, resolved_time_range=window)
-
     purposes: list[str] = []
     timeout = max(settings.opensearch_timeout_seconds, limits.search_timeout_seconds)
 

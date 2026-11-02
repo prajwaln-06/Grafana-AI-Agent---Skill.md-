@@ -411,7 +411,7 @@ The three shapes the frontend already knows are unchanged: `hits` (rows),
 
 | Field | What it tells you |
 |---|---|
-| `count` | `value`, `relation` (`eq` exact, `gte` "at least") and `exact` |
+| `count` | `value`, `relation` (`eq` exact, `gte` "at least", `unknown` = not counted, value `null`) and `exact` |
 | `rows` | rows returned vs documents matched, and whether more exist |
 | `aggregation` | whether group counts are estimates and why (`cardinality` is an estimate; `sum_other_doc_count` documents are outside the shown buckets) |
 | `partial`, `partial_reasons`, `shard_failures` | some parts of the cluster failed or timed out, so data may be missing; if **all** fail, the result is an error, not "no data" |

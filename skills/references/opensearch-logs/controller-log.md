@@ -57,7 +57,7 @@ manager reports switch availability, `hmscd` reports link status changes, and
 
 | Intent | Approved shape |
 |---|---|
-| Hosts with errors | `size: 0`, time range, term on `severity` for the error set, `terms` on `entity_host` with a small nested `terms` on `service` |
+| Hosts with errors | `size: 0`, time range, `{"named_condition": "abnormal_severity"}` for the error set (expanded by the system), `terms` on `entity_host` with a small nested `terms` on `service` |
 | Services producing most errors | same filter, `terms` on `service` |
 | Error volume over time | same filter, `date_histogram` on `@timestamp` with an interval chosen from the window |
 | Messages mentioning a phrase | `match_phrase` on `text` inside `filter` with the time range |
@@ -72,9 +72,15 @@ The text role is search-only. Values that live only inside the message text
 ## Severity and "Error" Definition
 
 "Error" means stored severity in the error-and-worse set for this family: the
-stored values `error` and `critical` (and any more severe syslog value the
-catalog confirms exists). `warning` is **not** an error unless the user asks for
-warnings. Compare against the exact stored case.
+observed values `error` and `critical`, plus the syslog names `err`, `crit`,
+`alert` and `emerg` (documented in RFC 5424, not observed in sampled data). Select
+it with the named condition `{"named_condition": "abnormal_severity"}`; the
+system expands it to exactly that set from the registry. Do not write the list
+by hand: a hand-written `term` on `error` alone misses `critical` rows.
+`warning` is **not** an error unless the user asks for warnings; then add an
+explicit `terms` on the stored values `warning` and `warn` alongside the named
+condition (in a `bool.should` with `minimum_should_match` 1). Compare against
+the exact stored case.
 
 ## Known Data Caveats
 
@@ -112,7 +118,7 @@ paths, case and `.keyword` use come from the live field catalog.
   "size": 0,
   "query": { "bool": { "filter": [
       { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
-      { "term":  { "Severity.keyword": "error" } } ] } },
+      { "named_condition": "abnormal_severity" } ] } },
   "aggs": { "by_host": { "terms": { "field": "Resource.host.name.keyword", "size": 20 },
             "aggs": { "by_service": { "terms": { "field": "Resource.service.name.keyword", "size": 5 } } } } }
 }

@@ -22,10 +22,14 @@ What it enforces
   * result bounds -- size, terms size, histogram buckets, total buckets,
     aggregation depth/count, track_total_hits, timeout, projection.
 
-Canonicalisation = only (a) expanding the named severity condition and (b)
-filling DOCUMENTED safe defaults when a key is absent (recorded in `applied`).
-A value the model WROTE is never changed: out-of-range values are rejected,
-not clamped, and `.keyword` is never added to a field for the model.
+Canonicalisation = only (a) expanding the named severity condition, (b)
+filling DOCUMENTED safe defaults when a key is absent and (c) for an analysed
+text field used for exact match (term/terms/prefix) or sort, substituting the
+keyword sub-field that the LIVE MAPPING CONFIRMS for that field. All three are
+recorded in `applied`. Out-of-range values are rejected, not clamped. A
+`.keyword` path is never INVENTED: a text field with no confirmed sub-field is
+rejected for exact match, sort and grouping, and group-by/cardinality must name
+the confirmed sub-field themselves.
 
 Optional multi-step analyses (keys `intent` and `analysis`, see analysis.py for
 the algorithms): the same rule applies. A parameter the model wrote is checked
@@ -46,7 +50,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app import time_utils
@@ -90,8 +94,9 @@ INTENTS = SIMPLE_INTENTS | ANALYSIS_TYPES
 ALLOWED_TOP_LEVEL_KEYS = frozenset(
     {"query", "size", "from", "sort", "aggs", "aggregations", "_source", "track_total_hits", "timeout"})
 
-# Keys that must never appear ANYWHERE in a body (structural, field-agnostic;
-# also enforced again by the executor).
+# Keys that must never appear as a DSL construct anywhere in a body (structural,
+# field-agnostic; also enforced again by the executor). User-chosen aggregation and
+# filter-bucket NAMES are not constructs and are not matched (see _scan_forbidden).
 FORBIDDEN_KEYS = frozenset({
     "script", "script_fields", "script_score", "runtime_mappings", "function_score", "query_string",
     "simple_query_string", "regexp", "wildcard", "fuzzy", "more_like_this", "percolate", "pit",
@@ -139,17 +144,40 @@ def _fail(code: str, reason: str, user_message: str = "") -> None:
 # ---- structural (field-agnostic) check, shared with the executor ------------------------------------
 
 
-def _scan_forbidden(node: Any, path: str = "") -> str | None:
+_AGGS_KEYS = ("aggs", "aggregations")
+
+# Where a dict's keys are user-chosen NAMES rather than DSL constructs:
+#   _POS_AGG_NAMES      keys of an `aggs`/`aggregations` object   ({"stats": {"terms": ...}})
+#   _POS_FILTER_NAMES   keys of a `filters` aggregation's inner `filters` object
+# A name is never interpreted by OpenSearch as a construct, so it is not matched
+# against FORBIDDEN_KEYS (an aggregation called `stats` or `routing` is legal);
+# every VALUE under a name is still scanned in full.
+_POS_BODY, _POS_AGG_NAMES, _POS_AGG_SPEC, _POS_FILTERS_BODY, _POS_FILTER_NAMES, _POS_OTHER = range(6)
+
+
+def _scan_forbidden(node: Any, path: str = "", pos: int = _POS_BODY) -> str | None:
     if isinstance(node, dict):
+        names = pos in (_POS_AGG_NAMES, _POS_FILTER_NAMES)
         for k, v in node.items():
-            if k in FORBIDDEN_KEYS:
+            if not names and k in FORBIDDEN_KEYS:
                 return f"{path}/{k}" if path else k
-            hit = _scan_forbidden(v, f"{path}/{k}")
+            if names:
+                child = _POS_AGG_SPEC if pos == _POS_AGG_NAMES else _POS_OTHER
+            elif pos in (_POS_BODY, _POS_AGG_SPEC) and k in _AGGS_KEYS and isinstance(v, dict):
+                child = _POS_AGG_NAMES
+            elif pos == _POS_AGG_SPEC and k == "filters" and isinstance(v, dict):
+                child = _POS_FILTERS_BODY
+            elif pos == _POS_FILTERS_BODY and k == "filters" and isinstance(v, dict):
+                child = _POS_FILTER_NAMES
+            else:
+                child = _POS_OTHER
+            hit = _scan_forbidden(v, f"{path}/{k}", child)
             if hit:
                 return hit
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            hit = _scan_forbidden(v, f"{path}[{i}]")
+            # list items are never aggregation positions (filter/should lists, sort, _source)
+            hit = _scan_forbidden(v, f"{path}[{i}]", _POS_OTHER)
             if hit:
                 return hit
     return None
@@ -157,8 +185,9 @@ def _scan_forbidden(node: Any, path: str = "") -> str | None:
 
 def structural_check(body: Any, limits: Limits) -> str | None:
     """A reason string if `body` violates a field-agnostic rule, else None.
-    Used by check_entry() and, independently, by the executor as defence in
-    depth (the executor has no field catalog)."""
+    Used by check_entry() and by the executor as its first, network-free
+    check, before the executor re-runs the full check_entry() against the live
+    field view."""
     if not isinstance(body, dict) or not body:
         return "the query is not a non-empty DSL object"
     extra = set(body) - ALLOWED_TOP_LEVEL_KEYS
@@ -191,20 +220,38 @@ def _is_num(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def _parse_bound(value: Any, now: datetime, where: str) -> datetime:
+# Range bounds that OpenSearch rounds UP when the expression is rounded (`/d`) or
+# is a date with no time part: per the documented range-query rounding rules,
+# `gte`/`lt` round down to the start of the unit and `lte`/`gt` round up to its
+# last millisecond. Accounting for that keeps the measured window equal to what
+# the cluster actually scans (e.g. `gte now-7d/d` + `lte now/d` is ~8 days, not 7).
+# Offsets from the start of the day: an inclusive `lte` ends at 23:59:59.999; an
+# exclusive `gt` of 23:59:59.999 is the same as an inclusive start at the next
+# midnight, which is the instant used for the width.
+_ROUND_UP_OFFSET = {"lte": timedelta(days=1) - timedelta(milliseconds=1), "gt": timedelta(days=1)}
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_bound(value: Any, now: datetime, where: str, key: str = "gte") -> datetime:
+    """Resolves one range bound to a UTC instant. `key` (gte/gt/lte/lt) selects the
+    rounding direction for a rounded (`/d`) or date-only bound; see _ROUND_UP_OFFSET."""
     if not isinstance(value, str) or not value.strip():
         _fail(CODE_TIME_RANGE, f"{where}: the time bound must be a date-math or ISO-8601 string")
     text = value.strip()
+    up = _ROUND_UP_OFFSET.get(key)
     if text.lower().startswith("now"):
         try:
-            return time_utils.resolve_relative_time(text, reference=now)
+            dt = time_utils.resolve_relative_time(text, reference=now)
         except time_utils.TimeParseError as e:
             _fail(CODE_TIME_RANGE, f"{where}: {e}")
+        # resolve_relative_time rounds `/d` DOWN; an upper-inclusive / lower-exclusive bound rounds UP.
+        return dt + up if up is not None and text.lower().endswith("/d") else dt
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00").replace("z", "+00:00"))
     except ValueError:
         _fail(CODE_TIME_RANGE, f"{where}: {text!r} is neither date math (now-24h) nor an ISO-8601 timestamp")
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    return dt + up if up is not None and _DATE_ONLY_RE.match(text) else dt
 
 
 def _duration_text(seconds: float) -> str:
@@ -243,7 +290,7 @@ def extract_window(query: Any, time_field: str, now: datetime | None = None) -> 
         hi_key = "lte" if "lte" in b else "lt" if "lt" in b else None
         if not lo_key or not hi_key:
             return None
-        start, end = _parse_bound(b[lo_key], now, "from"), _parse_bound(b[hi_key], now, "to")
+        start, end = _parse_bound(b[lo_key], now, "from", lo_key), _parse_bound(b[hi_key], now, "to", hi_key)
         return {"from_expression": b[lo_key], "to_expression": b[hi_key],
                 "start": start.isoformat().replace("+00:00", "Z"),
                 "end": end.isoformat().replace("+00:00", "Z"), "seconds": (end - start).total_seconds()}
@@ -535,7 +582,8 @@ class _Checker:
         if lo is None or hi is None or ("gte" in b and "gt" in b) or ("lte" in b and "lt" in b):
             _fail(CODE_TIME_RANGE, f"the {tf!r} range must have exactly one lower and one upper bound",
                   "I need both a start and an end for the time range. Please say how far back to look.")
-        start, end = _parse_bound(b[lo], self.now, "time range lower bound"), _parse_bound(b[hi], self.now, "time range upper bound")
+        start = _parse_bound(b[lo], self.now, "time range lower bound", lo)
+        end = _parse_bound(b[hi], self.now, "time range upper bound", hi)
         if end <= start:
             _fail(CODE_TIME_RANGE, "the time range ends before it starts")
         width = (end - start).total_seconds()
@@ -813,6 +861,9 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
             t = body["track_total_hits"]
             if not (isinstance(t, bool) or (isinstance(t, int) and 1 <= t <= limits.max_track_total_hits)):
                 _fail(CODE_BAD_VALUE, "track_total_hits must be true/false or a bounded integer")
+            if t is False and not has_aggs and out["size"] == 0:
+                _fail(CODE_BAD_VALUE, "a count-only query (size 0, no aggregations) cannot set track_total_hits "
+                                      "to false: the count is the answer. Use true for an exact count.")
             out["track_total_hits"] = t
 
         if "timeout" in body:
@@ -848,13 +899,24 @@ def _check_sort(sort: Any, ck: _Checker) -> list:
         if not isinstance(it, dict) or len(it) != 1:
             _fail(CODE_BAD_CLAUSE, f"sort[{i}]: expected {{field: 'asc'|'desc'}}")
         (path, spec), = it.items()
-        ck.info(path, OP_SORT, f"sort[{i}]")
-        if any(path == t or path.startswith(t + ".") for t in ck.entry.role_paths("text")):
+        # A text field without a confirmed keyword sub-field has no 'sort' op, so
+        # ck.info rejects it with an explanation. With one, its 'sort' op maps to
+        # that sub-field: an analysed text field cannot be sorted by OpenSearch, so
+        # the sub-field is substituted (exactly as _exact does for term/terms/prefix)
+        # and RECORDED. Idempotent: the sub-field's own 'sort' op maps to itself.
+        info = ck.info(path, OP_SORT, f"sort[{i}]")
+        if any(p == t or p.startswith(t + ".") for p in (path, ck.base_path(path))
+               for t in ck.entry.role_paths("text")):
             _fail(CODE_BAD_CLAUSE, f"sort[{i}]: free-text fields cannot be used for sorting")
         order = spec.get("order") if isinstance(spec, dict) else spec
         if order not in ("asc", "desc") or (isinstance(spec, dict) and set(spec) != {"order"}):
             _fail(CODE_BAD_CLAUSE, f"sort[{i}]: order must be 'asc' or 'desc'")
-        out.append(it)
+        eff = info.ops[OP_SORT]
+        if eff != path:
+            ck.info(eff, OP_SORT, f"sort[{i}]")
+            ck.applied.append(f"sort[{i}]: sort on analysed text field {path!r} applied to its confirmed keyword "
+                              f"sub-field {eff!r}")
+        out.append({eff: spec})
     return out
 
 

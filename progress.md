@@ -347,3 +347,74 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
 | F-4 | Analysis parameters are placeholders: heartbeat 60 s × 3, the `n/m switches available` wording, "recurring" = 1-hour intervals, `Created` as the iLO event time (D-18, D-24). |
 | F-5 | The frontend should learn the new optional fields `intent`, `analysis`, `execution.analysis` and a row's `analysis` note (D-22, D-35). |
 | F-6 | One test fails on Windows only (Linux file permissions); confirm the full suite on Linux (D-03). |
+| F-7 | Date-math rounding of `lte`/`gt` bounds follows the documented OpenSearch rules, not a live check (D-44). |
+| F-8 | Recurrence ranks only the top entities by document count; a `ranking_limited` warning says so (D-46). |
+
+---
+
+## 5. Audit fixes (2026-11-02, branch `fix/opensearch-audit`)
+
+Source: `opensearch-integration-audit.md` (audit of the merged ZIP, which equals
+commit `f127557`). Every change below has a regression test in
+`tests/test_opensearch_audit_fixes.py`; 50 of its 71 tests fail on the code as
+audited and all pass after the fixes.
+
+- **D-38 (F1) Shape repair runs before canonicalisation.** A Generator answer
+  like `{"mode": "ok", ...}` used to skip canonicalisation and then fail
+  validation as "not in canonical form". Both Generator call sites (the normal
+  path and the dependent-query path) now call one helper,
+  `pipeline._normalize_then_canonicalise`. A declined over-window answer keeps
+  its `mode: "single"` envelope.
+- **D-39 (F2) Sorting a text field uses its confirmed `.keyword` sub-field.**
+  Example: `sort: [{"Resource.host.name": "asc"}]` is sent as
+  `Resource.host.name.keyword` and the change is listed in `guard_notes.applied`
+  (exactly as `term` already did). A text field with no confirmed sub-field
+  (e.g. `Attributes.PortName`) is rejected with an explanation; a sub-field is
+  never invented. The prompt now says this.
+- **D-40 (F3) Histogram vs. buckets is read from the query.** A `terms` on the
+  boolean `Oem.Hpe.Repaired` returns buckets `false`/`true`, no longer a fake
+  time series.
+- **D-41 (F4) A missing total is "unknown", not 0.** With
+  `track_total_hits: false` OpenSearch omits `hits.total`; rows are now kept and
+  the metadata says `{"value": null, "relation": "unknown", "exact": false}`.
+  A count-only query (size 0, no aggregations) may not set
+  `track_total_hits: false` (it would have no answer).
+- **D-42 (F5) The executor re-runs the full guard.** Immediately before every
+  OpenSearch search the executor rebuilds the live field view, runs the same
+  guard as the validator, and refuses anything that is not exactly the
+  canonical query the guard approves. If field discovery is unavailable at that
+  moment, nothing runs (fail closed).
+- **D-43 (F6) Aggregation names are names.** An aggregation (or `filters`
+  bucket) may be called `stats`, `routing`, `profile`, etc.; constructs inside
+  it are still scanned and rejected as before.
+- **D-44 (F7) Rounded time bounds are measured as OpenSearch applies them.**
+  `lte`/`gt` with `/d` (or a date without a time) round UP to the end of the
+  day. So `gte now-7d/d` + `lte now/d` is about 8 days and is now rejected
+  against the 7-day maximum (it is never shortened). **FLAG F-7:** this follows
+  OpenSearch's documented range rounding rules; it was not checked on the real
+  cluster. Prometheus time parsing is unchanged.
+- **D-45 Dependencies never cross datasources.** With
+  `DEPENDENT_QUERY_RESOLUTION_ENABLED`, a Prometheus result can no longer feed an
+  OpenSearch query (or the reverse); such a question uses the ordinary flat
+  path. A label value is never assumed to equal a log field value.
+- **D-46 Recurrence says when it was cut short.** OpenSearch picks the top
+  entities by document count before Python ranks them by separate intervals.
+  When entities were left out, the answer carries a `ranking_limited` warning.
+  The ranking method itself is unchanged. **FLAG F-8:** a full fix needs a
+  different query design. Confirm whether this limit is acceptable.
+- **D-47 Admin reload also reloads the index registry.**
+  `POST /api/v1/admin/reload-skill` now re-reads `index_registry.json` and
+  reports `opensearch_registry: {"loaded": ...}`; no restart needed.
+- **D-48 Docs corrected:** wildcard is no longer advertised; time zone and
+  rounding are described as implemented (UTC, `time_zone` not allowed); the
+  controller-log "error" example uses `abnormal_severity` (it used to miss
+  `critical`); SKILL.md's description names the three log families; alerts are
+  stated to be Prometheus-only (an OpenSearch alert request is `unmapped`);
+  stale comments ("no OpenSearch domain yet", `app/api/routes_alerts.py`)
+  removed.
+
+**Still needs the real cluster** (unchanged by this work): `.keyword`
+sub-fields and `ignore_above`, `fields.Port` vs. the simulator, severity
+vocabularies, heartbeat shape, index rotation naming, and the rounding
+behaviour in D-44. Run `scripts/smoke_test_opensearch.py` per
+`docs/SMOKE_TEST.md`.

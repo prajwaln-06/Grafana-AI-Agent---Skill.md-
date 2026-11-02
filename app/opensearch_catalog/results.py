@@ -88,13 +88,19 @@ def response_metadata(raw: dict, policy: RedactionPolicy) -> dict:
     return meta
 
 
+RELATION_UNKNOWN = "unknown"
+
+
 def _total(raw: dict) -> tuple[int | None, str]:
+    """(value, relation). relation is 'eq', 'gte', or 'unknown' when the response
+    carries no total at all (the request set track_total_hits: false); an unknown
+    total is reported as value None, never as 0 and never as exact."""
     total = (raw.get("hits") or {}).get("total")
-    if isinstance(total, dict):
-        return total.get("value"), total.get("relation") or "eq"
-    if isinstance(total, int):
+    if isinstance(total, dict) and isinstance(total.get("value"), int):
+        return total["value"], total.get("relation") or "eq"
+    if isinstance(total, int) and not isinstance(total, bool):
         return total, "eq"
-    return None, "eq"
+    return None, RELATION_UNKNOWN
 
 
 # ---- helpers -------------------------------------------------------------------------------------------------
@@ -123,6 +129,21 @@ def _query_agg_kinds(node: Any, found: set[str] | None = None) -> set[str]:
         for v in node:
             _query_agg_kinds(v, found)
     return found
+
+
+_BUCKET_AGG_KINDS = ("terms", "date_histogram", "filters")
+
+
+def _top_agg_kind(query: Any, name: str) -> str | None:
+    """The aggregation type of top-level aggregation `name` in the query that was
+    sent ('terms', 'date_histogram', ...), or None when the query does not say."""
+    if not isinstance(query, dict):
+        return None
+    aggs = query.get("aggs") or query.get("aggregations")
+    spec = aggs.get(name) if isinstance(aggs, dict) else None
+    if not isinstance(spec, dict):
+        return None
+    return next((k for k in spec if k in _BUCKET_AGG_KINDS), None)
 
 
 def _bucket(key: Any, body: dict, policy: RedactionPolicy, stats: RedactionStats, depth: int = 0) -> Bucket:
@@ -210,8 +231,9 @@ def _hits(raw, entry: PatternEntry, policy, stats, max_hits, total, relation, me
     stamps = sorted(r.timestamp for r in rows if isinstance(r.timestamp, str))
     truncated = len(raw_hits) > max_hits
     meta["count"] = {"value": total, "relation": relation, "exact": relation == "eq"}
+    # more_available is None (unknown) when the response carried no total.
     meta["rows"] = {"returned": len(rows), "matched": total, "matched_exact": relation == "eq",
-                    "more_available": bool(total is not None and total > len(rows))}
+                    "more_available": (total > len(rows)) if total is not None else None}
     meta["observed_range"] = {"earliest": stamps[0], "latest": stamps[-1],
                               "basis": "earliest and latest @timestamp among the returned rows only; NOT the full range of data available in OpenSearch and NOT the query window"} if stamps else None
     return NormalizedResult(result_type="hits", hits=rows, total_hits=total, truncated=truncated,
@@ -248,7 +270,17 @@ def _aggregation(raw, aggs, query, policy, stats, max_series, total, relation, m
             had_invalid_samples=(body or {}).get("value") is not None and value is None)
 
     items = list(_iter_buckets(buckets))
-    is_histogram = isinstance(buckets, list) and bool(buckets) and "key_as_string" in buckets[0]
+    top_kind = _top_agg_kind(query, name)
+    if top_kind is not None:
+        # The query says what was asked for. `key_as_string` alone is not a signal:
+        # OpenSearch also sets it on terms buckets of boolean (and date/ip) fields.
+        is_histogram = top_kind == "date_histogram"
+    else:
+        # No query structure to consult (should not happen for a validated query):
+        # fall back to the response shape, but never treat boolean keys as times.
+        first = buckets[0] if isinstance(buckets, list) and buckets else None
+        is_histogram = (isinstance(first, dict) and "key_as_string" in first
+                        and first.get("key_as_string") not in ("true", "false"))
     if is_histogram:
         meta["aggregation"]["type"] = "date_histogram"
         return _histogram(items, max_series, policy, stats, meta)

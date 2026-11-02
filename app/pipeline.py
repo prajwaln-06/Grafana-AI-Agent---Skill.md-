@@ -64,7 +64,7 @@ something the Generator should be trusted to supply itself (Section 12.5).
 The resulting `status: "alert_rule_proposed"` result is never auto-executed
 (see executor.py) and never creates anything in Grafana on its own -- that
 only happens via the separate confirmation endpoint in
-app/api/routes_alerts.py, which is this pipeline's sibling, not something
+POST /api/v1/alerts/confirm in run_server.py, which is this pipeline's sibling, not something
 it calls.
 
 Metric catalog integration -- final architecture (Batch 4, Phase 9: this
@@ -355,7 +355,7 @@ INTERNAL_VALIDATION_FAILED_STATUS = "validation_failed"
 
 ALERT_PROPOSED_STATUS = "alert_rule_proposed"
 # SKILL.md Section 9/12. Imported by validator.py, executor.py (by
-# omission -- see its module docstring), and app/api/routes_alerts.py.
+# omission -- see its module docstring), and POST /api/v1/alerts/confirm in run_server.py.
 _ALERT_ACTION_INTENT = "propose_alert_rule"
 # The Router's optional Shape B field (see _ALERT_ROUTER_ADDENDUM below)
 # that flags a request as alert-rule creation rather than a read question.
@@ -734,6 +734,10 @@ class DependencyPlan:
     by_intent_id: dict[str, dict]
 
 
+def _datasource_of(matched_reference: dict) -> str:
+    return (matched_reference.get("data_source") or "").strip().lower()
+
+
 def _extract_dependency_plan(matched: list[dict]) -> DependencyPlan | None:
     """Deterministically validates the Router's optional `intent_id`/
     `depends_on` annotations on `matched_references` (see
@@ -748,6 +752,9 @@ def _extract_dependency_plan(matched: list[dict]) -> DependencyPlan | None:
         share one (incomplete/ambiguous tagging).
       - Any `depends_on` entry is not a list, references an unknown
         `intent_id`, or names its own entry (self-dependency).
+      - A dependent and its parent route to different datasources (e.g. a
+        Prometheus parent feeding an OpenSearch dependent): a label value
+        of one backend is never assumed to equal a field value of another.
       - The dependency graph contains a cycle (detected via a plain Kahn's-
         algorithm topological sort below; a cycle means the sort cannot
         place every intent, which is exactly the failure signal this
@@ -800,6 +807,17 @@ def _extract_dependency_plan(matched: list[dict]) -> DependencyPlan | None:
                     "dependent_query_resolution: intent %r declares depends_on %r, which is not "
                     "a known intent_id in this question -- falling back to the flat path.",
                     intent_id, dep,
+                )
+                return None
+            if _datasource_of(by_id[dep]) != _datasource_of(by_id[intent_id]):
+                # A parent's resolved entity is a label value of ITS backend. Nothing
+                # establishes that a Prometheus label value equals an OpenSearch field
+                # value (or vice versa) -- the OpenSearch overview forbids that
+                # inference -- so a cross-datasource dependency is never chained.
+                logger.warning(
+                    "dependent_query_resolution: intent %r (%s) depends on %r (%s); dependencies across "
+                    "datasources are not supported -- falling back to the flat path.",
+                    intent_id, _datasource_of(by_id[intent_id]), dep, _datasource_of(by_id[dep]),
                 )
                 return None
 
@@ -1160,7 +1178,7 @@ async def _resolve_dependent_entry(question: str, dep_matched: dict, resolved_en
         action_intent=action_intent, parent_context_text=parent_context_text,
         stage_scope_text=_dependent_stage_scope_text(dep_matched),
     )
-    normalized = _normalize_contract_shape(raw_contract)
+    normalized = _normalize_then_canonicalise(raw_contract, generator_context.opensearch)
     validated = validator.validate_contract(
         normalized,
         candidate_metric_scope=candidate_scope,
@@ -1423,7 +1441,7 @@ async def _run_generation_attempt(question: str, matched: list[dict], panic_mode
     """
     contract = await _run_generator(question, matched, panic_mode, generator_context, skill_index, settings,
                                      context, action_intent=action_intent, stage_scope_text=stage_scope_text)
-    contract = _normalize_contract_shape(contract)
+    contract = _normalize_then_canonicalise(contract, generator_context.opensearch)
     contract = _apply_alert_rule_defaults(contract, settings)
     merged = _merge_unresolved_topics(contract, unresolved_topics)
     validated = validator.validate_contract(merged, candidate_metric_scope=candidate_metric_scope,
@@ -2475,10 +2493,21 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
     )
-    # OpenSearch only (no-op for Prometheus-only requests): canonicalise via the
-    # deterministic guard so validation and execution see registry-resolved
-    # index, expanded named conditions and bounded defaults.
-    return os_canonical.canonicalise_contract(response.parsed, ctx.opensearch)
+    # Raw Generator output. OpenSearch canonicalisation is NOT done here: it must
+    # run after `_normalize_contract_shape` (see `_normalize_then_canonicalise`),
+    # otherwise a repaired near-miss such as {"mode": "ok", ...} is skipped by
+    # the canonicaliser and then rejected by the validator as non-canonical.
+    return response.parsed
+
+
+def _normalize_then_canonicalise(contract: dict, opensearch_ctx) -> dict:
+    """Shape repair first, then (OpenSearch only; a no-op for Prometheus-only
+    requests, whose context is None) deterministic canonicalisation by the
+    guard, so validation and execution see the registry-resolved index,
+    expanded named conditions and documented defaults. Every Generator call
+    site uses this, so the canonical form the validator recomputes is always
+    the one the pipeline produced."""
+    return os_canonical.canonicalise_contract(_normalize_contract_shape(contract), opensearch_ctx)
 
 
 # ---- Batch 3 catalog integration (Phases 7-9) ------------------------------

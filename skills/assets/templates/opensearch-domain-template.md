@@ -47,7 +47,7 @@ typical question is about. State observed value sets as observed, not complete.]
 | [rows / count / top_n / trend / distinct] | [shape built from roles] |
 
 State which fields are never grouped (free text) and which clause forms are
-disallowed (scripts, query_string, regular expressions, leading wildcards).
+disallowed (scripts, query_string, regular expressions, wildcard queries).
 
 ## Severity and "Error" Definition
 

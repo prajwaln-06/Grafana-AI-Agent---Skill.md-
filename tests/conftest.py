@@ -84,6 +84,22 @@ def os_registry(skills_root):
 
 
 @pytest.fixture()
+def os_field_cache(monkeypatch):
+    """Serves the SYNTHETIC fixture mappings to the process field cache the executor
+    uses (runtime.get_field_cache), so the executor's independent full-guard re-check
+    has a live field view without a cluster. Returns the cache."""
+    import json
+    from app.opensearch_catalog import runtime as os_runtime
+    from app.opensearch_catalog.field_catalog import FieldCatalogCache
+
+    cache = FieldCatalogCache(
+        lambda ip: json.loads((BACKEND_ROOT / "tests" / "fixtures" / "opensearch" / _OS_FIXTURE_BY_INDEX[ip]).read_text()),
+        ttl_seconds=60, stale_ttl_seconds=60, max_indices=50, failure_backoff_seconds=1)
+    monkeypatch.setattr(os_runtime, "get_field_cache", lambda settings: cache)
+    return cache
+
+
+@pytest.fixture()
 def os_ctx(os_registry):
     """Factory: os_ctx("controller_log", "ilo_events") -> OpenSearchContext built from the SYNTHETIC
     fixture mappings (a real cluster's mappings are not claimed)."""

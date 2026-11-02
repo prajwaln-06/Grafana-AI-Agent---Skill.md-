@@ -90,11 +90,20 @@ def search(base_url: str, index_pattern: str, dsl_body: dict,
         error_msg = _extract_opensearch_error(body) or f"HTTP {resp.status_code}"
         return ExecutionOutcome(status="endpoint_error", error=error_msg)
 
-    hits_total = body.get("hits", {}).get("total", {})
+    hits = body.get("hits") if isinstance(body.get("hits"), dict) else {}
+    hits_total = hits.get("total")
     total_value = hits_total.get("value") if isinstance(hits_total, dict) else hits_total
+    returned = hits.get("hits") if isinstance(hits.get("hits"), list) else []
     has_aggs = bool(body.get("aggregations"))
 
-    if not has_aggs and (total_value or 0) == 0:
+    # `hits.total` is absent when the request set `track_total_hits: false`. An
+    # absent total is UNKNOWN, not zero: emptiness is then decided by the rows
+    # actually returned, so returned rows are never discarded.
+    if isinstance(total_value, int) and not isinstance(total_value, bool):
+        empty = total_value == 0
+    else:
+        empty = not returned
+    if not has_aggs and empty:
         return ExecutionOutcome(status="empty_result", raw_body=body)
 
     return ExecutionOutcome(status="success", raw_body=body)

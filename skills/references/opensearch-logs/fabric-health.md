@@ -73,7 +73,7 @@ treat the two spellings as different switches.
 
 Grouping uses only exact-value fields the catalog confirms are groupable; the
 `text` role is never grouped. Disallowed everywhere: scripts, `query_string`,
-regular expressions, leading wildcards, deep paging.
+regular expressions, wildcard queries, deep paging.
 
 ## Severity and "Unhealthy" Definition
 

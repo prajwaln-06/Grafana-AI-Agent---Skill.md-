@@ -3,7 +3,10 @@ runtime.py
 
 Process-level wiring for the OpenSearch registry and field-catalog cache.
 Built lazily from Settings and reused across requests so the TTL cache
-actually caches. `reset()` is for tests and admin reloads.
+actually caches. `reset()` is for tests; the admin reload
+(`POST /api/v1/admin/reload-skill`) uses `reload_registry_status()`, which
+drops only the cached registry so an edited index_registry.json is picked up
+without a restart.
 """
 from __future__ import annotations
 
@@ -28,6 +31,28 @@ def reset() -> None:
     with _lock:
         _registries.clear()
         _caches.clear()
+
+
+def reset_registry() -> None:
+    """Drops only the cached registry (field-catalog caches are kept), so an edited
+    index_registry.json takes effect on the next load. Used by the admin reload."""
+    with _lock:
+        _registries.clear()
+
+
+def reload_registry_status(settings) -> dict:
+    """Admin reload: drop the cached registry and load it again now, so a broken
+    edit is reported to the operator immediately. Never raises. On failure nothing
+    is cached and every OpenSearch request keeps failing closed until it is fixed."""
+    reset_registry()
+    try:
+        reg = get_registry(settings)
+    except RegistryError as e:
+        return {"loaded": False, "error": str(e)}
+    except Exception as e:  # noqa: BLE001 -- report, never raise from an admin endpoint
+        logger.exception("Unexpected failure while reloading the OpenSearch registry")
+        return {"loaded": False, "error": f"unexpected error: {type(e).__name__}"}
+    return {"loaded": True, "patterns": sorted(p.pattern_id for p in reg.enabled_patterns)}
 
 
 def registry_path(settings) -> Path:

@@ -159,7 +159,10 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "`\"pattern_id\": \"<id>\"`. Do NOT write an `index` value; the system sets it. One pattern_id per result "
         "(use mode \"multi\" for several families).",
         "- Use ONLY the field paths listed under each pattern, and each only for the operations shown. For a text "
-        "field the exact-match path is its confirmed keyword sub-field, shown as `exact=`; never assume `.keyword`.",
+        "field the exact-match path is its confirmed keyword sub-field, shown as `exact=`; never assume `.keyword`. "
+        "term/terms/prefix and sort written on such a text field are applied to its `exact=` path (the system "
+        "substitutes it and records that); group-by and cardinality must name the `exact=` path itself. A text field "
+        "with no `exact=` cannot be sorted or grouped.",
         "- The query must be `{\"bool\": {\"filter\": [ <time range>, ... ], ...}}` with exactly ONE `range` on the "
         "pattern's time field, as a direct child of the top-level `filter` or `must`, with BOTH a lower and an upper "
         "bound (date math like now-24h/now, or ISO timestamps). Never use event-time/display-only fields to filter.",

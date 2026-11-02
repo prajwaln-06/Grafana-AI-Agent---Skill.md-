@@ -1,6 +1,6 @@
 ---
 name: observability-query-builder
-description: Constructs read-only PromQL and OpenSearch queries from natural-language questions about host and GPU observability metrics (Node Exporter: CPU, context switches, interrupts, memory, cache, buffers, swap, system load, filesystem capacity; DCGM Exporter: GPU utilization, compute-pipeline and Tensor Core activity, temperature, power, clocks). Use when the user asks to check, monitor, compare, or investigate a system or GPU metric, or explicitly asks for a Prometheus, PromQL, or OpenSearch query. Never silences, acknowledges, deletes, or modifies an existing alert, restarts a service, or performs any other mutating action under any framing; only builds and validates read-only queries -- with one narrow, explicit exception (§12): it may PROPOSE creation of a brand-new Grafana alert rule for any metric it can already build an ordinary read query for, which this skill never creates automatically and which always requires a separate, explicit user confirmation step outside this skill's own construction procedure before anything is written to Grafana.
+description: Constructs read-only PromQL and OpenSearch queries from natural-language questions about host and GPU observability metrics (Node Exporter: CPU, context switches, interrupts, memory, cache, buffers, swap, system load, filesystem capacity; DCGM Exporter: GPU utilization, compute-pipeline and Tensor Core activity, temperature, power, clocks) and about three registered OpenSearch log families (fabric health: Slingshot switch and port health states, faults and heartbeats; controller logs: controller syslog messages, errors and warnings per host or service; iLO events: BMC/iLO integrated-management-log events, logins and access, severity and recommended actions). Use when the user asks to check, monitor, compare, or investigate a system or GPU metric or one of those log families, or explicitly asks for a Prometheus, PromQL, or OpenSearch query. Never silences, acknowledges, deletes, or modifies an existing alert, restarts a service, or performs any other mutating action under any framing; only builds and validates read-only queries -- with one narrow, explicit exception (§12): it may PROPOSE creation of a brand-new Grafana alert rule for a Prometheus metric it can already build an ordinary read query for (alert rules on OpenSearch log conditions are not supported), which this skill never creates automatically and which always requires a separate, explicit user confirmation step outside this skill's own construction procedure before anything is written to Grafana.
 metadata:
   version: "1.4"
 ---
@@ -765,6 +765,15 @@ alert rule for a metric this skill already covers. It does not, and must
 never, extend to silencing, acknowledging, deleting, or modifying an alert
 that already exists — those remain `out_of_scope_action` with no exception,
 regardless of how the request is phrased (§7.1, §7.6).
+
+**Prometheus metrics only.** Alert rules are provisioned against a Prometheus
+datasource; an `alert_rule_proposed` result must have `data_source:
+"prometheus"`, and the validator rejects any other. Creating an alert on an
+OpenSearch log condition ("alert me when the controller logs an error", "notify
+me when a switch goes unhealthy") is NOT supported: return `unmapped` with an
+explanation that alert rules on log data are not available (the explanation
+may suggest asking the equivalent read question). Never return
+`alert_rule_proposed` for an OpenSearch family.
 
 ### 12.1 Why this is safe: propose, never execute
 

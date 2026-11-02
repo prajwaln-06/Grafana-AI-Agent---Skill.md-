@@ -337,7 +337,7 @@ What an OpenSearch entry looks like (on top of the §4 fields):
 What the `execution` block adds for OpenSearch (§4.2 shapes are unchanged):
 
 - `execution.metadata` — read it before showing a number: `count`
-  (`value`, `relation` `eq`/`gte`, `exact` — a `gte` total is "at least N"),
+  (`value`, `relation` `eq`/`gte`/`unknown`, `exact` — a `gte` total is "at least N"; `unknown` (value `null`) means the query did not count, `track_total_hits: false`),
   `rows` (returned vs matched), `aggregation` (whether group counts are
   approximate and why), `partial` / `partial_reasons` (some shards failed or
   the search timed out), `query_window`, `observed_range` (earliest/latest
@@ -1018,7 +1018,9 @@ with no entity filter — it is discarded and the response is a
 With the flag on, the Router may tag each matched reference with an
 `intent_id`/`depends_on` pair (SKILL.md §13.2) when the question's own
 wording makes one part genuinely conditional on another. This is validated
-deterministically (unique ids, no self-reference, no cycle) before it's
+deterministically (unique ids, no self-reference, no cycle, and a
+dependent on the SAME datasource as each parent -- a Prometheus label value
+is never assumed to equal an OpenSearch field value) before it's
 ever trusted — anything short of a clean, genuine dependency (including,
 overwhelmingly, most requests: no dependency declared at all) is treated
 exactly like this flag were off. When a genuine dependency IS found:

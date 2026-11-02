@@ -3,7 +3,7 @@ grafana_client.py
 
 Thin, hardened wrapper around Grafana's Alerting Provisioning HTTP API
 (POST /api/v1/provisioning/alert-rules). Used ONLY by the alert-rule-
-creation confirmation step (SKILL.md Section 12; app/api/routes_alerts.py)
+creation confirmation step (SKILL.md Section 12; POST /api/v1/alerts/confirm in run_server.py)
 -- never by pipeline.py's construction phase, and never by executor.py
 (see executor.py's module docstring). Mirrors prometheus_client.py's
 conventions exactly: a pooled requests.Session, a small dataclass outcome
@@ -33,7 +33,7 @@ class of write -- see mcp-grafana's `create_incident` tool description,
 quoted in SKILL.md Section 12's originating design discussion: "should be
 used judiciously and sparingly, and only after confirmation from the user,
 as it may notify or alarm lots of people" -- is exactly the propose/confirm
-boundary Section 12.1 and routes_alerts.py implement; this module performs
+boundary Section 12.1 and run_server.py's /api/v1/alerts/confirm endpoint implement; this module performs
 the actual write, but only when called by that confirmation step, never
 from construction.)
 
@@ -102,7 +102,7 @@ def create_alert_rule(
     /api/v1/provisioning/alert-rules. This is the ONLY function in this
     module that performs a write; every other concern (whether this should
     be called at all, whether the user actually confirmed) belongs to
-    app/api/routes_alerts.py, not here.
+    POST /api/v1/alerts/confirm in run_server.py, not here.
 
     Fails closed -- returns "configuration_error" and makes NO HTTP request
     at all -- if any required configuration is missing. This is
@@ -266,7 +266,7 @@ def _format_threshold(threshold: float) -> str:
 
 def _build_deeplink(grafana_url: str, rule_uid: str) -> str:
     """Best-effort link to the created rule's detail page. Purely a
-    convenience for the API response (app/api/routes_alerts.py) -- if
+    convenience for the API response (POST /api/v1/alerts/confirm in run_server.py) -- if
     Grafana's URL scheme for this ever changes, a stale deeplink degrades to
     "click through from the alert list" rather than breaking anything
     functionally, since the rule itself was already created successfully by

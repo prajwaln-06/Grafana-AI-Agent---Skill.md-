@@ -51,7 +51,7 @@ WHAT THIS FILE CHECKS, and where each rule comes from:
      produced `declined`/`parameter_requires_clarification` instead. This
      status is never in EXECUTABLE_STATUSES (executor.py) and this module
      has no say over what happens after validation passes -- see
-     app/api/routes_alerts.py for the separate confirmation step.
+     POST /api/v1/alerts/confirm in run_server.py for the separate confirmation step.
 
      PHASE 13 (Batch 4): `alert_rule_proposed` entries are now ALSO checked
      against `known_metrics` -- the same Principle 1 / Step 3g
@@ -59,7 +59,7 @@ WHAT THIS FILE CHECKS, and where each rule comes from:
      to ordinary `ok`/`panic_mode_best_effort` results. Previously this
      check was skipped entirely for alert proposals, which meant a
      fabricated or unsupported metric name could reach the alert-creation
-     confirmation flow (app/api/routes_alerts.py) even though the same name
+     confirmation flow (POST /api/v1/alerts/confirm in run_server.py) even though the same name
      would have been rejected outright for a normal read query -- a real
      gap given alert rules create persistent, potentially paging monitoring
      behavior. Both paths now share `_check_catalog_status` (below) for the
@@ -84,10 +84,13 @@ WHAT THIS FILE CHECKS, and where each rule comes from:
      guarantees when the catalog is unavailable.
 
 DESIGN PRINCIPLE -- prefer a warning over a false rejection: any check this
-module cannot confidently evaluate (e.g. an OpenSearch field name -- there
-is no OpenSearch domain reference to confirm field names against yet, see
-opensearch-fundamentals.md's status note) is skipped or downgraded to a
-warning, never a hard failure. A validator with more false positives than
+module cannot confidently evaluate is skipped or downgraded to a warning,
+never a hard failure. (OpenSearch entries are NOT in that category when the
+pipeline supplies a request context: field names, operations, index and time
+window are then checked deterministically by app/opensearch_catalog/guard.py
+against the index registry and the live field catalog, and a violation is a
+hard rejection. Only a caller that supplies no OpenSearch context gets the
+structural check plus a warning; see _validate_opensearch_entry.) A validator with more false positives than
 the LLM-based one it replaces would be a worse validator, not a stricter
 one. Only checks with an unambiguous, mechanical right answer reject the
 contract outright.
@@ -496,7 +499,7 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
     This result is NEVER auto-executed -- it's deliberately absent from
     executor.py's EXECUTABLE_STATUSES. It only ever reaches a real Grafana
     write via the separate, explicit confirmation flow described in Section
-    12.1 (app/api/routes_alerts.py + app/grafana_client.py). This function's
+    12.1 (POST /api/v1/alerts/confirm in run_server.py + app/grafana_client.py). This function's
     only job is confirming the PROPOSAL itself is well-formed and not
     fabricated -- it has no opinion on what happens after confirmation.
 

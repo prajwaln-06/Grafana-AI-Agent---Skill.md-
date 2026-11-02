@@ -69,7 +69,10 @@ Do not use this reference for:
 - Any action against existing data or alerts (deleting indices, silencing or
   acknowledging alerts, restarting services) → `out_of_scope_action`
   (`SKILL.md` §3). This domain is strictly read-only.
-- Creating alert rules on log conditions — not supported by this domain.
+- Creating alert rules on log conditions — not supported by this domain:
+  return `unmapped` explaining that alert rules on log data are not available
+  (`SKILL.md` §12); the explanation may suggest asking the equivalent read
+  question instead.
 - Questions that need a join between two index families or between logs and
   metrics in one query (for example "what was the controller logging when this
   node's temperature peaked"). Answer each part separately when the user names

@@ -88,10 +88,14 @@ def test_opensearch_entry_with_unregistered_list_index_is_not_executed(settings)
     assert not mock_search.called
 
 
-def test_opensearch_entry_with_registered_pattern_searches_registry_index(settings):
-    entry = {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log",
-              "query": {"size": 5, "query": {"bool": {"filter": [
-                  {"range": {"@timestamp": {"gte": "now-24h", "lte": "now"}}}]}}}}
+def test_opensearch_entry_with_registered_pattern_searches_registry_index(settings, os_ctx, os_field_cache):
+    # The executor re-runs the full guard and only sends the canonical query, so the
+    # entry is canonicalised exactly as the pipeline does before validation.
+    from app.opensearch_catalog import canonical
+    entry = canonical.canonicalise_contract(
+        {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log",
+         "query": {"size": 5, "query": {"bool": {"filter": [
+             {"range": {"@timestamp": {"gte": "now-24h", "lte": "now"}}}]}}}}, os_ctx("controller_log"))
     fake_outcome = opensearch_client.ExecutionOutcome(
         status="success", raw_body={"hits": {"total": {"value": 1, "relation": "eq"},
                                               "hits": [{"_source": {"Body": "x", "Severity": "error"}}]}})

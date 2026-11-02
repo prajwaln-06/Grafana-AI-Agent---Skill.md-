@@ -27,7 +27,12 @@ aggregated results are needed, to avoid pulling raw documents unnecessarily.
 | `match` | Full-text, analyzed match on a text field |
 | `range` | Numeric or date bounds |
 | `exists` | Field is present |
-| `wildcard` / `prefix` | Pattern match — use cautiously, can be slow on large indices |
+| `prefix` | "Starts with" match on an exact-match (keyword) field; a plain string, no `*` or `?` |
+
+`wildcard`, `regexp`, `fuzzy`, `query_string` and `simple_query_string` are
+**not allowed**: a query that uses them is rejected before it runs. Use
+`prefix` for "starts with", `match` / `match_phrase` on the family's text field
+for words in a message, and `term` / `terms` for exact values.
 
 ## Compound Queries
 
@@ -44,9 +49,10 @@ aggregated results are needed, to avoid pulling raw documents unnecessarily.
 |---|---|
 | `now` | Current time |
 | `now-1h`, `now-7d` | Relative time in the past |
-| `now/d` | Rounds down to start of day |
+| `now/d` | Start of the current UTC day as a `gte` or `lt` bound; end of the current UTC day as an `lte` or `gt` bound (see "Rounding direction" below) |
 
-Used inside `range` queries on date fields.
+Used inside `range` queries on date fields. `/d` is the only rounding unit
+accepted.
 
 ## Aggregations
 
@@ -64,7 +70,8 @@ Used inside `range` queries on date fields.
 |---|---|
 | `terms`/exact match on a `text` field | Fails or produces meaningless per-token buckets — use the `.keyword` sub-field or a field mapped as `keyword` |
 | `must` vs `filter` for exact constraints | `must` affects scoring and is slower — prefer `filter` for non-scored exact matches like a level or service name |
-| Date math timezone | Evaluated in the cluster's configured timezone unless explicitly specified — do not assume UTC without confirming |
+| Date math time zone | `now` is an instant (time zones do not change it), and rounding such as `/d` happens in UTC unless the range sets a `time_zone`. Setting `time_zone` is not allowed here, so every window is UTC: `now/d` means 00:00 UTC today. Times written without an offset are read as UTC |
+| Rounding direction | A rounded bound is widened, not narrowed: `gte`/`lt` round down to the start of the day, `lte`/`gt` round up to its end. So `"gte": "now-7d/d", "lte": "now/d"` covers about 8 days and is rejected against a 7-day maximum; use `"lt": "now/d"` (whole past days) or plain `now-7d` / `now` |
 | Total hit count is a lower bound | By default the total is counted only up to 10,000 and reported with relation `gte` ("at least"). Read `hits.total.relation`; never present a `gte` total as an exact count. Exact counting needs `track_total_hits` |
 | `terms` buckets are truncated | `terms` returns only its top `size` buckets (default 10). `sum_other_doc_count` reports how many documents fell outside them — surface it rather than implying the buckets are complete |
 | `cardinality` is approximate | A distinct count is an estimate; label it approximate |

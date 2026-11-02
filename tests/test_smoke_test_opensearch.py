@@ -13,6 +13,19 @@ from app.opensearch_catalog import runtime
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "smoke_test_opensearch.py"
 
 
+# Tests that must see the REAL runtime field cache (e.g. an unreachable cluster).
+_REAL_RUNTIME_CACHE = {"test_main_exits_nonzero_and_does_not_traceback_when_the_cluster_is_unreachable"}
+
+
+@pytest.fixture(autouse=True)
+def _executor_field_view(request):
+    """The executor re-runs the full guard against the runtime field cache. Live, the script builds its
+    context from that same cache; here both see the synthetic fixture mappings."""
+    if request.node.originalname in _REAL_RUNTIME_CACHE:
+        return None
+    return request.getfixturevalue("os_field_cache")
+
+
 @pytest.fixture(scope="module")
 def smoke():
     spec = importlib.util.spec_from_file_location("smoke_test_opensearch", SCRIPT)

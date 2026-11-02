@@ -363,25 +363,31 @@ def test_keep_internal_policy_applies_to_results(os_registry):
     assert "10.1.2.3" in r.hits[0].body and "8.8.8.8" not in r.hits[0].body
 
 
-def test_executor_error_paths_are_redacted(settings):
+def _canonical_executor_entry(os_ctx):
+    """A canonical (pipeline-shaped) entry: the executor re-runs the full guard and only sends that."""
+    from app.opensearch_catalog import canonical
+    W = {"range": {"@timestamp": {"gte": "now-1h", "lte": "now"}}}
+    return canonical.canonicalise_contract(
+        {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log",
+         "query": {"size": 1, "query": {"bool": {"filter": [W]}}}}, os_ctx("controller_log"))
+
+
+def test_executor_error_paths_are_redacted(settings, os_ctx, os_field_cache):
     from unittest.mock import patch
     from app import executor, opensearch_client
-    W = {"range": {"@timestamp": {"gte": "now-1h", "lte": "now"}}}
-    e = {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log",
-         "query": {"size": 1, "query": {"bool": {"filter": [W]}}}}
+    e = _canonical_executor_entry(os_ctx)
     for status in ("endpoint_error", "endpoint_unreachable", "timeout"):
         out = opensearch_client.ExecutionOutcome(status=status, error=f"Could not connect to http://10.1.2.3:9200: {LEAK}")
-        with patch.object(opensearch_client, "search", return_value=out):
+        with patch.object(opensearch_client, "search", return_value=out) as m:
             res = executor.execute_contract(e, settings)
+        assert m.called and res["execution"]["execution_status"] == status
         _assert_clean(res["execution"]["error"])
 
 
-def test_executor_all_shards_failed_metadata_is_redacted(settings):
+def test_executor_all_shards_failed_metadata_is_redacted(settings, os_ctx, os_field_cache):
     from unittest.mock import patch
     from app import executor, opensearch_client
-    W = {"range": {"@timestamp": {"gte": "now-1h", "lte": "now"}}}
-    e = {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log",
-         "query": {"size": 1, "query": {"bool": {"filter": [W]}}}}
+    e = _canonical_executor_entry(os_ctx)
     sh = {"total": 1, "successful": 0, "failed": 1, "failures": [{"index": "i", "shard": 0,
                                                                   "reason": {"type": "t", "reason": LEAK}}]}
     out = opensearch_client.ExecutionOutcome(status="success", raw_body=_raw(shards=sh, total=0))

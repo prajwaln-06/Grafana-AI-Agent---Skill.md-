@@ -202,10 +202,16 @@ async def reload_skill():
         raise HTTPException(status_code=422, detail=f"Failed to reload skill: {str(e)}")
         
     skill_index = root_agent._get_skill_index()
+    # The OpenSearch index registry is cached for the life of the process; reload
+    # it too, so an edited index_registry.json takes effect without a restart. A
+    # broken registry is reported here (and every OpenSearch request then fails
+    # closed until it is fixed); it does not undo the skill reload above.
+    from app.opensearch_catalog import runtime as os_runtime
     return {
         "skill_name": skill_index.metadata.name,
         "skill_version": skill_index.metadata.version,
         "routing_rows": len(skill_index.routing_rows),
+        "opensearch_registry": await asyncio.to_thread(os_runtime.reload_registry_status, get_settings()),
     }
 
 

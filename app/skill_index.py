@@ -12,7 +12,8 @@ startup, and expose small, generic lookups the pipeline calls at runtime.
 
 Nothing in this file encodes "node-exporter" or "dcgm-exporter" or any
 specific metric/domain name. If a new exporter, domain, or datasource is
-added to SKILL.md -- including the OpenSearch domains that don't exist yet
+added to SKILL.md -- as the three OpenSearch log families were (fabric
+health, controller logs, iLO events; see skills/references/opensearch-logs/)
 -- this module picks them up automatically the next time it parses the file.
 That's the whole point: the routing table is the single source of truth, and
 this module is a thin, generic reader of it.

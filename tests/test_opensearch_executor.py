@@ -2,14 +2,29 @@
 handling, redacted diagnostics. The OpenSearch HTTP client is always mocked (no live cluster)."""
 from unittest.mock import patch
 
+import pytest
+
 from app import executor, opensearch_client
+from app.opensearch_catalog import canonical
 
 W = {"range": {"@timestamp": {"gte": "now-24h", "lte": "now"}}}
 Q = {"size": 5, "query": {"bool": {"filter": [W]}}}
+CANON_Q: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _live_fields(os_field_cache, os_ctx):
+    """The executor re-runs the full guard against the live field view and sends only
+    the canonical query; serve the synthetic mappings and canonicalise Q exactly as
+    the pipeline does before validation."""
+    CANON_Q.clear()
+    CANON_Q.update(canonical.canonicalise_contract(
+        {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log", "query": Q},
+        os_ctx("controller_log"))["query"])
 
 
 def entry(**kw):
-    return {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log", "query": Q, **kw}
+    return {"status": "ok", "data_source": "opensearch", "pattern_id": "controller_log", "query": dict(CANON_Q), **kw}
 
 
 def outcome(raw, status="success", error=None):

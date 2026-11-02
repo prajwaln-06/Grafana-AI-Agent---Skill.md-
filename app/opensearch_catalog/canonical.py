@@ -49,6 +49,8 @@ def _canonicalise_entry(entry: dict, ctx: OpenSearchContext) -> dict:
     if result.code == guard.CODE_WINDOW_EXCEEDS_MAX:
         logger.info("OpenSearch window exceeds the permitted maximum: %s", result.reason)
         return {
+            # keep the envelope of a single-mode contract (shape repair runs first)
+            **({"mode": entry["mode"]} if "mode" in entry else {}),
             "status": "declined",
             "reason": "parameter_requires_clarification",
             "explanation": result.user_message or result.reason,

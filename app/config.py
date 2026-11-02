@@ -94,7 +94,7 @@ class Settings(BaseSettings):
                     "this capability existed (out_of_scope_action) -- there is no partial "
                     "or inconsistent state. Turning this on does not by itself expose "
                     "anything to end users beyond a PROPOSAL that still requires a separate, "
-                    "explicit confirmation call (see app/api/routes_alerts.py); it only "
+                    "explicit confirmation call (see POST /api/v1/alerts/confirm in run_server.py); it only "
                     "controls whether that proposal step is reachable at all.",
     )
     grafana_url: str = Field(

@@ -206,7 +206,12 @@ needs no action at all — it's read fresh from disk every request. See
 `HANDOFF.md`'s "Adding new coverage" section for the full explanation of
 which is which. It also re-reads `reviews.json` into the catalog snapshot
 (waking the refresh worker when runtime reconciliation is on; no Prometheus
-call happens on the request thread).
+call happens on the request thread). It also drops the cached OpenSearch index
+registry and loads `app/opensearch_catalog/index_registry.json` again, so a
+registry edit takes effect without a restart; the response's
+`opensearch_registry` field says `{"loaded": true, "patterns": [...]}` or
+`{"loaded": false, "error": "..."}`. A broken registry does not undo the skill
+reload, but every OpenSearch request fails closed until it is fixed.
 
 ## Reviewing newly discovered metrics
 
