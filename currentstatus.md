@@ -30,10 +30,15 @@ about how far the numbers can be trusted.
 * Platform fixes: the server no longer freezes while it waits for the AI or a
   database, the API key and allowed websites are enforced, alert confirmation
   is safer, and Prometheus label lookups are cached.
-* Tests: **1385** in total. On this Windows laptop 1384 pass and one fails
-  only because it checks a Linux file permission; on Linux all 1385 pass
-  (checked in a Linux container, see `progress.md`). The starting point was
-  1231.
+* The fixes from the OpenSearch integration audit (2026-11-02, section 18):
+  sorting text fields, true/false groups, missing totals, the executor re-running
+  the full guard, aggregation names, rounded time windows, cross-datasource
+  dependencies, recurrence truncation warnings and registry reload.
+* Tests: **1456** in total (1385 after the merge, plus 71 audit regression
+  tests). On this Windows laptop 1455 pass and one fails only because it checks
+  a Linux file permission; on Linux the 1385 merge-era tests all passed
+  (checked in a Linux container, see `progress.md`). The audit tests have been
+  run on Windows only. The starting point was 1231.
 
 **What is not finished, on purpose?** Alerting and correlations on OpenSearch
 (see `docs/NEXT_PHASE.md`, which keeps all 63 open questions). Nothing has been
@@ -259,16 +264,17 @@ All OpenSearch logic is in `app/opensearch_catalog/`. Each file has one job.
 | `registry.py` | reads that file and refuses to start if anything is inconsistent | you want to know which mistakes are caught |
 | `field_catalog.py` | reads the live mapping and works out what each field can do (for example whether `Severity.keyword` exists in every recent daily index); caches it for 10 minutes | a query is refused with `unknown_field` or `operation_not_supported` |
 | `context.py` | combines registry and live catalog for one question and writes the rules block the query-writing AI reads; holds the `Limits` | you want to know exactly what the AI is told |
-| `guard.py` | the strict gate: allowed or rejected, with a reason code; fills only documented defaults | a question is refused |
+| `guard.py` | the strict gate: allowed or rejected, with a reason code; fills only documented defaults and swaps a text field for its confirmed `.keyword` sub-field | a question is refused |
 | `canonical.py` | the pipeline hook that runs the guard before validation, and turns a too-long window into a polite "please narrow it" | you trace how a contract changes before it runs |
 | `severity.py` | expands `abnormal_severity` into real values and labels every returned row `abnormal` / `normal` / `unknown` | a severity verdict looks wrong |
 | `redaction.py` | masks user names, e-mail and IP addresses in everything returned | you need to know what is masked and what is not |
 | `results.py` | turns the raw answer into rows/buckets/series plus metadata (exact or "at least", partial, approximate, observed range) | you read a result's `metadata` |
 | `analysis.py` (new) | the five multi-step recipes (section 11) | you work on absence, context windows, lag, shortfalls or recurrence |
-| `runtime.py` | keeps the registry and catalog caches for the whole process | rarely |
+| `runtime.py` | keeps the registry and catalog caches for the whole process; the admin reload re-reads the registry | rarely |
 
 Files outside the folder that take part: `app/opensearch_client.py` (the HTTP
-calls), `app/executor.py` (runs queries and analyses), `app/validator.py`
+calls), `app/executor.py` (re-runs the full guard against the live fields, then
+runs only the approved query or analysis), `app/validator.py`
 (re-runs the guard), `app/pipeline.py` (the conductor), `app/config.py` (every
 setting, from the environment).
 
@@ -314,7 +320,11 @@ must be in both before a query may use it.
 The friend's central rule is that **the guard never changes a value the model
 wrote**. A value that is out of range is rejected with an explanation. Only a
 value that is *missing* is filled, from a documented default, and that is
-recorded in `applied`. Real examples:
+recorded in `applied`. The one other change it makes is also recorded in
+`applied`: a `term` match or a sort on a text field uses the field's confirmed
+`.keyword` sub-field (for example `Resource.host.name` ->
+`Resource.host.name.keyword`). A text field with no confirmed sub-field cannot be
+sorted or grouped, and a sub-field is never invented. Real examples:
 
 | What the model wrote | Code | What the guard says |
 |---|---|---|
@@ -323,14 +333,23 @@ recorded in `applied`. Real examples:
 | a field called `Resource.node_id` | `unknown_field` | "field 'Resource.node_id' is not a field this index family permits." |
 | `must_not` on an iLO severity field | `severity_invalid` | "a must_not on a severity field is not allowed ... because it would treat every unrecognised or empty value as abnormal. Use {"named_condition": "abnormal_severity"} instead." |
 | a before/after span of 2 hours | `analysis_invalid` (new) | "`before` '2h' is longer than the maximum of 60m; it has not been shortened". The user is asked for 60 minutes or less. |
+| `gte now-7d/d` with `lte now/d` | `window_exceeds_max` | `lte now/d` rounds **up** to the end of today, so this is about 8 days, more than 7. It is rejected, never shortened. |
+| a sort on `Attributes.PortName` (text, no keyword sub-field) | `operation_not_supported` | the field cannot be sorted; nothing is invented. |
 
 Other rules: only the three registered families, chosen by `pattern_id`; only
 fields the registry permits *and* the live mapping confirms, each only for the
 operations its type supports; exactly one time range on `@timestamp` with both
 ends; no scripts, `query_string`, wildcards, regular expressions, nested
-queries or paging; at most 100 rows, 50 groups (500 only for the absence
+queries or paging; no `time_zone` (all date math is UTC); at most 100 rows, 50 groups (500 only for the absence
 analysis), 200 timeline buckets, 3 levels of aggregation; a 10-second
-server-side timeout.
+server-side timeout. An aggregation may be *named* anything, including `stats`
+or `routing`; only what is inside it is checked. A count-only question may not
+turn the total count off (`track_total_hits: false`).
+
+The executor does not trust the validator's word. Just before it sends a query,
+it rebuilds the live field list, runs the same guard again and sends only the
+exact query the guard approves. If the field list cannot be read at that moment,
+nothing is sent.
 
 The reason codes are: `context_unavailable`, `unknown_pattern`,
 `index_mismatch`, `forbidden_key`, `unknown_field`, `operation_not_supported`,
@@ -422,6 +441,12 @@ The three shapes the frontend already knows are unchanged: `hits` (rows),
 
 A count-only question ("how many critical events?") is a success carrying
 `metadata.count`, not an "empty" result.
+
+If the query turned counting off, OpenSearch sends no total. The rows are still
+returned, `count` says `{"value": null, "relation": "unknown"}` and
+`rows.more_available` is `null` (not known), never 0. Whether groups are a
+timeline or plain groups is read from the query itself, so a group-by on a
+true/false field shows `true` and `false`, not a time series.
 
 The entry itself also carries `guard_notes` (the defaults that were filled and
 any warnings), so you can always see what the system added.
@@ -516,6 +541,11 @@ What "recurring" should mean is still an open question (one-hour intervals is
 the current placeholder, and a fault simply re-emitted every hour also scores
 high).
 
+A known limit (flag F-8): OpenSearch first keeps the top entities by **document
+count**, and only then are they ranked by separate hours. A port with few
+documents spread over many hours can therefore be left out. When any entity was
+left out, the answer carries a `ranking_limited` warning.
+
 ### 11.6 What did not become an analysis
 
 "Unusually frequent logins" (no baseline is defined), "failed logins" (the
@@ -553,6 +583,9 @@ metrics stay `unmapped`, exactly as the friend's skill files say.
 * **Every limit is a setting** (names in `.env.example`), including the new
   `OPENSEARCH_ANALYSIS_MAX_TERMS`, `OPENSEARCH_ANALYSIS_ANCHOR_LIMIT` and
   `OPENSEARCH_ANALYSIS_CONTEXT_MAX_MINUTES`.
+* **Reload without restart.** `POST /api/v1/admin/reload-skill` re-reads the
+  skill files **and** `index_registry.json`, and reports
+  `opensearch_registry: {"loaded": true, "patterns": [...]}` or the error.
 * **Not yet supported:** HTTPS with a private certificate authority (TLS
   options).
 
@@ -572,6 +605,10 @@ particular:
 * **Severity vocabularies** are `documented` or `provisional` except fabric's
   observed `HEALTHY` / `CRITICAL`.
 * **Daily index rotation** (`-YYYY.MM.dd`) is unconfirmed.
+* **Date rounding.** The rule that `lte now/d` reaches the end of the day follows
+  OpenSearch's documentation; it has not been checked on your cluster (flag F-7).
+* **`fields.Port`** in the fabric data is checked only against the simulator's
+  document shape.
 * **Whether the real AI model routes the questions correctly and writes these
   query shapes.** The tests fake both AI calls.
 
@@ -591,7 +628,9 @@ The full list with reasons is in `progress.md`. The short version:
 | F-3 | No TLS options for OpenSearch yet (needed if the cluster uses HTTPS with a private certificate). |
 | F-4 | The analysis parameters are placeholders until the smoke test confirms them. |
 | F-5 | The frontend should learn the new optional fields (`execution.analysis`, a row's `analysis` note); nothing existing changed meaning. |
-| F-6 | One test fails on Windows only (a Linux file-permission check). On Linux all 1385 pass. |
+| F-6 | One test fails on Windows only (a Linux file-permission check). On Linux the 1385 merge-era tests all passed; the 71 audit tests were run on Windows only. |
+| F-7 | Rounded `lte`/`gt` bounds are measured by the documented OpenSearch rule, not a live check. |
+| F-8 | Recurrence ranks only the top entities by document count; a `ranking_limited` warning says when some were cut. Confirm this limit is acceptable. |
 
 ---
 
@@ -609,7 +648,7 @@ The full list with reasons is in `progress.md`. The short version:
 
 | If you want to know ... | Open |
 |---|---|
-| why something was decided, and what is flagged | `progress.md` |
+| why something was decided, and what is flagged | `progress.md` (audit fixes: section 5) |
 | how the whole OpenSearch part works | this file |
 | what the skill files must contain | `docs/SKILL_AUTHOR_CONTRACT.md` |
 | how to test against the real cluster | `docs/SMOKE_TEST.md` |
@@ -631,7 +670,7 @@ The full list with reasons is in `progress.md`. The short version:
 * **Date math:** relative times such as `now-24h`.
 * **Document:** one record, such as one log line.
 * **DSL (Query DSL):** the JSON language used to ask OpenSearch a question.
-* **Executor:** the only part of the system that talks to OpenSearch.
+* **Executor:** the only part of the system that talks to OpenSearch; it re-runs the guard before every search.
 * **Family / `pattern_id`:** one of the three registered kinds of log, named by a stable id.
 * **Field catalog:** the live list of fields and what each can do, read from the mapping.
 * **Guard:** the strict checker; it rejects and explains, and fills only documented defaults.
@@ -646,3 +685,29 @@ The full list with reasons is in `progress.md`. The short version:
 * **`unmapped`:** the honest answer "this is not covered", instead of a guess.
 * **Validator:** the final gate before execution; for OpenSearch it re-runs the guard.
 * **xname:** the hardware naming scheme, such as `x1000c3r1`.
+
+---
+
+## 18. Audit fixes (2026-11-02)
+
+An audit of the merged code found the defects below. All are fixed, each with a
+regression test in `tests/test_opensearch_audit_fixes.py` (71 tests; 50 of them
+fail on the code as audited). Details and decision numbers (D-38 to D-48) are in
+`progress.md` section 5.
+
+| Finding | What was wrong | What happens now |
+|---|---|---|
+| F1 | A slightly mis-shaped AI answer skipped the guard's clean-up and then failed validation. | The shape is repaired first, then the guard runs. |
+| F2 | A sort on a text field was sent as written and failed on the cluster. | It uses the confirmed `.keyword` sub-field, or is refused. |
+| F3 | A group-by on a true/false field was shown as a timeline. | The query decides: groups stay groups. |
+| F4 | With counting off, rows were dropped and the total shown as 0. | Rows are kept; the total is "unknown". |
+| F5 | The executor trusted the validator and did only a light check. | It re-runs the full guard and sends only the approved query. |
+| F6 | An aggregation named `stats` or `routing` was refused. | Names are names; contents are still checked. |
+| F7 | `lte now/d` was measured as midnight, so an 8-day window passed the 7-day limit. | Rounding is measured as OpenSearch applies it (not checked live: F-7). |
+| Dependencies | A Prometheus result could feed an OpenSearch query. | Dependencies never cross datasources. |
+| Recurrence | Truncated rankings were silent. | A `ranking_limited` warning (F-8). |
+| Reload | Changing the registry needed a restart. | The admin reload re-reads it. |
+| Docs | Wildcards, time zones, the controller "error" example and alert support were described wrongly. | Corrected; alerts are Prometheus-only. |
+
+**Still not verified:** anything on the real cluster (section 14). Run
+`docs/SMOKE_TEST.md` before relying on it.

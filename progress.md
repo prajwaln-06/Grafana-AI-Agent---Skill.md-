@@ -334,6 +334,9 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
 - (Resolved in Stage 5: on Linux all 1385 tests pass.) On this Windows laptop one test
   (`test_reviews.py::test_round_trip_is_deterministic_and_sorted`) fails
   because it checks a Linux file permission.
+- After the audit fixes (section 5) the suite has 1456 tests: on Windows 1455
+  pass and the same permission test fails. The 71 audit tests have not yet been
+  run on Linux.
 
 ---
 
@@ -346,7 +349,7 @@ merged with `git merge`; every change was made by hand, in stages, with tests.
 | F-3 | No TLS options for OpenSearch yet (D-14). |
 | F-4 | Analysis parameters are placeholders: heartbeat 60 s × 3, the `n/m switches available` wording, "recurring" = 1-hour intervals, `Created` as the iLO event time (D-18, D-24). |
 | F-5 | The frontend should learn the new optional fields `intent`, `analysis`, `execution.analysis` and a row's `analysis` note (D-22, D-35). |
-| F-6 | One test fails on Windows only (Linux file permissions); confirm the full suite on Linux (D-03). |
+| F-6 | One test fails on Windows only (Linux file permissions); confirm the full suite (now 1456 tests) on Linux (D-03). |
 | F-7 | Date-math rounding of `lte`/`gt` bounds follows the documented OpenSearch rules, not a live check (D-44). |
 | F-8 | Recurrence ranks only the top entities by document count; a `ranking_limited` warning says so (D-46). |
 
@@ -418,3 +421,13 @@ sub-fields and `ignore_above`, `fields.Port` vs. the simulator, severity
 vocabularies, heartbeat shape, index rotation naming, and the rounding
 behaviour in D-44. Run `scripts/smoke_test_opensearch.py` per
 `docs/SMOKE_TEST.md`.
+
+- **D-49 Verified results and deliverable.** Windows 11, Python 3.12.10:
+  `python -m pytest tests -q` gives **1455 passed, 1 failed** (only the D-03
+  permission test). OpenSearch unit set 557 passed; guard/validator/executor/
+  results/pipeline set 296 passed; registry consistency 155 passed;
+  `smoke_test_opensearch.py --check-skills` OK; Prometheus regression set 364
+  passed; `ruff check app run_server.py --select F,E9` clean. The ZIP
+  `work/Grafana-AI-Agent---Skill.md--feat-opensearch-integration-merged.zip` was
+  rebuilt from the committed files (`git archive`) and pushed to the GitHub
+  branch `opensearch-implementation`.
