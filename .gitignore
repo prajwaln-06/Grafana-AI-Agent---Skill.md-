@@ -1,16 +1,53 @@
+# --- Secrets and local configuration ---------------------------------------
+# The real .env holds the Authentik client secret, the session secret and the
+# credentials of the local stack. Only .env.example is tracked.
 .env
+.env.local
+.env.*.local
+ui/.env
+ui/.env.local
+grafana_ai/.env
+
+# Local credentials of the development stack (they also live in .env).
+LOGINS.txt
+
+# --- Python -----------------------------------------------------------------
 __pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
+env/
 *.egg-info/
-.adk/
-app/.adk/
+build/
+dist/
+*.pid
+
+# --- Node / frontend --------------------------------------------------------
 node_modules/
 ui/node_modules/
 ui/dist/
-.DS_Store
-*.log
-app_data/
+ui/coverage/
+.vite/
+*.tsbuildinfo
 
+# --- Application data -------------------------------------------------------
+# The local RBAC database and the runtime state of the agent.
+app_data/
+.adk/
+app/.adk/
+data/
+
+# --- Editors and logs -------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.orig
+*.rej
+*.log
+server.log

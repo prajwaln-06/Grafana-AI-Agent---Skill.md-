@@ -232,6 +232,14 @@ class Settings(BaseSettings):
         description="SameSite attribute of the session cookie. 'lax' is required for the "
                     "cookie to survive the top-level redirect back from Authentik.",
     )
+    authentik_post_logout_redirect_uri: str = Field(
+        default="http://localhost:5173/",
+        description="URL the browser is sent to once Authentik has ended the SSO "
+                    "session during an RP-initiated logout. It must match the "
+                    "'Strict Post Logout URI' registered for the Authentik "
+                    "application character for character (including the trailing "
+                    "slash), otherwise the provider refuses the logout.",
+    )
     authentik_enrollment_flow: str = Field(
         default="default-enrollment-flow",
         description="Slug of the Authentik enrollment flow used for self-service sign-up. "

@@ -163,9 +163,8 @@ export function ProfileMenu() {
 
             {!devMode && (
               <p className="muted small profile-panel-note">
-                Signing out ends this application's session only. You stay signed in to{" "}
-                {config.providerName || "Authentik"} itself — and to your other applications —
-                unless the provider's invalidation flow is configured to end that session too.
+                Signing out ends this application's session and your {config.providerName || "Authentik"}{" "}
+                session, and returns you to the login screen.
               </p>
             )}
           </div>

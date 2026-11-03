@@ -47,12 +47,17 @@ talks to one origin — which is exactly what the OIDC redirect URI needs.
 | `GET /api/auth/login` | Starts the OIDC Authorization Code flow; redirects the browser to Authentik. |
 | `GET /api/auth/callback` | The **redirect URI**. Validates the response and establishes the application session. |
 | `GET /api/auth/whoami` | The verified identity of the caller (email, stable subject id). Requires a session. |
-| `POST /api/auth/logout` | Ends the **application** session. Requires nothing else; it only clears this application's cookie. |
+| `POST /api/auth/logout` | Ends the **application** session (the cookie) and the **Authentik** session: it answers with the provider's RP-initiated logout URL (`client_id`, `id_token_hint`, `post_logout_redirect_uri`), which the browser follows. |
 
 ### What the backend does with Authentik's answer
 
 * The authorization request carries a fresh `state`, a fresh `nonce` and a
   PKCE challenge (S256).
+* The authorization request carries **no** `prompt=login`. Authentik runs
+  its authentication flow a *second* time when it sees `prompt=login` and the
+  browser has no Authentik session yet — every first sign-in — so the user
+  would be asked for their email and password twice for a single login
+  attempt.
 * The callback rejects a `state` that does not match the login attempt it
   belongs to.
 * The authorization code is exchanged for tokens at Authentik's token
@@ -65,6 +70,9 @@ talks to one origin — which is exactly what the OIDC redirect URI needs.
   No access token, refresh token or ID token is stored in it, and none of
   them is ever sent to the browser. Nothing is written to `localStorage` or
   `sessionStorage`.
+* The ID token itself is kept **on the server** (in memory, keyed by an
+  opaque handle that the cookie carries) because the RP-initiated logout
+  needs it as the `id_token_hint`. It never reaches the browser.
 
 ### Out of scope: authorization (RBAC)
 
@@ -172,8 +180,9 @@ Everything in this section happens in the Authentik admin interface at
    pick one that does.
 5. **Invalidation flow:** the flow that ends an Authentik session, e.g.
    `default-provider-invalidation-flow` (or the sign-out flow of your
-   instance). This is what makes a *global* sign-out possible; the
-   application's own "Sign out" button is local only (see §10.4).
+   instance). This is what makes a *global* sign-out possible: the
+   application's "Sign out" button uses the RP-initiated logout and relies
+   on this flow.
 6. **Client type:** `Confidential` — a confidential client has a client
    secret, which is what the backend uses at the token endpoint.
 7. **Redirect URI:** exactly
@@ -186,9 +195,20 @@ Everything in this section happens in the Authentik admin interface at
    port and path. `http://localhost:5173` (without the path) or
    `http://localhost:5174/api/auth/callback` are *not* the same thing, and
    Authentik will refuse the request.
-8. Leave the **signing key** on the default (Authentik then publishes the
+8. **Post Logout Redirect URIs:** add
+
+   ```
+   http://localhost:5173/
+   ```
+
+   with the matching mode **Strict**. The application's "Sign out" button
+   performs an RP-initiated logout and Authentik returns the user to this
+   URI — the application's login screen — once the SSO session has ended.
+   Without it the logout either fails or leaves the user on Authentik's
+   own page.
+9. Leave the **signing key** on the default (Authentik then publishes the
    matching public key in its JWKS).
-9. **Save.**
+10. **Save.**
 
 ### 3.2 The application
 
@@ -268,6 +288,10 @@ AUTHENTIK_OIDC_CLIENT_SECRET=<from the provider page>
 
 # Must be identical to the redirect URI registered in Authentik (§3.1).
 AUTHENTIK_OIDC_REDIRECT_URI=http://localhost:5173/api/auth/callback
+
+# Must be identical to the "Strict Post Logout URI" registered in
+# Authentik (§3.1). This is where the user lands after the sign-out.
+AUTHENTIK_POST_LOGOUT_REDIRECT_URI=http://localhost:5173/
 
 AUTHENTIK_OIDC_SCOPE=openid profile email
 AUTHENTIK_OIDC_PKCE=true
@@ -556,6 +580,29 @@ login time. If Authentik is down, `/api/auth/login` answers `503` and the
 login screen shows the error. Check `http://localhost:9000` and the backend
 log.
 
+### 10.9 The sign-out does not return to the application
+
+*Symptom:* "Sign out" clears the application's session, but the browser
+stays on an Authentik error page (or on Authentik's home page) instead of
+coming back to the login screen.
+
+*Causes and fixes:*
+
+* **no "Strict Post Logout URI"** — Authentik refuses a logout request that
+  carries a `post_logout_redirect_uri` it does not know. Register
+  `http://localhost:5173/` (with the matching mode *Strict*) on the
+  provider and set `AUTHENTIK_POST_LOGOUT_REDIRECT_URI` to exactly that
+  string;
+* **the browser and the backend use different Authentik URLs** — the
+  `id_token_hint` is checked against the issuer Authentik computes for the
+  *request it receives*. `AUTHENTIK_BASE_URL` (what the browser uses) and
+  `AUTHENTIK_OIDC_DISCOVERY_URL` (what the backend uses) therefore have to
+  point at the same host;
+* **the backend was restarted** — the ID token is kept in memory, so after a
+  restart the logout can no longer carry an `id_token_hint` and Authentik
+  ends the session without returning to the application. Sign in again and
+  the logout works.
+
 ---
 
 ## 11. What this guide does not cover
@@ -565,10 +612,9 @@ log.
   authorization UI are a separate piece of work; until they exist, every
   authenticated user can reach every protected endpoint.
 * **A global single-sign-on logout.** The application's "Sign out" clears
-  this application's session only. The user stays signed in to Authentik
-  itself (and to other applications). Ending the Authentik session as well
-  is configured on the provider side (its invalidation flow / a
-  user-settings flow), not by this application.
+  this application's session *and* ends the Authentik session of this
+  application (the RP-initiated logout). It does not sign the user out of
+  *other* applications that use the same Authentik instance.
 * **Production hardening.** The guide describes a local development setup.
   For anything reachable from outside your machine: use HTTPS, set
   `AUTHENTIK_SESSION_COOKIE_SECURE=true`, keep the client secret and the

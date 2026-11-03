@@ -81,6 +81,9 @@ class StubProvider:
                             "authorization_endpoint": f"{provider.issuer}/authorize",
                             "token_endpoint": f"{provider.issuer}/token",
                             "jwks_uri": f"{provider.issuer}/jwks",
+                            "end_session_endpoint": (
+                                f"{provider.issuer}/application/o/test-app/end-session/"
+                            ),
                             "response_types_supported": ["code"],
                             "subject_types_supported": ["public"],
                             "id_token_signing_alg_values_supported": ["RS256"],
@@ -177,6 +180,9 @@ def _settings(provider: StubProvider, **overrides):
         "authentik_session_secret": SESSION_SECRET,
         "authentik_session_cookie_name": COOKIE_NAME,
         "authentik_base_url": "http://localhost:9000",
+        "authentik_app_slug": "grafana-ai-agent",
+        "authentik_post_logout_redirect_uri": "http://localhost:5173/",
+        "authentik_signup_url": None,
     }
     values.update(overrides)
     return Settings(**values)
@@ -426,10 +432,249 @@ def test_logout_ends_the_application_session(client):
     response = client.post("/api/auth/logout")
     assert response.status_code == 200
     body = response.json()
-    assert body["scope"] == "application"
-    # The logout is a local one: it does not end Authentik's own session.
-    assert body["globalSsoLogout"] is False
+    # The logout ends the application session *and* the provider's session.
+    assert body["scope"] == "application+provider"
+    assert body["globalSsoLogout"] is True
+    assert body["endSessionUrl"]
     assert client.get("/api/auth/whoami").status_code == 401
+
+
+# --------------------------------------------------------------------------
+# One login attempt, one authentication flow
+# --------------------------------------------------------------------------
+
+def _authorization_query(response) -> dict:
+    location = urlparse(response.headers["location"])
+    return {key: value[0] for key, value in parse_qs(location.query).items()}
+
+
+def test_login_does_not_ask_the_provider_to_authenticate_again(client):
+    """One login attempt must start exactly one authentication flow.
+
+    Authentik re-runs its authentication flow when the authorization request
+    carries ``prompt=login`` and the browser has no session yet -- which is
+    every first sign-in. The user would then be asked for their email and
+    password twice for a single login attempt.
+    """
+    response = client.get("/api/auth/login", follow_redirects=False)
+    assert response.status_code == 302
+    assert "prompt" not in _authorization_query(response)
+
+
+def test_login_never_forwards_prompt_login(client):
+    response = client.get(
+        "/api/auth/login", params={"prompt": "login"}, follow_redirects=False
+    )
+    assert "prompt" not in _authorization_query(response)
+
+
+def test_login_ignores_an_unsupported_prompt(client):
+    response = client.get(
+        "/api/auth/login", params={"prompt": "select_account"}, follow_redirects=False
+    )
+    assert "prompt" not in _authorization_query(response)
+
+
+def test_login_forwards_a_supported_prompt(client):
+    response = client.get(
+        "/api/auth/login", params={"prompt": "none"}, follow_redirects=False
+    )
+    assert _authorization_query(response)["prompt"] == "none"
+
+
+def test_a_login_transaction_cannot_be_replayed(client):
+    """One login attempt, one callback: the transaction is single-use."""
+    login = _start_login(client)
+
+    first = client.get(
+        "/api/auth/callback",
+        params={"code": f"nonce:{login['nonce']}", "state": login["state"]},
+        follow_redirects=False,
+    )
+    assert first.status_code == 302
+    assert first.headers["location"] == "/"
+
+    second = client.get(
+        "/api/auth/callback",
+        params={"code": f"nonce:{login['nonce']}", "state": login["state"]},
+        follow_redirects=False,
+    )
+    assert second.status_code == 302
+    assert "auth_error=login_state_missing" in second.headers["location"]
+
+
+def test_the_session_persists_across_requests(client):
+    login = _start_login(client)
+    client.get(
+        "/api/auth/callback",
+        params={"code": f"nonce:{login['nonce']}", "state": login["state"]},
+        follow_redirects=False,
+    )
+
+    first = client.get("/api/auth/whoami").json()
+    second = client.get("/api/auth/whoami").json()
+    assert first["subject"] == second["subject"]
+    assert first["email"] == "jaidev@example.com"
+
+
+# --------------------------------------------------------------------------
+# The ID token never reaches the browser
+# --------------------------------------------------------------------------
+
+def test_the_id_token_is_kept_on_the_server_not_in_the_cookie(client):
+    from app.auth.id_token_store import get_id_token_store
+
+    login = _start_login(client)
+    client.get(
+        "/api/auth/callback",
+        params={"code": f"nonce:{login['nonce']}", "state": login["state"]},
+        follow_redirects=False,
+    )
+
+    session = SignedSession(secret=SESSION_SECRET, cookie_name=COOKIE_NAME)
+    payload = session.decode(client.cookies.get(COOKIE_NAME))
+    # The cookie carries an opaque handle, never a token.
+    assert "id_token" not in payload
+    assert "access_token" not in payload
+    session_id = payload.get("sid")
+    assert session_id
+
+    stored = get_id_token_store().get(session_id)
+    assert stored
+    assert stored.count(".") == 2  # a JWT
+
+
+# --------------------------------------------------------------------------
+# The RP-initiated logout
+# --------------------------------------------------------------------------
+
+def _signed_in(client: TestClient) -> dict:
+    """Sign in and return the payload of the established session."""
+    login = _start_login(client)
+    client.get(
+        "/api/auth/callback",
+        params={"code": f"nonce:{login['nonce']}", "state": login["state"]},
+        follow_redirects=False,
+    )
+    session = SignedSession(secret=SESSION_SECRET, cookie_name=COOKIE_NAME)
+    return session.decode(client.cookies.get(COOKIE_NAME))
+
+
+def test_logout_returns_the_providers_end_session_url(client):
+    _signed_in(client)
+
+    body = client.post("/api/auth/logout").json()
+    url = body["endSessionUrl"]
+    parsed = urlparse(url)
+
+    # The endpoint comes from the provider's discovery document.
+    assert parsed.path.endswith("/application/o/test-app/end-session/")
+
+    params = {key: value[0] for key, value in parse_qs(parsed.query).items()}
+    assert params["client_id"] == CLIENT_ID
+    # The post-logout redirect URI is the one registered in the provider.
+    assert params["post_logout_redirect_uri"] == "http://localhost:5173/"
+    # The ID token is presented as the hint, so the provider accepts it.
+    assert params["id_token_hint"].count(".") == 2
+
+
+def test_logout_encodes_the_post_logout_redirect_uri(client):
+    _signed_in(client)
+
+    url = client.post("/api/auth/logout").json()["endSessionUrl"]
+    assert "post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A5173%2F" in url
+    assert "client_id=test-client-id" in url
+
+
+def test_logout_uses_the_configured_post_logout_redirect_uri(monkeypatch, provider):
+    from app.api.main import app
+
+    _patch_settings(
+        monkeypatch,
+        _settings(
+            provider,
+            authentik_post_logout_redirect_uri="https://grafana.example.com/logged-out",
+        ),
+    )
+    with TestClient(app) as test_client:
+        _signed_in(test_client)
+        url = test_client.post("/api/auth/logout").json()["endSessionUrl"]
+
+    params = {
+        key: value[0] for key, value in parse_qs(urlparse(url).query).items()
+    }
+    assert params["post_logout_redirect_uri"] == "https://grafana.example.com/logged-out"
+
+
+def test_logout_forgets_the_retained_id_token(client):
+    from app.auth.id_token_store import get_id_token_store
+
+    payload = _signed_in(client)
+    session_id = payload["sid"]
+    store = get_id_token_store()
+    assert store.get(session_id)
+
+    client.post("/api/auth/logout")
+    assert store.get(session_id) is None
+
+
+def test_get_logout_redirects_to_the_end_session_endpoint(client):
+    _signed_in(client)
+
+    response = client.get("/api/auth/logout", follow_redirects=False)
+    assert response.status_code == 302
+    location = response.headers["location"]
+    assert location.startswith("http://127.0.0.1:")
+    assert "/application/o/test-app/end-session/" in location
+    # The application session is cleared on the way out.
+    assert client.get("/api/auth/whoami").status_code == 401
+
+
+def test_logout_without_a_session_still_ends_the_provider_session(client):
+    """A logout without an application session has no ID token to present.
+
+    The provider refuses a post-logout redirect without a valid
+    ``id_token_hint``, so the redirect is left out -- the SSO session is
+    still ended.
+    """
+    body = client.post("/api/auth/logout").json()
+    params = {
+        key: value[0]
+        for key, value in parse_qs(urlparse(body["endSessionUrl"]).query).items()
+    }
+    assert params["client_id"] == CLIENT_ID
+    assert "post_logout_redirect_uri" not in params
+    assert "id_token_hint" not in params
+
+
+def test_logout_falls_back_to_the_configured_base_url(monkeypatch, provider):
+    """The end-session URL is still built when the provider is unreachable."""
+    from app.api.main import app
+
+    _patch_settings(
+        monkeypatch,
+        _settings(
+            provider,
+            authentik_oidc_discovery_url="http://127.0.0.1:1/.well-known/openid-configuration",
+        ),
+    )
+    with TestClient(app) as test_client:
+        body = test_client.post("/api/auth/logout").json()
+
+    assert body["endSessionUrl"].startswith(
+        "http://localhost:9000/application/o/grafana-ai-agent/end-session/"
+    )
+
+
+def test_logout_in_development_mode_stays_in_the_application(monkeypatch, provider):
+    """Without authentication there is no provider session to end."""
+    from app.api.main import app
+
+    _patch_settings(monkeypatch, _settings(provider, authentik_enabled=False))
+    with TestClient(app) as test_client:
+        body = test_client.post("/api/auth/logout").json()
+
+    assert body["endSessionUrl"] == "/"
 
 
 # --------------------------------------------------------------------------

@@ -24,6 +24,11 @@ The tokens themselves never leave this module: the caller is handed the
 *validated claims* and nothing else. No access token, refresh token or ID
 token is ever sent to the browser, and none of them is stored in the
 application session.
+
+The one exception is the ID token, which the RP-initiated logout needs as
+the ``id_token_hint``: it is handed to the caller for that single purpose and
+is then kept on the server (see ``app/auth/id_token_store.py``), never in the
+session cookie and never in the browser.
 """
 from __future__ import annotations
 

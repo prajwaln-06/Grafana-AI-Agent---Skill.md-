@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
 COPY skills/ skills/
+COPY chart_selection/ chart_selection/
 
 ENV SKILLS_ROOT=/srv/skills
 EXPOSE 8000

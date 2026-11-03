@@ -208,6 +208,7 @@ cd ui && npm run build
 | `AUTHENTIK_OIDC_CLIENT_ID` | *(none)* | OIDC client id of the Authentik application; required when `AUTHENTIK_ENABLED=true` |
 | `AUTHENTIK_OIDC_CLIENT_SECRET` | *(none)* | OIDC client secret (server-side only); required when `AUTHENTIK_ENABLED=true` |
 | `AUTHENTIK_OIDC_REDIRECT_URI` | `http://localhost:5173/api/auth/callback` | Exact redirect URI registered in the Authentik provider |
+| `AUTHENTIK_POST_LOGOUT_REDIRECT_URI` | `http://localhost:5173/` | Exact "Strict Post Logout URI" registered in the Authentik provider; where the user lands after the sign-out |
 | `AUTHENTIK_OIDC_SCOPE` | `openid profile email` | Scopes requested in the authorization request |
 | `AUTHENTIK_OIDC_PKCE` | `true` | Use PKCE (S256) in the authorization request |
 | `AUTHENTIK_SESSION_SECRET` | *(none)* | Secret that signs the application-session cookie; required when `AUTHENTIK_ENABLED=true` |
@@ -268,7 +269,8 @@ backend through that very proxy.
 What the backend does with the provider's answer:
 
 * the authorization request carries a fresh `state`, a fresh `nonce` and a
-  PKCE challenge (S256);
+  PKCE challenge (S256), and no `prompt=login` — that would make Authentik
+  run its authentication flow twice and ask for the credentials twice;
 * the callback rejects a `state` that does not match the login attempt it
   belongs to;
 * the authorization code is exchanged for tokens at the provider's token
@@ -278,7 +280,8 @@ What the backend does with the provider's answer:
 * only then is a session established — a signed, HttpOnly cookie holding
   the stable identity (`sub`, `iss`) and the profile fields the UI shows.
   No access token, refresh token or ID token is stored in it, and none of
-  them ever reaches the browser.
+  them ever reaches the browser. The ID token itself is kept on the server
+  (in memory) because the sign-out needs it as the `id_token_hint`.
 
 > Full step-by-step setup, including the Authentik admin configuration:
 > **[AUTHENTIK_SETUP_GUIDE.md](AUTHENTIK_SETUP_GUIDE.md)**.
@@ -287,6 +290,7 @@ What the backend does with the provider's answer:
 |---|---|
 | `app/auth/oidc.py` | The OIDC client: discovery, authorization request, token exchange, ID-token verification |
 | `app/auth/session.py` | The signed, HttpOnly application-session cookie |
+| `app/auth/id_token_store.py` | Server-side retention of the ID token for the RP-initiated logout |
 | `app/auth/dependencies.py` | The FastAPI dependency: session boundary + principal |
 | `app/auth/principal.py` | The verified identity (`issuer`, `subject`, profile fields) |
 | `app/api/routes_auth.py` | `login`, `callback`, `whoami`, `config` and `logout` |
@@ -325,10 +329,11 @@ its privileges.
 * **Change password** — the profile menu opens Authentik's password-change
   flow. The password is entered on the Authentik server.
 * **Sign out** — the profile menu calls `/api/auth/logout`, which clears
-  *this application's* session. It is **not** a global single-sign-on
-  logout: the user stays signed in to Authentik and to every other
-  application that uses it, unless the Authentik provider's invalidation
-  flow is configured to end that session too.
+  *this application's* session and answers with the provider's
+  RP-initiated logout URL (`client_id`, `id_token_hint` and the
+  `post_logout_redirect_uri`). The browser follows it: Authentik ends the
+  SSO session and returns the user to the login screen, so the next
+  sign-in asks for the credentials again.
 
 ### Local startup with authentication
 

@@ -179,13 +179,12 @@ export function signIn(config?: AuthConfig | null): void {
 }
 
 /**
- * End the application session.
+ * End the session.
  *
- * This ends *this application's* session: the backend clears its own
- * session cookie. It is deliberately not presented as a global
- * single-sign-on logout -- the user stays signed in to Authentik and to
- * every other application that uses it, unless the Authentik provider's
- * invalidation flow is configured to end that session too.
+ * The backend clears this application's session cookie and answers with the
+ * provider's RP-initiated logout URL. The browser is then sent to that URL:
+ * Authentik ends its own session and redirects back to the application's
+ * login screen. Both sessions are therefore gone when the user returns.
  *
  * Returns false when the logout request could not be completed.
  */
