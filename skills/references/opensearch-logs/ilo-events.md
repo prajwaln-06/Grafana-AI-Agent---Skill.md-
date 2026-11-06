@@ -48,6 +48,7 @@ names and source addresses appear only inside the message text, not as fields.
 | Intent | Approved shape |
 |---|---|
 | Login/logout events for a BMC | time range, term on `entity_host`, `match_phrase` on `text` or term on `event_code` |
+| Hardware events named in the message (e.g. overheating) | time range, term on `entity_host` if a BMC is named, `match_phrase` on `text` with the user's own words (other tenses and plurals are matched by the system) |
 | Most frequent event codes per BMC | `size: 0`, `terms` on `entity_host` with nested `terms` on `event_code` |
 | Browser versus IPMI counts | `filters` aggregation with two `match_phrase` clauses on `text` |
 | Abnormal events with actions | time range, `{"named_condition": "abnormal_severity"}` (expanded by the system), rows with `recommended_action` |

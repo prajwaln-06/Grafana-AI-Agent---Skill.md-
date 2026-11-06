@@ -370,4 +370,6 @@ async def confirm_alert(body: ConfirmAlertRequest):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    # AGENT_PORT lets the server move off 8000 when another local service already holds it.
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("AGENT_PORT", "8000")))

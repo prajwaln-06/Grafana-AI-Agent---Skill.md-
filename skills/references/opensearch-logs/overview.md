@@ -164,6 +164,7 @@ stating a count or a time range.
 | `observed_range` | the earliest and latest `@timestamp` **among the returned rows (or non-empty buckets) only**. It is not the full range of data available in OpenSearch and not the query window; absent data at the edges of the window cannot be told from this |
 | `severity_vocabulary`, `severity_vocabulary_provisional` | how far each severity vocabulary is trusted (`observed`, `documented`, `provisional`); a verdict that rests on a provisional vocabulary must be presented as such |
 | `redaction` | counts of masked user names and IP addresses and the policy used |
+| `text_search_note` | only on an empty result of a free-text search: what was searched, and that a message wording the same thing differently would not be found. An empty text search is not evidence that the event did not happen |
 
 An analysis result also carries `execution.analysis`: its type, the parameters
 actually used, the counts it is based on (for example how many entities
@@ -199,4 +200,8 @@ URL, as it is for Prometheus.
 - Never assume a severity value; use the stored value for that family.
 - Every query needs a bounded time range on `@timestamp`.
 - Free-text search uses only `match` / `match_phrase` on the family's text role.
+  Write the words the user used; do not guess the tense or plural the stored
+  message uses. The system also matches the other forms of the words
+  (`overheated` / `overheating` / `overheats` / `overheat`) and records that in
+  the result, so two wordings of the same question give the same query.
 - State the relevant caveat whenever a count or ordering depends on it.

@@ -23,10 +23,12 @@ What it enforces
     aggregation depth/count, track_total_hits, timeout, projection.
 
 Canonicalisation = only (a) expanding the named severity condition, (b)
-filling DOCUMENTED safe defaults when a key is absent and (c) for an analysed
+filling DOCUMENTED safe defaults when a key is absent, (c) for an analysed
 text field used for exact match (term/terms/prefix) or sort, substituting the
-keyword sub-field that the LIVE MAPPING CONFIRMS for that field. All three are
-recorded in `applied`. Out-of-range values are rejected, not clamped. A
+keyword sub-field that the LIVE MAPPING CONFIRMS for that field and (d) for a
+free-text match/match_phrase, also matching the phrase's other word forms
+(tense/plural, see text_forms.py) so equivalent wordings give the same query.
+All four are recorded in `applied`. Out-of-range values are rejected, not clamped. A
 `.keyword` path is never INVENTED: a text field with no confirmed sub-field is
 rejected for exact match, sort and grouping, and group-by/cardinality must name
 the confirmed sub-field themselves.
@@ -54,6 +56,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app import time_utils
+from app.opensearch_catalog import text_forms
 from app.opensearch_catalog.context import Limits, OpenSearchContext, PatternContext
 from app.opensearch_catalog.field_catalog import (
     OP_EXISTS, OP_GROUP_BY, OP_MATCH, OP_METRIC, OP_RANGE, OP_SORT, OP_TERM, FieldInfo,
@@ -365,7 +368,12 @@ class _Checker:
                   f"{where}: clause type {kind!r} is not allowed")
         w = f"{where}/{kind}"
         if kind == "bool":
+            group = self._variant_group(body, w, depth)
+            if group is not None:
+                return group
             return {"bool": self._bool(body, w, depth)}
+        if kind in ("match", "match_phrase"):
+            return self._text_search(kind, body, w, depth)
         if kind == "named_condition":
             return self._named(body, w)
         if kind == "range":
@@ -519,6 +527,77 @@ class _Checker:
         if not isinstance(text, str) or not text.strip() or len(text) > self.limits.max_text_chars:
             _fail(CODE_BAD_VALUE, f"{where}: search text must be 1-{self.limits.max_text_chars} characters")
         return {path: val}
+
+    # -- word-form tolerance for free-text search (text_forms.py) -------------------------------------------
+    #
+    # A match/match_phrase on the text role compares whole tokens and the text field is
+    # not stemmed, so "System Overheated" never matches a message saying "System
+    # Overheating". The clause is canonicalised into a `should` of the phrase's word-form
+    # variants (minimum_should_match 1), identical for every wording of the same words,
+    # and RECORDED in `applied`. The expanded group is recognised on a re-check and
+    # accepted unchanged (idempotent). Clause and depth budgets are counted exactly as
+    # if the group had been written by hand; when it would not fit, the phrase is
+    # searched as written and a warning says so (never a rejection).
+
+    def _text_search(self, kind: str, body: Any, where: str, depth: int) -> dict:
+        leaf = self._match(body, where, kind)
+        (path, val), = leaf.items()
+        text = val["query"] if isinstance(val, dict) else val
+        variants = text_forms.phrase_variants(text)
+        if len(variants) < 2:
+            return {kind: leaf}
+        if (depth > self.limits.max_bool_depth
+                or self.clauses + len(variants) > self.limits.max_clauses
+                or any(len(v) > self.limits.max_text_chars for v in variants)):
+            self.warnings.append(f"{where}: {text!r} is searched exactly as written; its other word forms were "
+                                 f"not added because the query is at its size limits, so a different tense or "
+                                 f"plural in the stored message will not match")
+            return {kind: leaf}
+        self.clauses += len(variants)
+        should = [{kind: {path: ({**val, "query": v} if isinstance(val, dict) else v)}} for v in variants]
+        others = [v for v in variants if v != text]
+        self.applied.append(f"{where}: text search {text!r} also matches its other word forms {others} "
+                            f"(tense/plural), so the wording of the question does not change the result")
+        return {"bool": {"should": should, "minimum_should_match": 1}}
+
+    def _variant_group(self, body: Any, where: str, depth: int) -> dict | None:
+        """The canonical output of `_text_search`, re-checked: each member is
+        validated as an ordinary text clause and the group is kept as is. None
+        when `body` is not exactly such a group (it is then an ordinary bool)."""
+        if not isinstance(body, dict) or set(body) != {"should", "minimum_should_match"} \
+                or body["minimum_should_match"] != 1 or isinstance(body["minimum_should_match"], bool):
+            return None
+        items = body["should"]
+        if not isinstance(items, list) or len(items) < 2:
+            return None
+        kinds, paths, shapes, texts = set(), set(), set(), []
+        for it in items:
+            if not isinstance(it, dict) or len(it) != 1:
+                return None
+            (k, leaf), = it.items()
+            if k not in ("match", "match_phrase") or not isinstance(leaf, dict) or len(leaf) != 1:
+                return None
+            (p, v), = leaf.items()
+            if isinstance(v, dict):
+                if not all(isinstance(x, str) for x in v.values()):
+                    return None
+                shapes.add(tuple(sorted((a, b) for a, b in v.items() if a != "query")))
+                texts.append(v.get("query"))
+            else:
+                shapes.add(None)
+                texts.append(v)
+            kinds.add(k)
+            paths.add(p)
+        if len(kinds) != 1 or len(paths) != 1 or len(shapes) != 1 or depth > self.limits.max_bool_depth \
+                or not text_forms.is_variant_group(texts):
+            return None
+        for i, it in enumerate(items):
+            self.clauses += 1
+            if self.clauses > self.limits.max_clauses:
+                _fail(CODE_LIMIT, f"the query has more than {self.limits.max_clauses} clauses")
+            (k, leaf), = it.items()
+            self._match(leaf, f"{where}/should[{i}]/{k}", k)
+        return {"bool": {"should": copy.deepcopy(items), "minimum_should_match": 1}}
 
     def _prefix(self, body: Any, where: str, kind: str) -> dict:
         path, val = self._single_field(body, where)

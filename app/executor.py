@@ -284,6 +284,9 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
         meta = response_metadata(raw, policy)
         meta["query_window"] = window
         meta["count"] = {"value": 0, "relation": "eq", "exact": True}
+        note = _text_search_note(check.query)
+        if note:
+            meta["text_search_note"] = note
         return {
             "execution_status": "empty_result",
             "result_type": None,
@@ -303,7 +306,30 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
     # total in metadata.count. Only "matched nothing" is an empty result.
     if block["execution_status"] == "empty_result" and ((normalized.metadata.get("count") or {}).get("value") or 0) > 0:
         block["execution_status"] = "success"
+    if block["execution_status"] == "empty_result":
+        note = _text_search_note(check.query)
+        if note and isinstance(block.get("metadata"), dict):
+            block["metadata"]["text_search_note"] = note
     return block
+
+
+def _text_search_note(query: dict) -> str | None:
+    """For a free-text search that matched nothing: say plainly what was searched and
+    why a document describing the same thing may still exist, so an empty answer is
+    never mistaken for "it did not happen". None when the query has no text search."""
+    from app.opensearch_catalog.text_forms import phrase_variants, text_search_phrases
+
+    shown: list[str] = []
+    for p in text_search_phrases(query):
+        if not any(p in phrase_variants(s) for s in shown):
+            shown.append(p)
+    if not shown:
+        return None
+    searched = ", ".join(repr(s) for s in shown)
+    return (f"No document in this window contains the searched text {searched}, including its other "
+            f"tenses and plurals. Text search matches whole words in the given order, so a message that "
+            f"describes the same thing in different words is not found: try other or fewer words, or a "
+            f"wider time window, before concluding that nothing happened.")
 
 
 def _execute_opensearch_analysis(entry: dict, pattern, view, ctx, window: dict | None, settings: Settings,
