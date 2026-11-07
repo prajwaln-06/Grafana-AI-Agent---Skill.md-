@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,6 +79,39 @@ class Settings(BaseSettings):
     opensearch_redact_ip_mode: str = Field(
         default="mask_all", pattern=r"^(mask_all|keep_internal|off)$",
         description="mask_all | keep_internal (keep private/loopback addresses) | off.")
+
+    # --- OpenSearch RESULT cache (opensearch_catalog.query_cache) ---
+    # Not the field-catalog cache above: this one stores completed, redacted ANSWERS so a repeated
+    # or reworded question skips the Router/Generator LLM calls and every OpenSearch search.
+    opensearch_result_cache_enabled: bool = Field(
+        default=True,
+        description="Reuse a completed OpenSearch answer for an identical or equivalent question "
+                    "within the TTL. Only complete, successful, non-partial answers are ever stored; "
+                    "nothing is written to disk. False = every question runs the full pipeline.")
+    opensearch_result_cache_ttl_seconds: float = Field(
+        default=60.0, gt=0, le=3600,
+        description="Fixed lifetime of a stored answer (reads never extend it). An answer about a "
+                    "relative window ('now-3m') lives at most 10% of its narrowest span, so it can "
+                    "be shorter than this, never longer.")
+    opensearch_result_cache_max_entries: int = Field(
+        default=200, ge=1, le=10000,
+        description="Capacity. When full, expired entries go first, then the oldest.")
+    opensearch_result_cache_semantic_enabled: bool = Field(
+        default=True,
+        description="Allow a DIFFERENTLY WORDED question to reuse an answer (Level 2). The two "
+                    "questions must agree in operation, entity scope, concepts, literals, time window "
+                    "and every leftover word. False = identical wording only (Level 1).")
+    opensearch_result_cache_similarity_threshold: float = Field(
+        default=0.85, ge=0.5, le=1.0,
+        description="Minimum concept-vector cosine similarity for a Level-2 hit. It is an extra "
+                    "requirement on top of facet equality, never a substitute for it.")
+    opensearch_result_cache_aliases: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description="Operator-declared synonyms per index family (pattern_id), e.g. "
+                    "{\"fabric_health\": {\"node\": \"switch\", \"down\": \"stopped sending heartbeats\"}} "
+                    "to assert that in that family 'nodes are down' means 'switches stopped sending "
+                    "heartbeats'. Empty by default: no equivalence is assumed that was not declared. "
+                    "Applied only to entries of that single family.")
 
     prometheus_timeout_seconds: float = Field(default=15.0)
     opensearch_timeout_seconds: float = Field(default=15.0)
@@ -343,6 +376,18 @@ class Settings(BaseSettings):
                     "existing flat path for that request, never a crash or a blocked "
                     "request.",
     )
+
+    @field_validator("opensearch_result_cache_aliases")
+    @classmethod
+    def _check_result_cache_aliases(cls, value: dict) -> dict:
+        for pattern_id, words in value.items():
+            if not isinstance(pattern_id, str) or not pattern_id.strip():
+                raise ValueError("alias family names must be non-empty strings")
+            for key, replacement in words.items():
+                if not key.strip() or " " in key.strip() or not replacement.strip():
+                    raise ValueError(f"alias {key!r} -> {replacement!r}: the key must be one word and the "
+                                     f"replacement non-empty")
+        return value
 
     @property
     def opensearch_auth(self) -> tuple[str, str] | None:

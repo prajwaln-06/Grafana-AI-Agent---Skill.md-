@@ -11,6 +11,7 @@ from app.catalog import runtime as catalog_runtime
 from app.pipeline import ALREADY_EXECUTED_MARKER, PipelineContext, run_pipeline
 from app.config import get_settings
 from app import executor
+from app.opensearch_catalog import runtime as os_runtime
 from app.skill_index import SkillIndex
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,15 @@ def _catalog_provider(settings):
     pipeline's `_get_catalog` returns, so known-metric lookups and
     Router/Generator/Validator catalog use can never disagree."""
     return lambda: catalog_runtime.get_runtime(settings).catalog()
+
+
+def _cache_scope(ctx) -> str:
+    """Who an OpenSearch result-cache entry belongs to. An entry is only ever reused inside the
+    scope that produced it. Today the HTTP API uses one fixed user, so this is one scope; it is
+    already keyed so per-user/tenant identities stay separate when they exist."""
+    session = getattr(ctx, "session", None)
+    user = getattr(session, "user_id", None) or getattr(ctx, "user_id", None) or "anonymous"
+    return f"{getattr(ctx, 'app_name', None) or 'app'}:{user}"
 
 
 class ObservabilityQueryBuilderAgent(BaseAgent):
@@ -117,6 +127,29 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         else:
             pipeline_context = PipelineContext()
 
+        # 3b. OpenSearch result cache (app/opensearch_catalog/query_cache.py). Only a FRESH question
+        # may be answered from it -- never the answer to a clarification -- and a hit has already
+        # been re-proved against the current registry, live field view, configuration and skill text
+        # and re-run through the guard. It skips the Router/Generator LLM calls, validation and every
+        # OpenSearch search. A miss, a disabled cache or any cache error falls through to the pipeline.
+        fresh_question = not (previous_question and previous_result)
+        cache_scope = _cache_scope(ctx)
+        if fresh_question and question.strip():
+            cached = await asyncio.to_thread(
+                os_runtime.lookup_cached_result, question, cache_scope, settings, skill_index)
+            if cached is not None:
+                yield Event(
+                    invocation_id=ctx.invocation_id,
+                    author=self.name,
+                    message=json.dumps({"result": cached, "session_id": None}),
+                    state={
+                        "previous_question": None,
+                        "previous_result": None,
+                        "pending_alert_proposal": None,
+                    }
+                )
+                return
+
         # 4. Run the pipeline
         try:
             contract = await asyncio.wait_for(
@@ -194,6 +227,12 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         # this for us -- see 4b above).
         # execute_contract does blocking HTTP; keep it off the event loop.
         executed = contract if already_executed else await asyncio.to_thread(executor.execute_contract, contract, settings)
+        # Remember a COMPLETE, successful OpenSearch answer for this question (the cache itself refuses
+        # errors, partial runs, incomplete analyses and anything that is not OpenSearch). Not for a
+        # dependency-resolved compound question, whose later queries depend on earlier results.
+        if fresh_question and not already_executed:
+            await asyncio.to_thread(
+                os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
         yield Event(
             invocation_id=ctx.invocation_id,
             author=self.name,

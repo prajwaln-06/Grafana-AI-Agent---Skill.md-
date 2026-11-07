@@ -187,6 +187,7 @@ async def opensearch_status():
         info["registry_error"] = str(e)
     info["limits"] = dataclasses.asdict(Limits.from_settings(settings))
     info["field_catalogs"] = os_runtime.field_cache_snapshots()
+    info["result_cache"] = os_runtime.result_cache_snapshot(settings)
     return info
 
 
