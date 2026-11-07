@@ -180,7 +180,7 @@ def test_first_question_runs_the_pipeline_and_the_second_identical_one_does_not(
     assert run.pipeline_questions == [Q_BASE], "Router/Generator must not run again"
     assert len(cluster.searches) == 2, "no OpenSearch search for a cache hit"
     info = cache_info(second)[0]
-    assert info["hit"] is True and info["match"] == "exact" and info["similarity"] == 1.0
+    assert info["hit"] is True and info["match"] == "exact" and "similarity" not in info
     assert strip_cache_info(second) == first                                          # the same completed answer
     assert second["execution"]["fetched_at"] == first["execution"]["fetched_at"]      # honest about when it was fetched
     assert ev2.actions.state_delta.get("previous_question", 1) is None                # same state reset as a normal answer
@@ -221,7 +221,7 @@ def test_equivalent_wordings_reuse_the_stored_answer(absence_agent, question):
     assert run.pipeline_questions == [Q_BASE], f"{question!r} should not have reached the Router"
     assert len(cluster.searches) == 2
     info = cache_info(res)[0]
-    assert info["match"] == "semantic" and info["similarity"] >= 0.85
+    assert info["match"] == "semantic" and "similarity" not in info
     assert strip_cache_info(res) == first
 
 
@@ -546,33 +546,31 @@ def test_one_unusable_entry_keeps_the_whole_multi_result_out_of_the_cache(monkey
     assert store(cache_settings, "Show controller and fabric messages", executed) == ""     # all good: stored whole
 
 
-def test_a_semantic_matcher_that_fails_is_a_miss_not_an_error_and_exact_hits_still_work(absence_agent):
+def test_a_failure_in_the_question_matching_is_a_miss_not_an_error_and_exact_hits_still_work(absence_agent, monkeypatch):
     run, cluster = absence_agent
     run.ask(Q_BASE)
 
-    class Boom:
-        def similarity(self, a, b):
-            raise RuntimeError("embedding service down")
+    def boom(a, b):
+        raise RuntimeError("matching broke")
 
-    run.cache.matcher = Boom()
+    monkeypatch.setattr(query_cache, "equivalent", boom)
     res, _ = run.ask("Which switches are not reporting?")             # would be a semantic hit
     assert res["execution"]["execution_status"] == "success" and len(run.pipeline_questions) == 2
-    assert run.cache.snapshot()["matcher_errors"] == 1
-    res, _ = run.ask(Q_BASE)                                          # exact hit needs no matcher
+    assert run.cache.snapshot()["match_errors"] == 1
+    res, _ = run.ask(Q_BASE)                                          # an exact hit needs no matching
     assert cache_info(res)[0]["match"] == "exact" and len(run.pipeline_questions) == 2
 
 
-def test_a_matcher_below_the_threshold_is_a_miss(absence_agent):
+def test_no_similarity_score_or_threshold_exists_anywhere(absence_agent, cache_settings):
+    """Level 2 is rule-based facet equality only; nothing may suggest embedding similarity is active."""
+    from app.config import Settings
     run, _ = absence_agent
     run.ask(Q_BASE)
-
-    class Low:
-        def similarity(self, a, b):
-            return 0.5
-
-    run.cache.matcher = Low()
-    run.ask("Which switches are not reporting?")
-    assert len(run.pipeline_questions) == 2
+    assert not any("similarity" in f or "threshold" in f for f in Settings.model_fields if "result_cache" in f)
+    assert not hasattr(query_cache, "ConceptVectorMatcher") and not hasattr(query_cache, "SemanticMatcher")
+    assert "similarity_threshold" not in run.cache.snapshot() and not hasattr(run.cache, "matcher")
+    res, _ = run.ask("Which switches are not reporting?")
+    assert cache_info(res)[0]["match"] == "semantic" and "similarity" not in cache_info(res)[0]
 
 
 def test_capacity_is_bounded_oldest_first_and_an_evicted_entry_is_a_miss(cache_settings, cluster):
@@ -875,8 +873,7 @@ def test_settings_validation(cache_settings):
     from app.config import Settings
     base = cache_settings.model_dump()
     for bad in ({"opensearch_result_cache_ttl_seconds": 0}, {"opensearch_result_cache_ttl_seconds": 99999},
-                {"opensearch_result_cache_max_entries": 0}, {"opensearch_result_cache_similarity_threshold": 0.2},
-                {"opensearch_result_cache_similarity_threshold": 1.5},
+                {"opensearch_result_cache_max_entries": 0},
                 {"opensearch_result_cache_aliases": {"fabric_health": {"two words": "x"}}},
                 {"opensearch_result_cache_aliases": {"fabric_health": {"node": " "}}}):
         with pytest.raises(ValidationError):
@@ -932,9 +929,319 @@ def test_signatures_are_deterministic_and_never_raise():
     assert SIG(Q_BASE) != SIG(Q_BASE.upper())
 
 
-def test_concept_vector_similarity_is_bounded_and_symmetric():
-    m = query_cache.ConceptVectorMatcher()
-    a, b = SIG(Q_BASE), SIG("Which devices have stopped sending logs?")
-    assert m.similarity(a, a) == pytest.approx(1.0)
-    assert 0.0 <= m.similarity(a, b) < 1.0 and m.similarity(a, b) == pytest.approx(m.similarity(b, a))
-    assert m.similarity(SIG(""), a) == 0.0
+def test_equivalence_is_reflexive_symmetric_and_broken_by_any_single_facet():
+    a = SIG(Q_BASE)
+    assert query_cache.equivalent(a, a)
+    b = SIG("Which switches are no longer reporting?")
+    assert query_cache.equivalent(a, b) and query_cache.equivalent(b, a)
+    for other in ("Which devices have stopped sending heartbeats?",                  # entity
+                  "Why have the switches stopped sending heartbeats?",               # operation
+                  "How many switches have stopped sending heartbeats?",              # operation
+                  "Which switches have stopped sending heartbeats in the last hour?",  # window
+                  "Which switches have stopped sending heartbeats on x1000c0r1b0?",  # literal
+                  "Which switches have stopped sending heartbeats repeatedly?",      # concept
+                  "Which switches have stopped sending heartbeats critically?"):     # unexplained word
+        o = SIG(other)
+        assert not query_cache.equivalent(a, o) and not query_cache.equivalent(o, a), other
+    assert not query_cache.equivalent(SIG(""), SIG(""))                              # nothing understood => never
+
+
+# ---------------------------------------------------------------------------------------------------
+# I. an incomplete analysis is never cached; informational caveats do not block caching
+#
+# analysis.py signals a cut-short answer in three different ways: a summary flag (absence:
+# `complete`, text_ratio_shortfall: `scan_complete`), or ONLY a warning (context_window:
+# `anchor_<i>_truncated`, recurrence: `ranking_limited`). The cache classifies warnings by code.
+# ---------------------------------------------------------------------------------------------------
+
+ANCHOR = {"@timestamp": "2026-10-28T10:00:00Z", "Body": "LinkStatus Down on j104p1", "Severity": "error",
+          "Resource": {"host": {"name": "x1000c0r1b0"}, "service": {"name": "hmscd"}}}
+CTX_Q = "Show the log lines around the LinkStatus Down events"
+
+
+def context_entry(**analysis):
+    q = {"query": {"bool": {"filter": [window("now-24h"), {"match_phrase": {"Body": "LinkStatus Down"}}]}}}
+    return os_entry("controller_log", q, intent="context_window", analysis={"type": "context_window", **analysis})
+
+
+def context_handler(anchor=ANCHOR, follow_total=None, follow_relation="eq", no_anchor=False):
+    def handler(index, dsl):
+        if dsl.get("sort") == [{"@timestamp": {"order": "desc"}}]:                    # the anchor query
+            return hits_body([] if no_anchor else [anchor], ids=["A"])
+        if dsl.get("sort") == [{"@timestamp": {"order": "asc"}}]:                     # a per-event follow-up
+            docs = [{"@timestamp": "2026-10-28T09:58:00Z", "Body": "before it"}, {**anchor},
+                    {"@timestamp": "2026-10-28T10:02:00Z", "Body": "after it"}]
+            return hits_body(docs, ids=["b", "A", "c"], total=follow_total, relation=follow_relation)
+        return hits_body([{"@timestamp": "2026-10-28T10:00:00Z", "Severity": "error", "Body": "row"}])
+    return handler
+
+
+def recurrence_handler(other=0):
+    return lambda i, d: agg_body({"loc": {"doc_count_error_upper_bound": 0, "sum_other_doc_count": other, "buckets": [
+        {"key": "x1c0:p1", "doc_count": 5, "per_hour": {"buckets": [{"key_as_string": "t1", "doc_count": 1},
+                                                                    {"key_as_string": "t2", "doc_count": 4}]}}]}}, total=5 + other)
+
+
+def shortfall_entry(size=50):
+    q = {"size": size, "query": {"bool": {"filter": [window(), {"match_phrase": {"Body": "switches available"}}]}}}
+    return os_entry("controller_log", q, intent="text_ratio_shortfall", analysis={"type": "text_ratio_shortfall"})
+
+
+def lag_entry():
+    return os_entry("ilo_events", {"size": 20, "query": {"bool": {"filter": [window()]}}}, analysis={"type": "ingest_lag"})
+
+
+def _cache_len(settings):
+    return len(runtime.get_result_cache(settings))
+
+
+def _warning_codes(executed):
+    return [w.split(":")[0] for w in executed["execution"]["analysis"]["warnings"]]
+
+
+# ---- context_window ----
+
+def test_a_truncated_context_window_is_not_cached(cache_settings, cluster):
+    cluster.handler = context_handler(follow_total=500)               # 500 rows exist around the event, 3 returned
+    executed = execute(cache_settings, context_entry())
+    a = executed["execution"]["analysis"]
+    assert a["completed"] is True and executed["execution"]["execution_status"] == "success"
+    assert _warning_codes(executed) == ["anchor_0_truncated"]
+    # the reason the old checks missed it: this analysis sets neither flag the cache used to look at
+    assert "complete" not in a and "scan_complete" not in a
+    reason = store(cache_settings, CTX_Q, executed)
+    assert "anchor_0_truncated" in reason and _cache_len(cache_settings) == 0
+    assert lookup(cache_settings, CTX_Q) is None
+
+
+def test_a_context_window_whose_row_count_is_only_a_lower_bound_is_not_cached(cache_settings, cluster):
+    cluster.handler = context_handler(follow_total=3, follow_relation="gte")      # relation gte => more may exist
+    executed = execute(cache_settings, context_entry())
+    assert _warning_codes(executed) == ["anchor_0_truncated"]
+    assert store(cache_settings, CTX_Q, executed) != "" and _cache_len(cache_settings) == 0
+
+
+def test_a_context_window_with_a_skipped_event_is_not_cached(cache_settings, cluster):
+    no_time = {k: v for k, v in ANCHOR.items() if k != "@timestamp"}                # event found, cannot be expanded
+    cluster.handler = context_handler(anchor=no_time)
+    executed = execute(cache_settings, context_entry())
+    assert _warning_codes(executed) == ["anchor_0_skipped"]
+    a = executed["execution"]["analysis"]
+    assert a["anchors_found"] == 1 and a["anchors_expanded"] == 0
+    reason = store(cache_settings, CTX_Q, executed)
+    assert "anchor_0_skipped" in reason and _cache_len(cache_settings) == 0
+
+
+def test_a_complete_context_window_is_cached_and_replayed_without_any_search(cache_settings, cluster):
+    cluster.handler = context_handler()
+    executed = execute(cache_settings, context_entry())
+    a = executed["execution"]["analysis"]
+    assert _warning_codes(executed) == [] and a["anchors"][0]["truncated"] is False
+    assert store(cache_settings, CTX_Q, executed) == "" and _cache_len(cache_settings) == 1
+    n = len(cluster.searches)
+    hit = lookup(cache_settings, CTX_Q)
+    assert hit is not None and len(cluster.searches) == n
+    assert strip_cache_info(hit) == executed
+
+
+def test_a_context_window_that_found_no_event_is_a_complete_answer_and_is_cached(cache_settings, cluster):
+    cluster.handler = context_handler(no_anchor=True)
+    executed = execute(cache_settings, context_entry())
+    assert _warning_codes(executed) == ["no_anchor_event"]                         # informational: nothing was cut short
+    assert executed["execution"]["execution_status"] == "empty_result"
+    assert store(cache_settings, CTX_Q, executed) == "" and _cache_len(cache_settings) == 1
+
+
+def test_a_truncated_context_window_runs_the_pipeline_again_through_the_agent(monkeypatch, cache_settings, cluster):
+    cluster.handler = context_handler(follow_total=500)
+    contract = canon(cache_settings, context_entry())
+    run = AgentRun(monkeypatch, cache_settings, lambda q: contract)
+    run.ask(CTX_Q)
+    n = len(cluster.searches)
+    run.ask(CTX_Q)
+    assert run.pipeline_questions == [CTX_Q, CTX_Q] and len(cluster.searches) > n
+    assert _cache_len(cache_settings) == 0
+
+
+# ---- recurrence ----
+
+def test_a_ranking_limited_recurrence_is_not_cached(cache_settings, cluster):
+    cluster.handler = recurrence_handler(other=40)                       # 40 documents belong to unranked entities
+    executed = execute(cache_settings, recurrence_entry())
+    a = executed["execution"]["analysis"]
+    assert a["completed"] is True and executed["execution"]["execution_status"] == "success"
+    assert _warning_codes(executed) == ["ranking_limited"]
+    assert "complete" not in a and "scan_complete" not in a                  # again: only a warning says so
+    reason = store(cache_settings, "Which locations have recurring faults?", executed)
+    assert "ranking_limited" in reason and _cache_len(cache_settings) == 0
+
+
+def test_a_ranking_limited_recurrence_runs_the_pipeline_again_through_the_agent(monkeypatch, cache_settings, cluster):
+    cluster.handler = recurrence_handler(other=40)
+    contract = canon(cache_settings, recurrence_entry())
+    run = AgentRun(monkeypatch, cache_settings, lambda q: contract)
+    q = "Which locations have recurring faults?"
+    run.ask(q)
+    run.ask(q)
+    assert run.pipeline_questions == [q, q] and _cache_len(cache_settings) == 0
+
+
+def test_a_complete_recurrence_is_cached_and_replayed_without_any_search(cache_settings, cluster):
+    cluster.handler = recurrence_handler(other=0)
+    executed = execute(cache_settings, recurrence_entry())
+    assert _warning_codes(executed) == []
+    q = "Which locations have recurring faults?"
+    assert store(cache_settings, q, executed) == "" and _cache_len(cache_settings) == 1
+    n = len(cluster.searches)
+    hit = lookup(cache_settings, q)
+    assert hit is not None and len(cluster.searches) == n and strip_cache_info(hit) == executed
+
+
+# ---- the other analysis types ----
+
+def test_an_absence_with_more_entities_than_the_limit_is_not_cached(cache_settings, cluster):
+    cluster.handler = absence_handler(SWITCHES, ALIVE, other=7)
+    executed = execute(cache_settings, absence_entry())
+    assert "incomplete_entity_list" in _warning_codes(executed) and executed["execution"]["analysis"]["complete"] is False
+    assert store(cache_settings, Q_BASE, executed) != "" and _cache_len(cache_settings) == 0
+
+
+def test_an_absence_whose_only_warning_is_informational_is_still_cached(cache_settings, cluster):
+    cluster.handler = absence_handler(SWITCHES, [])                       # nothing reported recently: a reading aid only
+    executed = execute(cache_settings, absence_entry())
+    assert _warning_codes(executed) == ["no_recent_reports"]
+    assert store(cache_settings, Q_BASE, executed) == "" and _cache_len(cache_settings) == 1
+
+
+def test_a_scan_limited_shortfall_is_not_cached_but_a_complete_one_is(cache_settings, cluster):
+    cluster.handler = lambda i, d: hits_body([{"@timestamp": "2026-10-28T10:00:00Z", "Body": "1/2 switches available"}],
+                                             total=10000, relation="gte")
+    limited = execute(cache_settings, shortfall_entry(size=1))
+    assert _warning_codes(limited) == ["scan_limited"]
+    assert store(cache_settings, "Which fabric messages report fewer switches available?", limited) != ""
+    assert _cache_len(cache_settings) == 0
+    cluster.handler = lambda i, d: hits_body([{"@timestamp": "2026-10-28T10:00:00Z", "Body": "1/2 switches available"}])
+    complete = execute(cache_settings, shortfall_entry())
+    assert _warning_codes(complete) == []
+    assert store(cache_settings, "Which fabric messages report fewer switches available?", complete) == ""
+
+
+def test_ingest_lag_informational_warnings_do_not_block_caching(cache_settings, cluster):
+    rows = [{"@timestamp": "2026-10-28T10:00:00Z", "Created": "2026-10-28T10:05:00Z", "host": "bmc1", "Message": "a"}]
+    cluster.handler = lambda i, d: hits_body(rows, index="log_iml-2026.10.26")
+    negative = execute(cache_settings, lag_entry())
+    assert _warning_codes(negative) == ["negative_lag"]                      # clock skew: data complete, caveat only
+    assert store(cache_settings, "What is the ingest lag of the iLO events?", negative) == ""
+    runtime.reset_result_cache()
+    cluster.handler = lambda i, d: hits_body([{"@timestamp": "2026-10-28T10:05:00Z", "host": "h"}], index="log_iml-x")
+    unmeasurable = execute(cache_settings, lag_entry())
+    assert _warning_codes(unmeasurable) == ["no_lag_measurable"]
+    assert store(cache_settings, "What is the ingest lag of the iLO events?", unmeasurable) == ""
+
+
+# ---- all-or-nothing, fail-closed and independent checks ----
+
+def test_one_truncated_analysis_keeps_a_whole_multi_result_out_of_the_cache(cache_settings, cluster):
+    cluster.handler = context_handler(follow_total=500)
+    executed = execute(cache_settings, rows_entry("fabric_health"), context_entry())
+    assert executed["mode"] == "multi" and len(executed["results"]) == 2
+    reason = store(cache_settings, "Show fabric messages and the LinkStatus Down context", executed)
+    assert "entry 1" in reason and "anchor_0_truncated" in reason and _cache_len(cache_settings) == 0
+
+
+@pytest.fixture()
+def complete_absence(cache_settings, cluster):
+    cluster.handler = absence_handler(SWITCHES, ALIVE)
+    executed = execute(cache_settings, absence_entry())
+    assert store(cache_settings, Q_BASE, copy.deepcopy(executed)) == ""
+    runtime.reset_result_cache()
+    return executed
+
+
+@pytest.mark.parametrize("mutate, expect", [
+    (lambda a: a["warnings"].append("brand_new_warning: some future caveat"), "unclassified warning"),
+    (lambda a: a["warnings"].append("incomplete_entity_list: x"), "incomplete_entity_list"),
+    (lambda a: a["warnings"].append("no_recent_reports: ok"), None),                           # informational only
+    (lambda a: a["warnings"].append(""), "unclassified warning"),
+    (lambda a: a["warnings"].append(None), "unclassified warning"),
+    (lambda a: a["warnings"].append("anchor_x_truncated: not a real index"), "unclassified warning"),
+    (lambda a: a.pop("warnings"), "warnings are missing"),
+    (lambda a: a.update(warnings="none"), "warnings are missing"),
+    (lambda a: a.update(complete=False), "truncated"),
+    (lambda a: a.update(scan_complete=False), "truncated"),
+    (lambda a: a.update(completed=False), "did not complete"),
+])
+def test_warning_classification_is_fail_closed(cache_settings, complete_absence, mutate, expect):
+    executed = copy.deepcopy(complete_absence)
+    mutate(executed["execution"]["analysis"])
+    reason = store(cache_settings, Q_BASE, executed)
+    if expect is None:
+        assert reason == "" and _cache_len(cache_settings) == 1
+    else:
+        assert expect in reason and _cache_len(cache_settings) == 0
+
+
+def test_each_truncation_signal_blocks_caching_on_its_own(cache_settings, cluster):
+    """Even with the warnings list emptied, the structured flags still refuse the entry."""
+    cluster.handler = context_handler()
+    base = execute(cache_settings, context_entry())
+    assert _warning_codes(base) == []
+
+    def flag_truncated(ex):
+        ex["analysis"]["anchors"][0]["truncated"] = True
+
+    def flag_unexpanded(ex):
+        ex["analysis"]["anchors_found"] = ex["analysis"]["anchors_expanded"] + 1
+
+    def flag_result_truncated(ex):
+        ex["truncated"] = True
+
+    for mutate, expect in ((flag_truncated, "surrounding rows were truncated"), (flag_unexpanded, "was not expanded"),
+                           (flag_result_truncated, "truncated by the result limits")):
+        executed = copy.deepcopy(base)
+        mutate(executed["execution"])
+        reason = store(cache_settings, CTX_Q, executed)
+        assert expect in reason and _cache_len(cache_settings) == 0, expect
+    assert store(cache_settings, CTX_Q, copy.deepcopy(base)) == ""                       # untouched: stored
+
+
+def test_classify_warning_codes():
+    c = query_cache.classify_warning
+    for w in ("incomplete_entity_list: more", "ranking_limited: x", "scan_limited: x", "anchor_0_truncated: x",
+              "anchor_12_truncated: x", "anchor_2_skipped: x"):
+        assert c(w) == "incomplete", w
+    for w in ("no_recent_reports: x", "no_anchor_event: x", "negative_lag: x", "no_lag_measurable: x"):
+        assert c(w) == "informational", w
+    for w in ("something_new: x", "", None, 5, "anchor_x_truncated: x", "anchor_1_truncated_again: x"):
+        assert c(w) == "unknown", w
+
+
+def test_every_warning_code_in_analysis_py_is_classified():
+    """If analysis.py gains a warning, this fails until it is classified as incomplete or informational."""
+    import ast
+    from pathlib import Path
+    from app.opensearch_catalog import analysis as analysis_mod
+
+    tree = ast.parse(Path(analysis_mod.__file__).read_text(encoding="utf-8"))
+
+    def text_of(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):                                   # f"anchor_{idx}_truncated: ..."
+            return "".join(v.value if isinstance(v, ast.Constant) else "0" for v in node.values)
+        return None
+
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "warnings" and node.args):
+            t = text_of(node.args[0])
+            if t:
+                found.add(t.split(":", 1)[0])
+        if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "warnings" for t in node.targets)
+                and isinstance(node.value, ast.IfExp) and isinstance(node.value.orelse, ast.List)):
+            found.update(t.split(":", 1)[0] for t in map(text_of, node.value.orelse.elts) if t)
+    assert {"incomplete_entity_list", "no_recent_reports", "anchor_0_truncated", "anchor_0_skipped", "no_anchor_event",
+            "negative_lag", "no_lag_measurable", "scan_limited", "ranking_limited"} <= found, found    # extractor works
+    unclassified = {c for c in found if query_cache.classify_warning(c + ": x") == "unknown"}
+    assert not unclassified, f"classify these analysis warnings in query_cache.py: {sorted(unclassified)}"

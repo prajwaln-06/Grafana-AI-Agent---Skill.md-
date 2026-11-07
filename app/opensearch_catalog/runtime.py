@@ -145,7 +145,7 @@ def get_result_cache(settings) -> query_cache.ResultCache | None:
     if not settings.opensearch_result_cache_enabled:
         return None
     key = (settings.opensearch_result_cache_ttl_seconds, settings.opensearch_result_cache_max_entries,
-           settings.opensearch_result_cache_semantic_enabled, settings.opensearch_result_cache_similarity_threshold,
+           settings.opensearch_result_cache_semantic_enabled,
            json.dumps(settings.opensearch_result_cache_aliases, sort_keys=True))
     with _lock:
         cache = _result_caches.get(key)
@@ -154,7 +154,6 @@ def get_result_cache(settings) -> query_cache.ResultCache | None:
                 ttl_seconds=settings.opensearch_result_cache_ttl_seconds,
                 max_entries=settings.opensearch_result_cache_max_entries,
                 semantic_enabled=settings.opensearch_result_cache_semantic_enabled,
-                similarity_threshold=settings.opensearch_result_cache_similarity_threshold,
                 aliases=settings.opensearch_result_cache_aliases)
             _result_caches[key] = cache
         return cache

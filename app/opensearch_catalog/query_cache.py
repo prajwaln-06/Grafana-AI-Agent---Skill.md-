@@ -19,13 +19,15 @@ Safety model (false hits are worse than misses; every doubt is a miss)
 2. WHEN a question may reuse an entry (two levels):
    Level 1  identical canonical wording (case-preserving for literals, tense/plural folded with
             text_forms). Needs no understanding of the question.
-   Level 2  semantic: both questions are parsed into a QuestionSignature -- operation, entity
+   Level 2  reworded: both questions are parsed into a QuestionSignature -- operation, entity
             scope, concept set, literals, time window and every leftover word. They must be
-            EQUAL in every facet AND a similarity score must reach the threshold. Anything the
-            parser does not fully understand (compound questions, calendar times, unknown time
-            words, several operations) is never matched at Level 2. A synonym is accepted only
-            from a fixed, small lexicon or from an operator-declared per-family alias.
-   The score alone never authorises a hit; the facets are the equivalence contract.
+            EQUAL in every facet (`equivalent()`). Anything the parser does not fully
+            understand (compound questions, calendar times, unknown time words, several
+            operations) is never matched at Level 2. A synonym is accepted only from a fixed,
+            small lexicon or from an operator-declared per-family alias.
+   This is deterministic rule-based matching, NOT embedding/similarity matching: there is no
+   score and no threshold, because facet equality is the whole contract. (A statistical
+   similarity could only ever add a requirement on top of it; none is used today.)
 3. Level 2 is offered only for entries whose own question was cross-checked against the query
    that really ran: the analysis type matches the question's concepts, the window matches the
    executed window, every literal appears in the canonical query, and every entity noun is
@@ -39,7 +41,7 @@ Safety model (false hits are worse than misses; every doubt is a miss)
    effectively the same interval.
 6. ISOLATION: entries are keyed by scope (app/user); one scope never sees another's. Stored
    results are JSON text; every hit is a fresh deserialisation, so callers cannot mutate the cache.
-7. Any internal failure (matcher, hashing, serialisation, lock) is a miss / not-stored, never a
+7. Any internal failure (signature building, matching, hashing, serialisation, lock) is a miss / not-stored, never a
    failed request.
 """
 from __future__ import annotations
@@ -48,7 +50,6 @@ import dataclasses
 import hashlib
 import json
 import logging
-import math
 import re
 import threading
 import time
@@ -58,7 +59,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping
 
 from app.opensearch_catalog import guard
 from app.opensearch_catalog.context import Limits, OpenSearchContext, PatternContext
@@ -363,49 +364,18 @@ def _build_signature(question: str, alias_items: tuple[tuple[str, str], ...]) ->
         residual=frozenset(residual), understood=not reasons, reasons=tuple(dict.fromkeys(reasons)))
 
 
+def _has_content(sig: QuestionSignature) -> bool:
+    return bool(sig.operation or sig.entities or sig.concepts or sig.literals or sig.residual
+                or sig.window_seconds is not None)
+
+
 def equivalent(a: QuestionSignature, b: QuestionSignature) -> bool:
-    """The Level-2 equivalence contract: both fully understood and EQUAL in every facet. A single
-    unexplained word that differs makes them different."""
-    return (a.understood and b.understood and a.operation == b.operation and a.entities == b.entities
+    """The Level-2 equivalence contract: both fully understood, carrying some substantive content,
+    and EQUAL in every facet. A single unexplained word that differs makes them different. A
+    question with no content at all (only fillers/articles) matches nothing but its exact wording."""
+    return (a.understood and b.understood and _has_content(a) and _has_content(b) and a.operation == b.operation and a.entities == b.entities
             and a.concepts == b.concepts and a.literals == b.literals and a.window_seconds == b.window_seconds
             and a.residual == b.residual)
-
-
-class SemanticMatcher(Protocol):
-    def similarity(self, a: QuestionSignature, b: QuestionSignature) -> float: ...
-
-
-def _features(sig: QuestionSignature) -> Counter:
-    f: Counter = Counter()
-    if sig.operation:
-        f[f"op:{sig.operation}"] += 1
-    for e in sig.entities:
-        f[f"ent:{e}"] += 1
-    for c in sig.concepts:
-        f[f"c:{c}"] += 1
-    for r in sig.residual:
-        f[f"r:{r}"] += 1
-    for lit in sig.literals:
-        f[f"l:{lit}"] += 1
-    if sig.window_seconds is not None:
-        f[f"w:{sig.window_seconds}"] += 1
-    return f
-
-
-class ConceptVectorMatcher:
-    """Cosine similarity of bag-of-concept vectors (operation, entities, concepts, literals,
-    window, residual words). Deterministic and dependency-free. An embedding model can replace it
-    by implementing `similarity` (see SemanticMatcher); it can only ever ADD a requirement,
-    because `equivalent()` is checked as well."""
-
-    def similarity(self, a: QuestionSignature, b: QuestionSignature) -> float:
-        fa, fb = _features(a), _features(b)
-        if not fa or not fb:
-            return 0.0
-        dot = sum(v * fb.get(k, 0) for k, v in fa.items())
-        na = math.sqrt(sum(v * v for v in fa.values()))
-        nb = math.sqrt(sum(v * v for v in fb.values()))
-        return dot / (na * nb) if na and nb else 0.0
 
 
 # =====================================================================================================
@@ -550,6 +520,85 @@ def _blocks(executed: dict) -> tuple[str, list[dict]]:
     return "single", [executed]
 
 
+# ---- is a finished analysis COMPLETE? ------------------------------------------------------------------
+#
+# analysis.py reports its caveats as `warnings` of the form "<code>: <message>". Some analyses
+# also set a summary flag (absence: `complete`, text_ratio_shortfall: `scan_complete`), but
+# context_window and recurrence do NOT: they signal a cut-short answer only through a warning
+# (`anchor_<i>_truncated`, `ranking_limited`). So warnings are classified by code:
+#
+#   INCOMPLETE  -- data is missing from the answer: never cached.
+#   INFORMATIONAL -- the answer is complete and the caveat only helps reading it: cacheable.
+#   anything else -- an unclassified code (e.g. a warning added to analysis.py later) is treated
+#                    as incomplete (fail closed) until someone classifies it here;
+#                    test_every_warning_code_in_analysis_py_is_classified enforces that.
+INCOMPLETE_WARNING_CODES = frozenset({
+    "incomplete_entity_list",   # absence: more entities exist than the analysis limit
+    "ranking_limited",          # recurrence: ranking applied to a doc_count-truncated entity set
+    "scan_limited",             # text_ratio_shortfall: more matching rows than were scanned
+})
+INCOMPLETE_WARNING_PATTERNS = (
+    re.compile(r"anchor_\d+_truncated"),   # context_window: rows around an event cut at the row limit
+    re.compile(r"anchor_\d+_skipped"),     # context_window: an event found but not expanded
+)
+INFORMATIONAL_WARNING_CODES = frozenset({
+    "no_recent_reports",        # absence: nothing reported recently (full lists, possible ingestion outage)
+    "no_anchor_event",          # context_window: no event matched, so there is genuinely nothing to show
+    "negative_lag",             # ingest_lag: clock skew in the measured rows
+    "no_lag_measurable",        # ingest_lag: no returned row had both times; the answer is "none measurable"
+})
+
+
+def _warning_code(warning: Any) -> str | None:
+    if not isinstance(warning, str):
+        return None
+    code = warning.split(":", 1)[0].strip()
+    return code or None
+
+
+def classify_warning(warning: Any) -> str:
+    """"incomplete" | "informational" | "unknown" (unknown is treated as incomplete)."""
+    code = _warning_code(warning)
+    if code is None:
+        return "unknown"
+    if code in INCOMPLETE_WARNING_CODES or any(p.fullmatch(code) for p in INCOMPLETE_WARNING_PATTERNS):
+        return "incomplete"
+    if code in INFORMATIONAL_WARNING_CODES:
+        return "informational"
+    return "unknown"
+
+
+def _analysis_incomplete_reason(summary: dict, execution: dict) -> str:
+    """"" if the finished analysis is complete, else why it is not. Every check is independent: a
+    result is cacheable only if none of them fires."""
+    if summary.get("completed") is not True:
+        return "analysis did not complete"
+    # explicit summary flags (absence, text_ratio_shortfall)
+    if summary.get("complete") is False or summary.get("scan_complete") is False:
+        return "analysis result is truncated"
+    # warnings: must be present as a list, and every one must be known and informational
+    warnings = summary.get("warnings")
+    if not isinstance(warnings, list):
+        return "analysis warnings are missing, so completeness is unknown"
+    for w in warnings:
+        kind = classify_warning(w)
+        if kind == "incomplete":
+            return f"analysis is incomplete ({_warning_code(w)})"
+        if kind == "unknown":
+            return f"analysis has an unclassified warning ({_warning_code(w) or 'unreadable'}); treated as incomplete"
+    # context_window: per-event flags, and every event found must have been expanded
+    anchors = summary.get("anchors")
+    if isinstance(anchors, list) and any(isinstance(a, dict) and a.get("truncated") is True for a in anchors):
+        return "analysis is incomplete (an event's surrounding rows were truncated)"
+    found, expanded = summary.get("anchors_found"), summary.get("anchors_expanded")
+    if isinstance(found, int) and isinstance(expanded, int) and expanded < found:
+        return "analysis is incomplete (an event was not expanded)"
+    # normalisation had to cut rows/buckets/series (also covers recurrence's `sum_other_doc_count`)
+    if execution.get("truncated") is True:
+        return "analysis result was truncated by the result limits"
+    return ""
+
+
 def _part_problem(entry: Any) -> tuple[PartFacts | None, str]:
     if not isinstance(entry, dict):
         return None, "entry is not an object"
@@ -572,10 +621,11 @@ def _part_problem(entry: Any) -> tuple[PartFacts | None, str]:
     atype = None
     if analysis is not None:
         summary = ex.get("analysis")
-        if not isinstance(analysis, dict) or not isinstance(summary, dict) or summary.get("completed") is not True:
+        if not isinstance(analysis, dict) or not isinstance(summary, dict):
             return None, "analysis did not complete"
-        if summary.get("complete") is False or summary.get("scan_complete") is False:
-            return None, "analysis result is truncated"
+        why = _analysis_incomplete_reason(summary, ex)
+        if why:
+            return None, why
         atype = analysis.get("type") if isinstance(analysis.get("type"), str) else None
     win = ex.get("resolved_time_range")
     if not isinstance(win, dict) or not isinstance(win.get("seconds"), (int, float)) \
@@ -697,8 +747,7 @@ class CacheEntry:
 @dataclass(frozen=True)
 class CacheHit:
     result: dict
-    match: str                   # "exact" | "semantic"
-    similarity: float
+    match: str                   # "exact" (same wording) | "semantic" (reworded, signature-equivalent)
     entry_id: int
 
 
@@ -707,15 +756,12 @@ Revalidator = Callable[[CacheEntry], "str | None"]
 
 class ResultCache:
     def __init__(self, *, ttl_seconds: float = 60.0, max_entries: int = 200, semantic_enabled: bool = True,
-                 similarity_threshold: float = 0.85, aliases: Mapping[str, Mapping[str, str]] | None = None,
-                 matcher: SemanticMatcher | None = None, clock: Callable[[], float] = time.monotonic,
-                 wall_clock: Callable[[], float] = time.time):
+                 aliases: Mapping[str, Mapping[str, str]] | None = None,
+                 clock: Callable[[], float] = time.monotonic, wall_clock: Callable[[], float] = time.time):
         self.ttl_seconds = float(ttl_seconds)
         self.max_entries = int(max_entries)
-        self.semantic_enabled = bool(semantic_enabled)
-        self.similarity_threshold = float(similarity_threshold)
+        self.semantic_enabled = bool(semantic_enabled)      # Level 2 (reworded questions) on/off
         self.aliases = {k: dict(v) for k, v in (aliases or {}).items()}
-        self.matcher: SemanticMatcher = matcher or ConceptVectorMatcher()
         self._clock, self._wall = clock, wall_clock
         self._lock = threading.RLock()
         self._entries: dict[int, CacheEntry] = {}
@@ -739,7 +785,7 @@ class ResultCache:
         with self._lock:
             return {"enabled": True, "entries": len(self._entries), "max_entries": self.max_entries,
                     "ttl_seconds": self.ttl_seconds, "semantic_enabled": self.semantic_enabled,
-                    "similarity_threshold": self.similarity_threshold, **dict(self._stats)}
+                    **dict(self._stats)}
 
     def _evict_locked(self, entry_id: int) -> None:
         e = self._entries.pop(entry_id, None)
@@ -827,30 +873,27 @@ class ResultCache:
                        key=lambda e: -e.created_at)
         for e in exact:
             if self._accept(e, revalidate):
-                return self._hit(e, "exact", 1.0)
+                return self._hit(e, "exact")
 
         if not (self.semantic_enabled and sig.understood):
             return None
         tried = {e.entry_id for e in exact}
-        scored: list[tuple[float, float, CacheEntry]] = []
+        matches: list[CacheEntry] = []
         for e in candidates:
             if e.entry_id in tried or not e.semantic_ok:
                 continue
-            aliases = self._aliases_for(e)
-            a, b = build_signature(question, aliases), build_signature(e.question, aliases)
-            if not equivalent(a, b):
-                continue
             try:
-                score = float(self.matcher.similarity(a, b))
-            except Exception:  # noqa: BLE001 -- matcher unavailable => this candidate is a miss
-                logger.exception("semantic matcher failed; treating as a cache miss")
-                self._stats["matcher_errors"] += 1
+                aliases = self._aliases_for(e)
+                equal = equivalent(build_signature(question, aliases), build_signature(e.question, aliases))
+            except Exception:  # noqa: BLE001 -- a matching failure makes this candidate a miss, never an error
+                logger.exception("question matching failed; treating as a cache miss")
+                self._stats["match_errors"] += 1
                 continue
-            if score >= self.similarity_threshold:
-                scored.append((score, e.created_at, e))
-        for score, _, e in sorted(scored, key=lambda t: (-t[0], -t[1])):
+            if equal:
+                matches.append(e)
+        for e in sorted(matches, key=lambda e: -e.created_at):        # newest equivalent entry first
             if self._accept(e, revalidate):
-                return self._hit(e, "semantic", score)
+                return self._hit(e, "semantic")
         return None
 
     def _accept(self, entry: CacheEntry, revalidate: Revalidator) -> bool:
@@ -868,10 +911,10 @@ class ResultCache:
             return False
         return entry.expires_at > self._clock()
 
-    def _hit(self, entry: CacheEntry, match: str, similarity: float) -> CacheHit:
+    def _hit(self, entry: CacheEntry, match: str) -> CacheHit:
         result = json.loads(entry.result_json)            # a fresh object every time
         now = self._clock()
-        info = {"hit": True, "match": match, "similarity": round(similarity, 4),
+        info = {"hit": True, "match": match,
                 "age_seconds": round(now - entry.created_at, 3),
                 "expires_in_seconds": round(max(0.0, entry.expires_at - now), 3),
                 "ttl_seconds": entry.ttl_seconds,
@@ -884,7 +927,7 @@ class ResultCache:
                 if not isinstance(ex.get("metadata"), dict):
                     ex["metadata"] = {}
                 ex["metadata"]["result_cache"] = dict(info)
-        return CacheHit(result=result, match=match, similarity=similarity, entry_id=entry.entry_id)
+        return CacheHit(result=result, match=match, entry_id=entry.entry_id)
 
 
 # =====================================================================================================

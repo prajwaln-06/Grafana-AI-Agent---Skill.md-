@@ -98,13 +98,10 @@ class Settings(BaseSettings):
         description="Capacity. When full, expired entries go first, then the oldest.")
     opensearch_result_cache_semantic_enabled: bool = Field(
         default=True,
-        description="Allow a DIFFERENTLY WORDED question to reuse an answer (Level 2). The two "
-                    "questions must agree in operation, entity scope, concepts, literals, time window "
-                    "and every leftover word. False = identical wording only (Level 1).")
-    opensearch_result_cache_similarity_threshold: float = Field(
-        default=0.85, ge=0.5, le=1.0,
-        description="Minimum concept-vector cosine similarity for a Level-2 hit. It is an extra "
-                    "requirement on top of facet equality, never a substitute for it.")
+        description="Allow a DIFFERENTLY WORDED question to reuse an answer (Level 2). This is "
+                    "deterministic rule-based matching, not embeddings or a similarity score: the two "
+                    "questions must agree exactly in operation, entity scope, concepts, literals, time "
+                    "window and every leftover word. False = identical wording only (Level 1).")
     opensearch_result_cache_aliases: dict[str, dict[str, str]] = Field(
         default_factory=dict,
         description="Operator-declared synonyms per index family (pattern_id), e.g. "
