@@ -275,6 +275,11 @@ def run_context_window(entry: dict, pattern: PatternEntry, view: PatternFieldVie
 
     anchor_body = runner(entry["query"], "anchor: find the event(s) to look around")
     anchors = _hits(anchor_body)[:limits.analysis_anchor_limit]
+    # How many events matched in total, as OpenSearch reported it: relation 'eq' is exact, 'gte' a
+    # lower bound, 'unknown' = the response carried no total (track_total_hits: false). Kept in the
+    # summary (same shape as `documents_matched`) so a reader can tell whether EVERY matching event
+    # was expanded; an unknown total is never reported as 0 or as exact.
+    anchors_total, anchors_rel = _total(anchor_body)
     bodies = [anchor_body]
     merged: list[dict] = []
     notes: list[dict] = []
@@ -334,7 +339,8 @@ def run_context_window(entry: dict, pattern: PatternEntry, view: PatternFieldVie
     summary = {
         "type": ANALYSIS_CONTEXT_WINDOW, "before": params["before"], "after": params["after"],
         "scope": "context_filter" if scope_filter is not None else f"same {cfg['entity_role']}",
-        "anchors_found": len(anchors), "anchors_expanded": len(per_anchor), "anchors": per_anchor,
+        "anchors_found": len(anchors), "anchors_matched": {"value": anchors_total, "relation": anchors_rel},
+        "anchors_expanded": len(per_anchor), "anchors": per_anchor,
         "explanation": "Rows around each matching event, oldest first; each row's analysis.position says whether it "
                        "came before, after, or is the event itself.",
     }

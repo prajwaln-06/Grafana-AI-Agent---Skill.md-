@@ -1245,3 +1245,258 @@ def test_every_warning_code_in_analysis_py_is_classified():
             "negative_lag", "no_lag_measurable", "scan_limited", "ranking_limited"} <= found, found    # extractor works
     unclassified = {c for c in found if query_cache.classify_warning(c + ": x") == "unknown"}
     assert not unclassified, f"classify these analysis warnings in query_cache.py: {sorted(unclassified)}"
+
+
+# ---------------------------------------------------------------------------------------------------
+# J. context_window: the anchor query's own total must prove that EVERY matching event was expanded
+#
+# The anchor query returns at most `size` (<= the anchor limit) events, but more may match. analysis.py
+# now keeps the anchor query's total in the summary as `anchors_matched: {value, relation}` (relation
+# "eq" exact | "gte" lower bound | "unknown" = OpenSearch sent no total). Only an exact total equal to
+# the events returned and expanded is proof of completeness. These tests drive the REAL executor, with
+# a fake cluster that reports totals the way OpenSearch does (see anchor_corpus_handler).
+# ---------------------------------------------------------------------------------------------------
+
+DESC = [{"@timestamp": {"order": "desc"}}]
+ASC = [{"@timestamp": {"order": "asc"}}]
+
+
+def anchor_corpus_handler(corpus_total):
+    """`corpus_total` events match the anchor query. The response holds at most `size` of them and
+    reports hits.total the way OpenSearch does: exact up to the tracking bound (default 10 000), a
+    lower bound (relation gte) beyond it, nothing at all when track_total_hits is false."""
+    def handler(index, dsl):
+        if "controllerlog" not in index:
+            return hits_body([{"@timestamp": "2026-10-28T10:00:00Z", "Severity": "error", "Body": "row"}])
+        if dsl.get("sort") == ASC:                                                    # a per-event expansion
+            docs = [{"@timestamp": "2026-10-28T09:58:00Z", "Body": "before it"},
+                    {"@timestamp": "2026-10-28T10:02:00Z", "Body": "after it"}]
+            return hits_body(docs, ids=["b", "c"])
+        n = min(corpus_total, dsl["size"])
+        docs = [{**ANCHOR, "@timestamp": f"2026-10-28T10:0{i}:00Z"} for i in range(n)]
+        body = hits_body(docs, ids=[f"A{i}" for i in range(n)])
+        track = dsl.get("track_total_hits", 10000)
+        if track is False:
+            body["hits"].pop("total")                                                  # no total at all
+        elif track is True or corpus_total <= track:
+            body["hits"]["total"] = {"value": corpus_total, "relation": "eq"}
+        else:
+            body["hits"]["total"] = {"value": track, "relation": "gte"}
+        return body
+    return handler
+
+
+def ctx_entry(size=None, track=None, **analysis):
+    q = {"query": {"bool": {"filter": [window("now-24h"), {"match_phrase": {"Body": "LinkStatus Down"}}]}}}
+    if size is not None:
+        q["size"] = size
+    if track is not None:
+        q["track_total_hits"] = track
+    return os_entry("controller_log", q, intent="context_window", analysis={"type": "context_window", **analysis})
+
+
+def _matched(executed):
+    return executed["execution"]["analysis"]["anchors_matched"]
+
+
+@pytest.mark.parametrize("corpus, track, size, relation, value, cacheable, why", [
+    (1, None, None, "eq", 1, True, ""),                                       # one event, exact: complete
+    (3, None, None, "eq", 3, True, ""),                                       # exactly the anchor limit, exact: complete
+    (3, True, None, "eq", 3, True, ""),
+    (2, 2, None, "eq", 2, True, ""),                                          # integer bound not exceeded: still exact
+    (1, None, 1, "eq", 1, True, ""),
+    (5, None, None, "eq", 5, False, "5 events matched but only 3 were expanded"),   # exact total above the limit
+    (2, None, 1, "eq", 2, False, "2 events matched but only 1 were expanded"),      # exact total above the query size
+    (25000, None, None, "gte", 10000, False, "lower bound"),                  # beyond the default tracking bound
+    (5, 3, None, "gte", 3, False, "lower bound"),                             # lower bound whose number equals the count returned
+    (3, False, None, "unknown", None, False, "did not report how many"),      # track_total_hits: false
+])
+def test_the_anchor_total_decides_whether_a_context_window_is_cached(
+        cache_settings, cluster, corpus, track, size, relation, value, cacheable, why):
+    cluster.handler = anchor_corpus_handler(corpus)
+    executed = execute(cache_settings, ctx_entry(size=size, track=track))
+    a = executed["execution"]["analysis"]
+    assert a["completed"] is True and _warning_codes(executed) == []                 # nothing else flags these
+    assert a["anchors_matched"] == {"value": value, "relation": relation}            # propagated, never faked
+    assert a["anchors_found"] == a["anchors_expanded"] == min(corpus, size or 3)     # every RETURNED event was expanded
+    reason = store(cache_settings, CTX_Q, executed)
+    if cacheable:
+        assert reason == "" and _cache_len(cache_settings) == 1
+        assert lookup(cache_settings, CTX_Q) is not None
+    else:
+        assert why in reason and _cache_len(cache_settings) == 0
+        assert lookup(cache_settings, CTX_Q) is None
+
+
+def test_an_exact_total_above_a_configured_anchor_limit_is_never_cached(cache_settings, cluster):
+    """Every returned event is expanded, yet more events matched than the limit lets the analysis expand."""
+    s = cache_settings.model_copy(update={"opensearch_analysis_anchor_limit": 2})
+    cluster.handler = anchor_corpus_handler(3)
+    executed = execute(s, ctx_entry())
+    a = executed["execution"]["analysis"]
+    assert (a["anchors_found"], a["anchors_expanded"]) == (2, 2) and a["anchors_matched"] == {"value": 3, "relation": "eq"}
+    assert all(not x["truncated"] for x in a["anchors"]) and _warning_codes(executed) == []
+    assert "3 events matched but only 2 were expanded" in store(s, CTX_Q, executed) and _cache_len(s) == 0
+    cluster.handler = anchor_corpus_handler(2)                                       # exactly the limit: complete
+    assert store(s, CTX_Q, execute(s, ctx_entry())) == "" and _cache_len(s) == 1
+
+
+def test_no_matching_event_is_cacheable_only_with_an_exact_zero_total(cache_settings, cluster):
+    cluster.handler = anchor_corpus_handler(0)
+    executed = execute(cache_settings, ctx_entry())
+    assert executed["execution"]["execution_status"] == "empty_result" and _warning_codes(executed) == ["no_anchor_event"]
+    assert _matched(executed) == {"value": 0, "relation": "eq"}
+    assert store(cache_settings, CTX_Q, executed) == "" and _cache_len(cache_settings) == 1
+    runtime.reset_result_cache()
+    cluster.handler = anchor_corpus_handler(0)
+    unknown = execute(cache_settings, ctx_entry(track=False))                         # no events returned, no total either
+    assert _matched(unknown) == {"value": None, "relation": "unknown"}
+    assert "did not report" in store(cache_settings, CTX_Q, unknown) and _cache_len(cache_settings) == 0
+    lower = copy.deepcopy(executed)                                                   # an exact zero is required
+    lower["execution"]["analysis"]["anchors_matched"] = {"value": 0, "relation": "gte"}
+    assert "lower bound" in store(cache_settings, CTX_Q, lower) and _cache_len(cache_settings) == 0
+
+
+@pytest.mark.parametrize("total, expect", [
+    ({"value": "3", "relation": "eq"}, "did not report how many"),            # value of the wrong type -> unknown
+    ({"value": 3, "relation": "weird"}, "malformed"),                         # a relation OpenSearch never sends
+    ({"value": -1, "relation": "eq"}, "malformed"),
+    ({"value": 1, "relation": "eq"}, ""),                                     # control: a proper total
+    (None, "did not report how many"),                                        # hits.total missing entirely
+])
+def test_a_malformed_total_from_the_cluster_fails_closed(cache_settings, cluster, total, expect):
+    base = anchor_corpus_handler(1)
+
+    def handler(index, dsl):
+        body = base(index, dsl)
+        if "controllerlog" in index and dsl.get("sort") == DESC:
+            if total is None:
+                body["hits"].pop("total")
+            else:
+                body["hits"]["total"] = total
+        return body
+
+    cluster.handler = handler
+    executed = execute(cache_settings, ctx_entry())
+    reason = store(cache_settings, CTX_Q, executed)
+    if expect:
+        assert expect in reason and _cache_len(cache_settings) == 0
+    else:
+        assert reason == "" and _cache_len(cache_settings) == 1
+
+
+def test_a_total_that_contradicts_the_returned_events_is_not_cached(cache_settings, cluster):
+    base = anchor_corpus_handler(3)
+
+    def handler(index, dsl):
+        body = base(index, dsl)
+        if "controllerlog" in index and dsl.get("sort") == DESC:
+            body["hits"]["total"] = {"value": 1, "relation": "eq"}                    # 1 matched, yet 3 were returned
+        return body
+
+    cluster.handler = handler
+    executed = execute(cache_settings, ctx_entry())
+    assert executed["execution"]["analysis"]["anchors_found"] == 3
+    assert "contradicts the events returned" in store(cache_settings, CTX_Q, executed) and _cache_len(cache_settings) == 0
+
+
+@pytest.fixture()
+def complete_context(cache_settings, cluster):
+    cluster.handler = anchor_corpus_handler(1)
+    executed = execute(cache_settings, ctx_entry())
+    assert store(cache_settings, CTX_Q, copy.deepcopy(executed)) == ""
+    runtime.reset_result_cache()
+    return executed
+
+
+@pytest.mark.parametrize("mutate, expect", [
+    (lambda a: a.pop("anchors_matched"), "not reported"),
+    (lambda a: a.update(anchors_matched="1"), "not reported"),
+    (lambda a: a.update(anchors_matched=[1]), "not reported"),
+    (lambda a: a.update(anchors_matched=None), "not reported"),
+    (lambda a: a.update(anchors_matched={}), "did not report"),
+    (lambda a: a.update(anchors_matched={"value": None, "relation": "unknown"}), "did not report"),
+    (lambda a: a.update(anchors_matched={"value": 1}), "malformed"),
+    (lambda a: a.update(anchors_matched={"value": 1, "relation": "lt"}), "malformed"),
+    (lambda a: a.update(anchors_matched={"value": True, "relation": "eq"}), "malformed"),
+    (lambda a: a.update(anchors_matched={"value": "1", "relation": "eq"}), "malformed"),
+    (lambda a: a.update(anchors_matched={"value": 1.0, "relation": "eq"}), "malformed"),
+    (lambda a: a.update(anchors_matched={"value": -1, "relation": "eq"}), "malformed"),
+    (lambda a: a.update(anchors_matched={"value": 1, "relation": "gte"}), "lower bound"),
+    (lambda a: a.update(anchors_matched={"value": 2, "relation": "eq"}), "2 events matched but only 1"),
+    (lambda a: a.update(anchors_matched={"value": 0, "relation": "eq"}), "contradicts the events returned"),
+    (lambda a: a.update(anchors_found=2), "was not expanded"),
+    (lambda a: a.update(anchors_expanded=2), "contradict each other"),
+    (lambda a: a["anchors"].pop(), "contradict each other"),
+    (lambda a: a.pop("anchors"), "missing or malformed"),
+    (lambda a: a.pop("anchors_found"), "missing or malformed"),
+    (lambda a: a.update(anchors_found="1"), "missing or malformed"),
+    (lambda a: a["anchors"][0].update(truncated=True), "truncated"),                  # existing per-anchor check
+    (lambda a: a["warnings"].append("anchor_0_skipped: x"), "anchor_0_skipped"),       # existing warning classification
+    (lambda a: a.update(anchors_matched={"value": 1, "relation": "eq"}), None),       # control: proper total is accepted
+])
+def test_the_context_window_completeness_contract_fails_closed(cache_settings, complete_context, mutate, expect):
+    executed = copy.deepcopy(complete_context)
+    mutate(executed["execution"]["analysis"])
+    reason = store(cache_settings, CTX_Q, executed)
+    if expect is None:
+        assert reason == "" and _cache_len(cache_settings) == 1
+    else:
+        assert expect in reason and _cache_len(cache_settings) == 0
+
+
+def test_a_complete_context_window_is_replayed_with_no_router_generator_or_opensearch_call(
+        monkeypatch, cache_settings, cluster):
+    cluster.handler = anchor_corpus_handler(3)                                         # 3 events, exact, all expanded
+    contract = canon(cache_settings, ctx_entry())
+    run = AgentRun(monkeypatch, cache_settings, lambda q: contract)
+    first, _ = run.ask(CTX_Q)
+    assert len(cluster.searches) == 4 and run.pipeline_questions == [CTX_Q]            # 1 anchor query + 3 expansions
+    assert first["execution"]["analysis"]["anchors_matched"] == {"value": 3, "relation": "eq"}
+    second, _ = run.ask(CTX_Q)
+    assert run.pipeline_questions == [CTX_Q], "Router/Generator must not run again"
+    assert len(cluster.searches) == 4, "no OpenSearch search at all for the hit"
+    assert cache_info(second)[0]["hit"] is True and strip_cache_info(second) == first
+
+
+def test_an_incomplete_anchor_query_is_not_stored_and_the_next_identical_question_runs_the_pipeline_again(
+        monkeypatch, cache_settings, cluster):
+    cluster.handler = anchor_corpus_handler(5)                                         # 5 match, 3 can be expanded
+    contract = canon(cache_settings, ctx_entry())
+    run = AgentRun(monkeypatch, cache_settings, lambda q: contract)
+    first, _ = run.ask(CTX_Q)
+    assert first["execution"]["analysis"]["anchors_matched"] == {"value": 5, "relation": "eq"}
+    assert first["execution"]["analysis"]["anchors_found"] == 3 and len(cluster.searches) == 4
+    assert _cache_len(cache_settings) == 0
+    second, _ = run.ask(CTX_Q)
+    assert run.pipeline_questions == [CTX_Q, CTX_Q] and len(cluster.searches) == 8
+    assert "result_cache" not in second["execution"]["metadata"] and _cache_len(cache_settings) == 0
+
+
+def test_all_or_nothing_for_a_multi_result_with_an_incomplete_anchor_query(cache_settings, cluster):
+    cluster.handler = anchor_corpus_handler(5)
+    executed = execute(cache_settings, rows_entry("fabric_health"), ctx_entry())
+    assert executed["mode"] == "multi"
+    reason = store(cache_settings, "Show fabric messages and the LinkStatus Down context", executed)
+    assert "entry 1" in reason and "5 events matched but only 3" in reason and _cache_len(cache_settings) == 0
+    cluster.handler = anchor_corpus_handler(2)                                          # complete: stored whole
+    executed = execute(cache_settings, rows_entry("fabric_health"), ctx_entry())
+    assert store(cache_settings, "Show fabric messages and the LinkStatus Down context", executed) == ""
+
+
+def test_other_analyses_do_not_carry_or_need_the_anchor_total(cache_settings, cluster):
+    cluster.handler = absence_handler(SWITCHES, ALIVE)
+    absence = execute(cache_settings, absence_entry())
+    cluster.handler = recurrence_handler(other=0)
+    recurrence = execute(cache_settings, recurrence_entry())
+    cluster.handler = lambda i, d: hits_body([{"@timestamp": "2026-10-28T10:00:00Z", "Body": "1/2 switches available"}])
+    shortfall = execute(cache_settings, shortfall_entry())
+    cluster.handler = lambda i, d: hits_body([{"@timestamp": "2026-10-28T10:00:00Z", "Created": "2026-10-28T09:55:00Z",
+                                               "host": "bmc1", "Message": "a"}], index="log_iml-2026.10.26")
+    lag = execute(cache_settings, lag_entry())
+    for n, (q, ex) in enumerate((("Which switches have stopped sending heartbeats?", absence),
+                                 ("Which locations have recurring faults?", recurrence),
+                                 ("Which fabric messages report fewer switches available?", shortfall),
+                                 ("What is the ingest lag of the iLO events?", lag)), start=1):
+        assert "anchors_matched" not in ex["execution"]["analysis"], q
+        assert store(cache_settings, q, ex) == "" and _cache_len(cache_settings) == n, q

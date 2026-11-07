@@ -568,9 +568,46 @@ def classify_warning(warning: Any) -> str:
     return "unknown"
 
 
-def _analysis_incomplete_reason(summary: dict, execution: dict) -> str:
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _context_window_problem(summary: dict) -> str:
+    """"" only if the summary PROVES that every event the anchor query matched was expanded.
+
+    The proof needs the anchor query's total (`anchors_matched`, same shape as `documents_matched`):
+      * relation "eq"  -> exact; complete only when value == anchors_found == anchors_expanded;
+      * relation "gte" -> a lower bound; never proof, even when its number equals the count returned;
+      * "unknown" / missing / malformed / contradictory -> no proof.
+    (An exact total above the configured anchor limit is simply value > anchors_found.)"""
+    found, expanded, anchors = summary.get("anchors_found"), summary.get("anchors_expanded"), summary.get("anchors")
+    if not (_is_count(found) and _is_count(expanded) and isinstance(anchors, list)):
+        return "analysis is incomplete (the event counts are missing or malformed)"
+    if expanded > found or len(anchors) != expanded:
+        return "analysis is incomplete (the event counts contradict each other)"
+    if expanded < found:
+        return "analysis is incomplete (an event was not expanded)"
+    matched = summary.get("anchors_matched")
+    if not isinstance(matched, dict):
+        return "analysis is incomplete (the number of matching events is not reported)"
+    value, relation = matched.get("value"), matched.get("relation")
+    if relation == "unknown" or value is None:
+        return "analysis is incomplete (OpenSearch did not report how many events matched)"
+    if relation not in ("eq", "gte") or not _is_count(value):
+        return "analysis is incomplete (the number of matching events is malformed)"
+    if relation == "gte":
+        return "analysis is incomplete (the number of matching events is only a lower bound)"
+    if value > found:
+        return (f"analysis is incomplete ({value} events matched but only {found} were expanded; "
+                f"the anchor query returns at most its size / the anchor limit)")
+    if value < found:
+        return "analysis is incomplete (the number of matching events contradicts the events returned)"
+    return ""
+
+
+def _analysis_incomplete_reason(summary: dict, execution: dict, atype: str | None = None) -> str:
     """"" if the finished analysis is complete, else why it is not. Every check is independent: a
-    result is cacheable only if none of them fires."""
+    result is cacheable only if none of them fires. `atype` is the analysis the entry asked for."""
     if summary.get("completed") is not True:
         return "analysis did not complete"
     # explicit summary flags (absence, text_ratio_shortfall)
@@ -593,6 +630,11 @@ def _analysis_incomplete_reason(summary: dict, execution: dict) -> str:
     found, expanded = summary.get("anchors_found"), summary.get("anchors_expanded")
     if isinstance(found, int) and isinstance(expanded, int) and expanded < found:
         return "analysis is incomplete (an event was not expanded)"
+    # context_window: the anchor query's own total must prove that every matching event was expanded
+    if atype == "context_window" or summary.get("type") == "context_window":
+        why = _context_window_problem(summary)
+        if why:
+            return why
     # normalisation had to cut rows/buckets/series (also covers recurrence's `sum_other_doc_count`)
     if execution.get("truncated") is True:
         return "analysis result was truncated by the result limits"
@@ -623,10 +665,10 @@ def _part_problem(entry: Any) -> tuple[PartFacts | None, str]:
         summary = ex.get("analysis")
         if not isinstance(analysis, dict) or not isinstance(summary, dict):
             return None, "analysis did not complete"
-        why = _analysis_incomplete_reason(summary, ex)
+        atype = analysis.get("type") if isinstance(analysis.get("type"), str) else None
+        why = _analysis_incomplete_reason(summary, ex, atype)
         if why:
             return None, why
-        atype = analysis.get("type") if isinstance(analysis.get("type"), str) else None
     win = ex.get("resolved_time_range")
     if not isinstance(win, dict) or not isinstance(win.get("seconds"), (int, float)) \
             or not isinstance(win.get("from_expression"), str) or not isinstance(win.get("to_expression"), str):
