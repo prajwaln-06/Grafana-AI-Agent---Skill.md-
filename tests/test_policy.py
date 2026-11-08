@@ -294,3 +294,108 @@ class TestObserverEndpointEnforcement:
                 assert "policy denied" in res.json()["detail"].lower()
         finally:
             app.dependency_overrides.pop(require_principal, None)
+
+
+# ============================================================================
+# Integration Tests for Admin Scope & Folder Assignment
+# ============================================================================
+
+class TestAdminScopeManagement:
+    """Validate admin endpoints for listing folders and updating user roles with folder scopes."""
+
+    def test_list_grafana_folders(self):
+        admin = _make_principal("admin")
+        app.dependency_overrides[require_principal] = lambda: admin
+        try:
+            with TestClient(app) as client:
+                res = client.get("/api/v1/admin/folders")
+                assert res.status_code == 200
+                data = res.json()
+                assert "folders" in data
+                uids = [f["uid"] for f in data["folders"]]
+                assert "*" in uids
+        finally:
+            app.dependency_overrides.pop(require_principal, None)
+
+    def test_elevate_user_to_maintainer_with_folders(self):
+        import secrets
+        from app.storage.database import get_db_session
+        from app.storage.user_store import UserStore
+
+        admin = _make_principal("admin")
+        unique_id = secrets.token_hex(4)
+
+        with get_db_session() as session:
+            target = UserStore.create_pending_user(
+                session,
+                issuer="https://authentik.test",
+                subject=f"sub_target_{unique_id}",
+                email=f"target_{unique_id}@example.com",
+                username=f"target_{unique_id}",
+            )
+            target_id = target.user_id
+            session.commit()
+
+        app.dependency_overrides[require_principal] = lambda: admin
+        try:
+            with TestClient(app) as client:
+                res = client.put(
+                    f"/api/v1/admin/users/{target_id}/access",
+                    json={
+                        "role": "maintainer",
+                        "status": "active",
+                        "scopes": {
+                            "allowed_folder_uids": ["afvlix95l3wg0d", "prod-dashboards"],
+                            "allowed_dashboard_uids": ["fleet-overview"],
+                        },
+                    },
+                )
+                assert res.status_code == 200
+                data = res.json()
+                assert data["status"] == "ok"
+                assert data["user"]["role"] == "maintainer"
+                assert data["user"]["status"] == "active"
+                assert set(data["user"]["scopes"]["allowed_folder_uids"]) == {"afvlix95l3wg0d", "prod-dashboards"}
+                assert set(data["user"]["scopes"]["allowed_dashboard_uids"]) == {"fleet-overview"}
+        finally:
+            app.dependency_overrides.pop(require_principal, None)
+
+    def test_elevate_user_to_operator_with_folders(self):
+        import secrets
+        from app.storage.database import get_db_session
+        from app.storage.user_store import UserStore
+
+        admin = _make_principal("admin")
+        unique_id = secrets.token_hex(4)
+
+        with get_db_session() as session:
+            target = UserStore.create_pending_user(
+                session,
+                issuer="https://authentik.test",
+                subject=f"sub_op_{unique_id}",
+                email=f"op_{unique_id}@example.com",
+                username=f"op_{unique_id}",
+            )
+            target_id = target.user_id
+            session.commit()
+
+        app.dependency_overrides[require_principal] = lambda: admin
+        try:
+            with TestClient(app) as client:
+                res = client.put(
+                    f"/api/v1/admin/users/{target_id}/access",
+                    json={
+                        "role": "operator",
+                        "status": "active",
+                        "scopes": {
+                            "allowed_folder_uids": ["alerts-folder"],
+                        },
+                    },
+                )
+                assert res.status_code == 200
+                data = res.json()
+                assert data["status"] == "ok"
+                assert data["user"]["role"] == "operator"
+                assert set(data["user"]["scopes"]["allowed_folder_uids"]) == {"alerts-folder"}
+        finally:
+            app.dependency_overrides.pop(require_principal, None)

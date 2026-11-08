@@ -38,6 +38,12 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editRole, setEditRole] = useState<string>("observer");
   const [editStatus, setEditStatus] = useState<string>("active");
+  const [editFolders, setEditFolders] = useState<string>("");
+  const [editDashboards, setEditDashboards] = useState<string>("");
+  const [editEnvs, setEditEnvs] = useState<string>("");
+  const [availableFolders, setAvailableFolders] = useState<Array<{ uid: string; title: string }>>([
+    { uid: "*", title: "All Folders (*)" },
+  ]);
   const [saving, setSaving] = useState(false);
 
   function loadUsers() {
@@ -68,12 +74,55 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
     if (isOpen) {
       loadUsers();
       setEditingUserId(null);
+
+      fetch("/api/v1/admin/folders", {
+        headers: { Accept: "application/json" },
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data?.folders?.length) {
+            setAvailableFolders(data.folders);
+          }
+        })
+        .catch(() => {});
     }
   }, [isOpen]);
 
   async function handleSaveAccess(user: AdminUser) {
     setSaving(true);
     setError(null);
+
+    const foldersList = editFolders
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const dashboardsList = editDashboards
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const envsList = editEnvs
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const allowedFolders =
+      editRole === "admin"
+        ? (foldersList.length ? foldersList : ["*"])
+        : editRole === "observer"
+        ? []
+        : (foldersList.length ? foldersList : ["*"]);
+
+    const allowedDashboards =
+      editRole === "observer" ? [] : dashboardsList;
+
+    const allowedEnvironments =
+      editRole === "admin"
+        ? (envsList.length ? envsList : ["*"])
+        : editRole === "observer"
+        ? []
+        : (envsList.length ? envsList : ["staging", "production"]);
 
     try {
       const res = await fetch(`/api/v1/admin/users/${user.user_id}/access`, {
@@ -85,6 +134,12 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
         body: JSON.stringify({
           role: editRole,
           status: editStatus,
+          scopes: {
+            allowed_folder_uids: allowedFolders,
+            allowed_dashboard_uids: allowedDashboards,
+            denied_dashboard_uids: user.scopes?.denied_dashboard_uids || [],
+            allowed_environments: allowedEnvironments,
+          },
         }),
       });
 
@@ -104,8 +159,39 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
 
   function startEdit(u: AdminUser) {
     setEditingUserId(u.user_id);
-    setEditRole(u.role || "observer");
+    const role = u.role || "observer";
+    setEditRole(role);
     setEditStatus(u.status === "pending" ? "active" : u.status);
+    const initialFolders = u.scopes?.allowed_folder_uids?.length
+      ? u.scopes.allowed_folder_uids.join(", ")
+      : (role === "admin" ? "*" : (role === "maintainer" || role === "operator" ? "*" : ""));
+    setEditFolders(initialFolders);
+    setEditDashboards(
+      u.scopes?.allowed_dashboard_uids?.length
+        ? u.scopes.allowed_dashboard_uids.join(", ")
+        : (role === "admin" ? "*" : "")
+    );
+    setEditEnvs(
+      u.scopes?.allowed_environments?.length
+        ? u.scopes.allowed_environments.join(", ")
+        : (role === "admin" ? "*" : "staging, production")
+    );
+  }
+
+  function handleRoleChange(newRole: string) {
+    setEditRole(newRole);
+    if (newRole === "maintainer" || newRole === "operator") {
+      if (!editFolders.trim()) {
+        setEditFolders("*");
+      }
+      if (!editEnvs.trim()) {
+        setEditEnvs("staging, production");
+      }
+    } else if (newRole === "admin") {
+      if (!editFolders.trim()) setEditFolders("*");
+      if (!editDashboards.trim()) setEditDashboards("*");
+      if (!editEnvs.trim()) setEditEnvs("*");
+    }
   }
 
   if (!isOpen) return null;
@@ -153,6 +239,10 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
                   {users.map((u) => {
                     const isEditing = editingUserId === u.user_id;
 
+                    const isElevatedRole = editRole === "maintainer" || editRole === "operator";
+                    const isAdminRole = editRole === "admin";
+                    const isFolderActive = isElevatedRole || isAdminRole;
+
                     const statusBadgeClass =
                       u.status === "active"
                         ? "badge-active"
@@ -190,7 +280,7 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
                           {isEditing ? (
                             <select
                               value={editRole}
-                              onChange={(e) => setEditRole(e.target.value)}
+                              onChange={(e) => handleRoleChange(e.target.value)}
                               className="admin-select"
                               disabled={saving}
                             >
@@ -224,39 +314,166 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
                           )}
                         </td>
                         <td>
-                          <div className="admin-scopes-cell">
-                            {u.scopes.allowed_folder_uids?.length > 0 && (
+                          {isEditing ? (
+                            <div className={`admin-scope-edit-box ${isFolderActive ? "active" : "inactive"}`}>
+                              <div className="admin-scope-edit-header">
+                                <span className="admin-scope-edit-title">Resource Scopes:</span>
+                                {isElevatedRole && (
+                                  <span className="admin-scope-pill-active">
+                                    ● Active ({editRole})
+                                  </span>
+                                )}
+                                {isAdminRole && (
+                                  <span className="admin-scope-pill-admin">
+                                    ★ Admin
+                                  </span>
+                                )}
+                                {!isFolderActive && (
+                                  <span className="admin-scope-pill-disabled">
+                                    🔒 Inactive (Observer)
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="admin-scope-field-group">
+                                <label className="admin-scope-edit-label">
+                                  Folders:
+                                </label>
+                                <input
+                                  type="text"
+                                  className={`admin-scope-input ${isFolderActive ? "input-active" : "input-disabled"}`}
+                                  placeholder={isFolderActive ? "e.g. *, fld-payments (comma-separated)" : "Elevate role to activate"}
+                                  value={editFolders}
+                                  onChange={(e) => setEditFolders(e.target.value)}
+                                  disabled={!isFolderActive || saving}
+                                />
+                                {isFolderActive && (
+                                  <div className="admin-folder-quick-chips">
+                                    <span className="muted x-small">Quick add:</span>
+                                    {availableFolders.map((f) => (
+                                      <button
+                                        key={f.uid}
+                                        type="button"
+                                        className="admin-folder-chip"
+                                        disabled={saving}
+                                        onClick={() => {
+                                          const current = editFolders
+                                            .split(",")
+                                            .map((s) => s.trim())
+                                            .filter(Boolean);
+                                          if (!current.includes(f.uid)) {
+                                            setEditFolders(current.length ? `${editFolders}, ${f.uid}` : f.uid);
+                                          }
+                                        }}
+                                        title={`Add folder ${f.title}`}
+                                      >
+                                        + {f.title}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="admin-scope-field-group">
+                                <label className="admin-scope-edit-label">
+                                  Dashboards:
+                                </label>
+                                <input
+                                  type="text"
+                                  className={`admin-scope-input ${isFolderActive ? "input-active" : "input-disabled"}`}
+                                  placeholder={isFolderActive ? "e.g. dash-checkout-slo, * (optional)" : "Elevate role to activate"}
+                                  value={editDashboards}
+                                  onChange={(e) => setEditDashboards(e.target.value)}
+                                  disabled={!isFolderActive || saving}
+                                />
+                              </div>
+
+                              <div className="admin-scope-field-group">
+                                <label className="admin-scope-edit-label">
+                                  Envs:
+                                </label>
+                                <input
+                                  type="text"
+                                  className={`admin-scope-input ${isFolderActive ? "input-active" : "input-disabled"}`}
+                                  placeholder={isFolderActive ? "e.g. staging, production, *" : "Elevate role to activate"}
+                                  value={editEnvs}
+                                  onChange={(e) => setEditEnvs(e.target.value)}
+                                  disabled={!isFolderActive || saving}
+                                />
+                                {isFolderActive && (
+                                  <div className="admin-folder-quick-chips">
+                                    <span className="muted x-small">Quick add:</span>
+                                    {["staging", "production", "*"].map((env) => (
+                                      <button
+                                        key={env}
+                                        type="button"
+                                        className="admin-folder-chip"
+                                        disabled={saving}
+                                        onClick={() => {
+                                          const current = editEnvs
+                                            .split(",")
+                                            .map((s) => s.trim())
+                                            .filter(Boolean);
+                                          if (!current.includes(env)) {
+                                            setEditEnvs(current.length ? `${editEnvs}, ${env}` : env);
+                                          }
+                                        }}
+                                      >
+                                        + {env}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              {!isFolderActive && (
+                                <div className="muted x-small" style={{ marginTop: "4px" }}>
+                                  Observers have read-only catalog access. Elevate to Maintainer or Operator to activate resource scopes.
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="admin-scopes-cell">
                               <div className="admin-scope-item">
                                 <span className="admin-scope-label">Folders:</span>{" "}
-                                <code>{u.scopes.allowed_folder_uids.join(", ")}</code>
+                                <code>
+                                  {u.scopes?.allowed_folder_uids?.length
+                                    ? u.scopes.allowed_folder_uids.join(", ")
+                                    : u.role === "admin"
+                                    ? "*"
+                                    : "—"}
+                                </code>
                               </div>
-                            )}
-                            {u.scopes.allowed_dashboard_uids?.length > 0 && (
                               <div className="admin-scope-item">
                                 <span className="admin-scope-label">Dashboards:</span>{" "}
-                                <code>{u.scopes.allowed_dashboard_uids.join(", ")}</code>
+                                <code>
+                                  {u.scopes?.allowed_dashboard_uids?.length
+                                    ? u.scopes.allowed_dashboard_uids.join(", ")
+                                    : u.role === "admin"
+                                    ? "*"
+                                    : "—"}
+                                </code>
                               </div>
-                            )}
-                            {u.scopes.denied_dashboard_uids?.length > 0 && (
-                              <div className="admin-scope-item">
-                                <span className="admin-scope-label" style={{ color: "var(--red)" }}>
-                                  Denied:
-                                </span>{" "}
-                                <code>{u.scopes.denied_dashboard_uids.join(", ")}</code>
-                              </div>
-                            )}
-                            {u.scopes.allowed_environments?.length > 0 && (
                               <div className="admin-scope-item">
                                 <span className="admin-scope-label">Envs:</span>{" "}
-                                <code>{u.scopes.allowed_environments.join(", ")}</code>
+                                <code>
+                                  {u.scopes?.allowed_environments?.length
+                                    ? u.scopes.allowed_environments.join(", ")
+                                    : u.role === "admin"
+                                    ? "*"
+                                    : "—"}
+                                </code>
                               </div>
-                            )}
-                            {!u.scopes.allowed_folder_uids?.length &&
-                              !u.scopes.allowed_dashboard_uids?.length &&
-                              !u.scopes.allowed_environments?.length && (
-                                <span className="muted small">None</span>
+                              {u.scopes?.denied_dashboard_uids?.length > 0 && (
+                                <div className="admin-scope-item">
+                                  <span className="admin-scope-label" style={{ color: "var(--red)" }}>
+                                    Denied:
+                                  </span>{" "}
+                                  <code>{u.scopes.denied_dashboard_uids.join(", ")}</code>
+                                </div>
                               )}
-                          </div>
+                            </div>
+                          )}
                         </td>
                         <td>
                           {isEditing ? (

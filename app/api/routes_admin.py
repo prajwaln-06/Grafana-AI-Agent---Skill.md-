@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
-from app.auth.dependencies import current_principal
+from app.auth.dependencies import current_principal, require_principal
+from app.auth.principal import Principal
 from app.catalog.runtime import reload_structured_catalog
 from app.config import get_settings
 from app.skill_index import SkillIndex, SkillIndexError
@@ -111,14 +112,48 @@ async def list_users() -> dict[str, Any]:
         }
 
 
+@router.get("/api/v1/admin/folders")
+async def list_grafana_folders(request: Request) -> dict[str, Any]:
+    """Return available Grafana folders for scope assignment."""
+    import json
+    from app.mcp.session import mcp_call
+    settings = get_settings()
+    results = [
+        {"uid": "*", "title": "All Folders (*)"},
+    ]
+    if settings.grafana_default_folder_uid:
+        results.append({
+            "uid": settings.grafana_default_folder_uid,
+            "title": f"Default ({settings.grafana_default_folder_uid})",
+        })
+
+    try:
+        raw = await mcp_call(
+            "grafana_api_request",
+            {"method": "GET", "endpoint": "/api/folders"},
+            raw=True,
+            timeout=5.0,
+        )
+        folders = json.loads(raw) if raw else []
+        if isinstance(folders, list):
+            for f in folders:
+                if isinstance(f, dict) and f.get("uid") and f.get("uid") != "*":
+                    if not any(r["uid"] == f["uid"] for r in results):
+                        results.append({"uid": f["uid"], "title": f.get("title", f["uid"])})
+    except Exception as exc:
+        logger.debug("Could not query Grafana folders: %s", exc)
+
+    return {"folders": results}
+
+
 @router.put("/api/v1/admin/users/{user_id}/access")
 async def update_user_access(
     user_id: str,
     update: UserAccessUpdateRequest,
     request: Request,
+    principal: Principal = Depends(require_principal),
 ) -> dict[str, Any]:
     """Update user role, status, and scopes with strict administrative guardrails (Section 5.3 & 5.4)."""
-    principal = current_principal(request)
     if not principal or principal.role != "admin":
         raise HTTPException(status_code=403, detail="Administrator role required.")
 
