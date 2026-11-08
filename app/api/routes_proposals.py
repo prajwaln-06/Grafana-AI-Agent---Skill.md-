@@ -3,10 +3,19 @@ import logging
 import os
 import secrets
 from typing import Any, Dict, Optional
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.adk_agent import run_adk_agent
+from app.auth.dependencies import require_principal
+from app.auth.policy import (
+    authorize_alert_approve,
+    authorize_alert_execute,
+    authorize_dashboard_approve,
+    authorize_dashboard_execute,
+    authorize_dashboard_propose,
+)
+from app.auth.principal import Principal
 from app.grafana_tools.dashboard_writing import (
     PROPOSALS,
     build_proposal,
@@ -107,10 +116,22 @@ async def get_conversation(conversation_id: str):
 
 
 @router.post("/api/conversations/{conversation_id}/messages")
-async def post_conversation_message(conversation_id: str, req: MessageRequest):
+async def post_conversation_message(
+    conversation_id: str,
+    req: MessageRequest,
+    principal: Principal = Depends(require_principal),
+):
     request_text = req.request.strip()
     if not request_text:
         raise HTTPException(status_code=400, detail="Message is required.")
+
+    # Observers are strictly read-only and cannot mutate dashboards or alerts
+    if principal.role == "observer":
+        if any(w in request_text.lower() for w in ["create", "add", "make", "build", "update", "modify", "delete", "remove"]):
+            raise HTTPException(
+                status_code=403,
+                detail="RBAC policy denied: Role 'observer' cannot propose or modify dashboards/panels.",
+            )
 
     _append_message(
         conversation_id,
@@ -146,7 +167,14 @@ async def post_conversation_message(conversation_id: str, req: MessageRequest):
 
 
 @router.post("/api/proposals")
-async def create_proposal_direct(req: CreateProposalRequest):
+async def create_proposal_direct(
+    req: CreateProposalRequest,
+    principal: Principal = Depends(require_principal),
+):
+    dec = authorize_dashboard_propose(principal, operation="create")
+    if not dec.allowed:
+        raise HTTPException(status_code=403, detail=f"RBAC policy denied: {dec.reason}")
+
     cid = secrets.token_urlsafe(18)
     turn = run_adk_agent(
         request=req.request,
@@ -158,7 +186,17 @@ async def create_proposal_direct(req: CreateProposalRequest):
 
 
 @router.post("/api/adk/chat")
-async def adk_chat_endpoint(req: AdkChatRequest):
+async def adk_chat_endpoint(
+    req: AdkChatRequest,
+    principal: Principal = Depends(require_principal),
+):
+    if principal.role == "observer":
+        if any(w in req.message.lower() for w in ["create", "add", "make", "build", "update", "modify", "delete", "remove"]):
+            raise HTTPException(
+                status_code=403,
+                detail="RBAC policy denied: Role 'observer' cannot propose or modify dashboards/panels.",
+            )
+
     cid = req.conversationId or req.sessionId or f"sess_{secrets.token_hex(8)}"
     result = run_adk_agent(
         request=req.message,
@@ -180,7 +218,11 @@ async def get_proposal(proposal_id: str):
 
 
 @router.post("/api/proposals/{proposal_id}/preview")
-async def preview_proposal(proposal_id: str, req: PreviewRequest):
+async def preview_proposal(
+    proposal_id: str,
+    req: PreviewRequest,
+    principal: Principal = Depends(require_principal),
+):
     try:
         fresh_ir = refresh_preview(req.ir, req.panelIds)
         return {"status": "success", "ir": fresh_ir}
@@ -190,9 +232,16 @@ async def preview_proposal(proposal_id: str, req: PreviewRequest):
 
 
 @router.post("/api/proposals/{proposal_id}/approve")
-async def approve_proposal(proposal_id: str, req: ActionRequest):
+async def approve_proposal(
+    proposal_id: str,
+    req: ActionRequest,
+    principal: Principal = Depends(require_principal),
+):
     try:
         prop = PROPOSALS.get(proposal_id)
+        dec = authorize_dashboard_approve(principal, proposal=prop)
+        if not dec.allowed:
+            raise HTTPException(status_code=403, detail=f"RBAC policy denied: {dec.reason}")
         version = req.version if req.version is not None else prop["version"]
         approved_item = PROPOSALS.approve(proposal_id, version)
         token = approved_item.get("approvalToken") if isinstance(approved_item, dict) else approved_item
@@ -204,7 +253,13 @@ async def approve_proposal(proposal_id: str, req: ActionRequest):
 
 
 @router.post("/api/proposals/{proposal_id}/reject")
-async def reject_proposal(proposal_id: str, req: ActionRequest):
+async def reject_proposal(
+    proposal_id: str,
+    req: ActionRequest,
+    principal: Principal = Depends(require_principal),
+):
+    if principal.role == "observer":
+        raise HTTPException(status_code=403, detail="RBAC policy denied: Role 'observer' cannot manage proposals.")
     try:
         prop = PROPOSALS.get(proposal_id)
         version = req.version if req.version is not None else prop["version"]
@@ -217,11 +272,19 @@ async def reject_proposal(proposal_id: str, req: ActionRequest):
 
 
 @router.post("/api/proposals/{proposal_id}/execute")
-async def execute_proposal(proposal_id: str, req: ActionRequest):
+async def execute_proposal(
+    proposal_id: str,
+    req: ActionRequest,
+    principal: Principal = Depends(require_principal),
+):
     if not req.approvalToken:
         raise HTTPException(status_code=400, detail="Missing approval token")
     try:
         prop = PROPOSALS.get(proposal_id)
+        dec = authorize_dashboard_execute(principal, proposal=prop)
+        if not dec.allowed:
+            raise HTTPException(status_code=403, detail=f"RBAC policy denied: {dec.reason}")
+
         version = req.version if req.version is not None else prop["version"]
         result = await execute_approved_mutation(proposal_id, version, req.approvalToken)
         dashboard_url = _grafana_url(result)
@@ -240,6 +303,8 @@ async def execute_proposal(proposal_id: str, req: ActionRequest):
             result["message"] = exec_msg
 
         return {"status": "success", **result}
+    except HTTPException:
+        raise
     except KeyError:
         raise HTTPException(status_code=404, detail="Proposal not found in server memory (server restarted). Please ask to generate a new dashboard proposal.")
     except PermissionError as e:
@@ -252,7 +317,14 @@ async def execute_proposal(proposal_id: str, req: ActionRequest):
 
 
 @router.put("/api/proposals/{proposal_id}")
-async def modify_proposal(proposal_id: str, req: ModifyRequest):
+async def modify_proposal(
+    proposal_id: str,
+    req: ModifyRequest,
+    principal: Principal = Depends(require_principal),
+):
+    dec = authorize_dashboard_propose(principal, operation="update")
+    if not dec.allowed:
+        raise HTTPException(status_code=403, detail=f"RBAC policy denied: {dec.reason}")
     try:
         updated = PROPOSALS.modify(proposal_id, req.ir)
         return updated
@@ -285,7 +357,14 @@ async def get_alert_proposal(proposal_id: str):
 
 
 @router.post("/api/alert-proposals/{proposal_id}/approve")
-async def approve_alert_proposal(proposal_id: str, req: ActionRequest):
+async def approve_alert_proposal(
+    proposal_id: str,
+    req: ActionRequest,
+    principal: Principal = Depends(require_principal),
+):
+    dec = authorize_alert_approve(principal)
+    if not dec.allowed:
+        raise HTTPException(status_code=403, detail=f"RBAC policy denied: {dec.reason}")
     try:
         prop = ALERT_PROPOSALS.get(proposal_id)
         version = req.version if req.version is not None else prop["version"]
@@ -298,7 +377,13 @@ async def approve_alert_proposal(proposal_id: str, req: ActionRequest):
 
 
 @router.post("/api/alert-proposals/{proposal_id}/reject")
-async def reject_alert_proposal(proposal_id: str, req: ActionRequest):
+async def reject_alert_proposal(
+    proposal_id: str,
+    req: ActionRequest,
+    principal: Principal = Depends(require_principal),
+):
+    if principal.role == "observer":
+        raise HTTPException(status_code=403, detail="RBAC policy denied: Role 'observer' cannot manage alert proposals.")
     try:
         prop = ALERT_PROPOSALS.get(proposal_id)
         version = req.version if req.version is not None else prop["version"]
@@ -311,14 +396,23 @@ async def reject_alert_proposal(proposal_id: str, req: ActionRequest):
 
 
 @router.post("/api/alert-proposals/{proposal_id}/execute")
-async def execute_alert_proposal(proposal_id: str, req: ActionRequest):
+async def execute_alert_proposal(
+    proposal_id: str,
+    req: ActionRequest,
+    principal: Principal = Depends(require_principal),
+):
     if not req.approvalToken:
         raise HTTPException(status_code=400, detail="Missing approval token")
+    dec = authorize_alert_execute(principal)
+    if not dec.allowed:
+        raise HTTPException(status_code=403, detail=f"RBAC policy denied: {dec.reason}")
     try:
         prop = ALERT_PROPOSALS.get(proposal_id)
         version = req.version if req.version is not None else prop["version"]
         result = await execute_approved_alert(proposal_id, version, req.approvalToken)
         return {"status": "success", **result}
+    except HTTPException:
+        raise
     except KeyError:
         raise HTTPException(status_code=404, detail="Alert proposal not found")
     except PermissionError as e:

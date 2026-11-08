@@ -236,6 +236,14 @@ async def _query_prometheus_metric_async(
     lookback: str = "1h",
     step_seconds: int = 60,
 ) -> str:
+    from app.auth.principal import get_current_principal
+    principal = get_current_principal()
+    if principal:
+        from app.auth.policy import authorize_promql
+        dec = authorize_promql(principal, is_custom=bool(expr), expr=expr or metric)
+        if not dec.allowed:
+            return f"Error: RBAC Access Denied - {dec.reason}"
+
     logger.info(f"Wrapper: query_prometheus_metric metric='{metric}' expr='{expr}'")
     start = time.perf_counter()
 

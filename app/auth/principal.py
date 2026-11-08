@@ -10,8 +10,23 @@ scope lists.
 """
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+
+CURRENT_PRINCIPAL: contextvars.ContextVar[Principal | None] = contextvars.ContextVar(
+    "current_principal", default=None
+)
+
+
+def get_current_principal() -> Principal | None:
+    """Return the principal bound to the current context/request, if any."""
+    return CURRENT_PRINCIPAL.get()
+
+
+def set_current_principal(principal: Principal | None) -> contextvars.Token:
+    """Bind a principal to the current context/request."""
+    return CURRENT_PRINCIPAL.set(principal)
 
 
 @dataclass(frozen=True)
@@ -179,4 +194,9 @@ class Principal:
         }
 
 
-__all__ = ["Principal"]
+__all__ = [
+    "CURRENT_PRINCIPAL",
+    "Principal",
+    "get_current_principal",
+    "set_current_principal",
+]

@@ -8,10 +8,13 @@ import logging
 import os
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import executor
 from app.api.schemas import QueryRequest, QueryResponse
+from app.auth.dependencies import require_principal
+from app.auth.policy import authorize_promql
+from app.auth.principal import Principal
 from app.config import get_settings
 from app.pipeline import (
     PipelineContext,
@@ -29,7 +32,17 @@ CLARIFICATION_REASONS = {"parameter_requires_clarification"}
 
 
 @router.post("/api/v1/query", response_model=QueryResponse)
-async def query(request: Request, body: QueryRequest) -> QueryResponse:
+async def query(
+    request: Request,
+    body: QueryRequest,
+    principal: Principal = Depends(require_principal),
+) -> QueryResponse:
+    prom_dec = authorize_promql(principal, is_custom=True, expr=body.question)
+    if not prom_dec.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"RBAC policy denied: {prom_dec.reason}",
+        )
     settings = get_settings()
     skill_index = request.app.state.skill_index
     store = get_session_store(settings.session_ttl_seconds)
@@ -231,7 +244,19 @@ async def get_labels(
 
 
 @router.post("/api/query")
-async def run_catalog_query(request: Request, body: dict) -> dict:
+async def run_catalog_query(
+    request: Request,
+    body: dict,
+    principal: Principal = Depends(require_principal),
+) -> dict:
+    source_id = body.get("sourceId", "prometheus")
+    if source_id == "prometheus":
+        prom_dec = authorize_promql(principal, is_custom=False, expr=body.get("queryId", ""))
+        if not prom_dec.allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"RBAC policy denied: {prom_dec.reason}",
+            )
     settings = get_settings()
     source_id = body.get("sourceId", "prometheus")
     metric_id = body.get("metricId", "")

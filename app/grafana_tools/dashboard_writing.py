@@ -1182,6 +1182,14 @@ PROPOSALS = ProposalStore()
 
 async def execute_approved_mutation(proposal_id: str, version: int, approval_token: str) -> dict:
     item = PROPOSALS.verified(proposal_id, version, approval_token)
+    from app.auth.principal import get_current_principal
+    principal = get_current_principal()
+    if principal:
+        from app.auth.policy import authorize_dashboard_execute
+        dec = authorize_dashboard_execute(principal, proposal=item)
+        if not dec.allowed:
+            raise PermissionError(f"RBAC policy denied: {dec.reason}")
+
     if os.environ.get("GRAFANA_MCP_ENABLE_WRITE", "").lower() not in {"1", "true", "yes", "on"}:
         raise PermissionError("Grafana MCP writes are disabled. Set GRAFANA_MCP_ENABLE_WRITE=true for manual E2E testing.")
     payload = compile_dashboard(item["ir"])
@@ -1226,6 +1234,19 @@ def propose_dashboard(
     time_range: Literal["15m", "1h", "6h", "12h", "24h", "7d"] = "1h",
 ) -> dict:
     """ADK boundary: always return a non-empty, JSON-serializable terminal outcome."""
+    from app.auth.principal import get_current_principal
+    principal = get_current_principal()
+    if principal:
+        from app.auth.policy import authorize_dashboard_propose
+        dec = authorize_dashboard_propose(principal)
+        if not dec.allowed:
+            return {
+                "status": "policy_denied",
+                "question": f"Access Denied (RBAC): Your role '{principal.role}' is not allowed to create or modify dashboards/panels.",
+                "reason": dec.reason,
+                "errors": [{"message": dec.reason}],
+            }
+
     equivalent_durations = {
         "900": "15m",
         "3600": "1h",

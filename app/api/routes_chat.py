@@ -14,10 +14,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.adk_agent import run_adk_agent
+from app.auth.dependencies import require_principal
+from app.auth.policy import (
+    authorize_alert_propose,
+    authorize_dashboard_propose,
+    authorize_promql,
+)
+from app.auth.principal import Principal
 from app.config import get_settings
 from app.llm_provider import LLMProviderConfigError
 from app.pipeline import run_pipeline
@@ -116,7 +123,11 @@ class ChatResponse(BaseModel):
 # ============================================================================
 
 @router.post("/api/chat", response_model=ChatResponse)
-async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatResponse:
+async def unified_chat_endpoint(
+    req: ChatRequest,
+    request: Request,
+    principal: Principal = Depends(require_principal),
+) -> ChatResponse:
     text = req.message.strip()
     session = SESSION_STORE.get_or_create(req.sessionId or req.conversationId)
     settings = get_settings()
@@ -129,7 +140,7 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
         except Exception as err:
             logger.error("Could not load skill_index: %s", err)
 
-    logger.info("Unified Chat | session=%s | message=%r", session.session_id, text[:100])
+    logger.info("Unified Chat | session=%s | role=%s | message=%r", session.session_id, principal.role, text[:100])
 
     def respond(res: ChatResponse) -> ChatResponse:
         session.history.append({"role": "assistant", "text": res.answer})
@@ -155,6 +166,48 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
     # 1. Check for Pending Clarifications (Context Continuity)
     # ------------------------------------------------------------------------
     is_numeric_choice = bool(re.match(r"^#?(\d+)[\.\)]?$", text.strip()))
+
+    if session.pending_action in ("awaiting_dashboard_uid", "awaiting_metric_for_dashboard"):
+        dash_dec = authorize_dashboard_propose(principal, operation="create")
+        if not dash_dec.allowed:
+            session.pending_action = None
+            session.pending_payload = None
+            return respond(ChatResponse(
+                status="policy_denied",
+                sessionId=session.session_id,
+                intent="dashboard_proposal",
+                agents=["Policy Module"],
+                steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{dash_dec.reason}",
+            ))
+
+    if session.pending_action == "awaiting_metric_for_alert":
+        alert_dec = authorize_alert_propose(principal)
+        if not alert_dec.allowed:
+            session.pending_action = None
+            session.pending_payload = None
+            return respond(ChatResponse(
+                status="policy_denied",
+                sessionId=session.session_id,
+                intent="alert_rule",
+                agents=["Policy Module"],
+                steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{alert_dec.reason}",
+            ))
+
+    if session.pending_action == "awaiting_metric_for_query":
+        prom_dec = authorize_promql(principal, is_custom=True, expr=text)
+        if not prom_dec.allowed:
+            session.pending_action = None
+            session.pending_payload = None
+            return respond(ChatResponse(
+                status="policy_denied",
+                sessionId=session.session_id,
+                intent="prometheus",
+                agents=["Policy Module"],
+                steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{prom_dec.reason}",
+            ))
 
     if session.pending_action == "awaiting_dashboard_uid" and session.pending_payload:
         dash_req = session.pending_payload.get("dashboard_request", "")
@@ -312,6 +365,17 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
 
     # A) Alert Rule Creation / Management
     if is_alert_request:
+        alert_dec = authorize_alert_propose(principal)
+        if not alert_dec.allowed:
+            return respond(ChatResponse(
+                status="policy_denied",
+                sessionId=session.session_id,
+                intent="alert_rule",
+                agents=["Policy Module"],
+                steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{alert_dec.reason}",
+            ))
+
         if not settings.alert_rule_creation_enabled:
             return respond(ChatResponse(
                 status="out_of_scope_action",
@@ -380,6 +444,24 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
         # Check if this is a mutation (create, update, remove)
         mutation_intent = resolve_dashboard_intent(request=text)
         intent_kind = mutation_intent.get("intent", "UNSPECIFIED")
+        is_mutation = (
+            intent_kind in ("CREATE", "UPDATE", "REMOVE")
+            or bool(re.search(r"\b(add|create|make|build|insert|append|update|modify|edit|remove|delete|drop)\b", text, re.I))
+        )
+
+        if is_mutation:
+            op_map = {"CREATE": "create", "UPDATE": "update", "REMOVE": "delete"}
+            target_op = op_map.get(intent_kind, "create" if re.search(r"\b(add|create|make|build|insert|append)\b", text, re.I) else ("delete" if re.search(r"\b(remove|delete|drop)\b", text, re.I) else "update"))
+            dash_dec = authorize_dashboard_propose(principal, operation=target_op)
+            if not dash_dec.allowed:
+                return respond(ChatResponse(
+                    status="policy_denied",
+                    sessionId=session.session_id,
+                    intent="dashboard_proposal",
+                    agents=["Policy Module"],
+                    steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                    answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{dash_dec.reason}",
+                ))
 
         if intent_kind in ("CREATE", "UPDATE", "REMOVE"):
             prop_res = propose_dashboard(request=text, target=resolved_target, time_range=req.timeRange or "1h")
@@ -612,6 +694,17 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
 
     # C) Telemetry Metric Query (SKILL.md PromQL Engine)
     if skill_index:
+        prom_dec = authorize_promql(principal, is_custom=True, expr=text)
+        if not prom_dec.allowed:
+            return respond(ChatResponse(
+                status="policy_denied",
+                sessionId=session.session_id,
+                intent="prometheus",
+                agents=["Policy Module"],
+                steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{prom_dec.reason}",
+            ))
+
         try:
             from app import executor
             from app.pipeline import run_dependency_aware_pipeline, synthesize_executed_contract
@@ -725,6 +818,32 @@ async def unified_chat_endpoint(req: ChatRequest, request: Request) -> ChatRespo
             logger.warning("SKILL.md pipeline error: %s; falling back to ADK agent", e)
 
     # D) General Conversational Fallback
+    # If the user request relates to Prometheus metrics, PromQL, or dashboard mutations,
+    # enforce role restrictions before calling the fallback runner.
+    if principal.role == "observer":
+        if re.search(r"\b(cpu|memory|mem|disk|load|usage|metric|metrics|query|queries|promql|prometheus|rate|bytes)\b", text, re.I):
+            prom_dec = authorize_promql(principal, is_custom=True, expr=text)
+            if not prom_dec.allowed:
+                return respond(ChatResponse(
+                    status="policy_denied",
+                    sessionId=session.session_id,
+                    intent="prometheus",
+                    agents=["Policy Module"],
+                    steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                    answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{prom_dec.reason}",
+                ))
+        if re.search(r"\b(dashboard|panel|board)\b", text, re.I) and re.search(r"\b(create|add|make|build|insert|update|modify|delete|remove)\b", text, re.I):
+            dash_dec = authorize_dashboard_propose(principal, operation="create")
+            if not dash_dec.allowed:
+                return respond(ChatResponse(
+                    status="policy_denied",
+                    sessionId=session.session_id,
+                    intent="dashboard_proposal",
+                    agents=["Policy Module"],
+                    steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                    answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{dash_dec.reason}",
+                ))
+
     adk_out = run_adk_agent(request=text, conversation_id=session.session_id)
     return respond(ChatResponse(
         status="ok",
@@ -746,7 +865,17 @@ class ConfirmAlertRequest(BaseModel):
 
 
 @router.post("/api/v1/alerts/confirm")
-async def confirm_alert_endpoint(req: ConfirmAlertRequest) -> dict:
+async def confirm_alert_endpoint(
+    req: ConfirmAlertRequest,
+    principal: Principal = Depends(require_principal),
+) -> dict:
+    from app.auth.policy import authorize_alert_execute
+    alert_dec = authorize_alert_execute(principal)
+    if not alert_dec.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"RBAC policy denied: {alert_dec.reason}",
+        )
     from app.grafana_client import create_alert_rule
     settings = get_settings()
     session = SESSION_STORE.get_or_create(req.session_id)

@@ -29,7 +29,7 @@ from app.auth.oidc import (
     OidcProtocolError,
     OidcProviderConfig,
 )
-from app.auth.principal import Principal
+from app.auth.principal import Principal, set_current_principal
 from app.auth.session import SessionError, SignedSession
 from app.config import get_settings
 from app.storage.database import get_db_session
@@ -157,6 +157,7 @@ async def _resolve_principal_from_store(
     if not settings.authentik_enabled:
         principal = Principal.development_anonymous()
         setattr(request.state, PRINCIPAL_STATE_KEY, principal)
+        set_current_principal(principal)
         return principal
 
     problems = validate_oidc_settings(settings)
@@ -207,6 +208,7 @@ async def _resolve_principal_from_store(
         )
 
     setattr(request.state, PRINCIPAL_STATE_KEY, principal)
+    set_current_principal(principal)
 
     # Status check enforcement (Section 4.4 & Section 5.2)
     if not allow_inactive:

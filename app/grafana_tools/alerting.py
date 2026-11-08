@@ -592,6 +592,14 @@ def propose_alert_rule(request: str) -> dict:
     The proposal is stored in ALERT_PROPOSALS and must be explicitly approved before any
     Grafana write occurs. Returns a summary dict (not the raw IR) suitable for the LLM.
     """
+    from app.auth.principal import get_current_principal
+    principal = get_current_principal()
+    if principal:
+        from app.auth.policy import authorize_alert_propose
+        dec = authorize_alert_propose(principal)
+        if not dec.allowed:
+            return {"status": "policy_denied", "error": dec.reason, "proposalId": None}
+
     tool_started = time.perf_counter()
     try:
         proposal = run_sync(_propose_alert_rule_async(request))

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { DashboardProposal, PanelIR } from "../types";
+import { useAuth } from "./AuthGate";
 import {
   approveProposal,
   executeProposal,
@@ -27,6 +28,14 @@ const VIZ_OPTIONS = [
 const TIME_RANGES = ["15m", "1h", "6h", "12h", "24h", "7d"];
 
 export default function ProposalCard({ proposal: initialProposal }: Props) {
+  let isObserver = false;
+  try {
+    const auth = useAuth();
+    isObserver = auth.principal?.role === "observer";
+  } catch {
+    isObserver = false;
+  }
+
   const [proposal, setProposal] = useState<DashboardProposal>(initialProposal);
   const [ir, setIr] = useState<any>(
     initialProposal.ir || { name: "Observability Dashboard", panels: [] }
@@ -154,6 +163,10 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
 
   // Save modified IR back to server
   const handleSaveModifications = async () => {
+    if (isObserver) {
+      setError("Role 'observer' cannot modify proposals.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -175,6 +188,10 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
 
   // Approve proposal
   const handleApprove = async () => {
+    if (isObserver) {
+      setError("Role 'observer' cannot approve proposals.");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -195,6 +212,10 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
 
   // Reject proposal
   const handleReject = async () => {
+    if (isObserver) {
+      setError("Role 'observer' cannot manage proposals.");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -212,6 +233,10 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
 
   // Execute and apply to Grafana
   const handleExecute = async () => {
+    if (isObserver) {
+      setError("Role 'observer' cannot execute proposals.");
+      return;
+    }
     if (!proposal.approvalToken) {
       setError("Proposal must be approved first.");
       return;
@@ -360,6 +385,11 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
         )}
 
         {/* Feedback Messages */}
+        {isObserver && (
+          <div style={{ padding: "8px 12px", background: "rgba(234, 179, 8, 0.1)", border: "1px solid rgba(234, 179, 8, 0.3)", borderRadius: "6px", color: "#eab308", fontSize: "12px", marginBottom: "8px" }}>
+            🔒 <strong>Read-Only Access:</strong> Your role is <strong>Observer</strong>. Observers cannot approve or execute dashboard deletions.
+          </div>
+        )}
         {error && <div className="alert error">{error}</div>}
         {successMessage && (
           <div className="alert success">{successMessage}</div>
@@ -377,13 +407,15 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
               <button
                 type="button"
                 className="btn danger"
-                disabled={loading}
+                disabled={loading || isObserver}
+                title={isObserver ? "Observers cannot approve deletions" : undefined}
                 onClick={handleApprove}
                 style={{
                   background: "rgba(239, 68, 68, 0.15)",
                   color: "#ef4444",
                   borderColor: "rgba(239, 68, 68, 0.4)",
                   fontWeight: 600,
+                  opacity: isObserver ? 0.45 : 1,
                 }}
               >
                 {loading ? "Approving…" : "Approve Deletion"}
@@ -391,7 +423,8 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
               <button
                 type="button"
                 className="btn quiet"
-                disabled={loading}
+                disabled={loading || isObserver}
+                title={isObserver ? "Observers cannot cancel proposals" : undefined}
                 onClick={handleReject}
               >
                 Cancel
@@ -404,13 +437,15 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
               <button
                 type="button"
                 className="btn danger"
-                disabled={loading}
+                disabled={loading || isObserver}
+                title={isObserver ? "Observers cannot execute deletions" : undefined}
                 onClick={handleExecute}
                 style={{
                   background: "#ef4444",
                   color: "#ffffff",
                   borderColor: "#dc2626",
                   fontWeight: 700,
+                  opacity: isObserver ? 0.45 : 1,
                 }}
               >
                 {loading ? "Deleting from Grafana…" : "Confirm & Delete from Grafana"}
@@ -418,7 +453,8 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
               <button
                 type="button"
                 className="btn quiet"
-                disabled={loading}
+                disabled={loading || isObserver}
+                title={isObserver ? "Observers cannot cancel proposals" : undefined}
                 onClick={handleReject}
               >
                 Cancel
@@ -612,12 +648,19 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
         </div>
       )}
 
+      {isObserver && (
+        <div style={{ padding: "8px 12px", background: "rgba(234, 179, 8, 0.1)", border: "1px solid rgba(234, 179, 8, 0.3)", borderRadius: "6px", color: "#eab308", fontSize: "12px", marginBottom: "8px" }}>
+          🔒 <strong>Read-Only Access:</strong> Your role is <strong>Observer</strong>. Observers cannot approve, modify, or execute dashboard proposals.
+        </div>
+      )}
+
       {/* Action Buttons */}
       <div className="proposal-actions">
         <button
           type="button"
           className="btn"
-          disabled={saving || loading || proposal.status === "executed"}
+          disabled={saving || loading || isObserver || proposal.status === "executed"}
+          title={isObserver ? "Observers cannot modify proposals" : undefined}
           onClick={handleSaveModifications}
         >
           {saving ? "Saving…" : "Save modifications"}
@@ -626,13 +669,14 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
         <button
           type="button"
           className="btn"
-          disabled={loading || proposal.status !== "proposed"}
+          disabled={loading || isObserver || proposal.status !== "proposed"}
+          title={isObserver ? "Observers cannot approve proposals" : undefined}
           onClick={handleApprove}
           style={{
             background: "var(--green-soft)",
             color: "var(--green)",
             borderColor: "rgba(62, 207, 142, 0.35)",
-            opacity: proposal.status !== "proposed" ? 0.45 : 1,
+            opacity: (proposal.status !== "proposed" || isObserver) ? 0.45 : 1,
           }}
         >
           {loading ? "Approving…" : "Approve"}
@@ -641,10 +685,11 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
         <button
           type="button"
           className="btn primary"
-          disabled={loading || proposal.status !== "approved"}
+          disabled={loading || isObserver || proposal.status !== "approved"}
+          title={isObserver ? "Observers cannot execute proposals" : undefined}
           onClick={handleExecute}
           style={{
-            opacity: proposal.status !== "approved" ? 0.45 : 1,
+            opacity: (proposal.status !== "approved" || isObserver) ? 0.45 : 1,
           }}
         >
           {loading ? "Executing…" : "Execute / Apply"}
@@ -654,7 +699,8 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
           <button
             type="button"
             className="btn quiet"
-            disabled={loading}
+            disabled={loading || isObserver}
+            title={isObserver ? "Observers cannot reject proposals" : undefined}
             onClick={handleReject}
           >
             Reject
