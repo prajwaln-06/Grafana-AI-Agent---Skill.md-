@@ -7,7 +7,8 @@ review store (Settings.catalog_reviews_path, default app/catalog/reviews.json)
 
     python -m scripts.review_catalog list [--status pending|approved|rejected|all]
     python -m scripts.review_catalog approve NAME --category C --exporter E \\
-            --reference-path references/E/domain.md [--note TEXT] [--replace]
+            --reference-path references/E/domain.md [--type TYPE]
+            [--help-text TEXT] [--note TEXT] [--replace]
     python -m scripts.review_catalog reject NAME [--note TEXT] [--replace]
     python -m scripts.review_catalog clear NAME
 
@@ -16,10 +17,17 @@ Common options: --reviews PATH, --catalog PATH, --prometheus-url URL,
 
 Rules enforced here (the logic lives in app/catalog/reviews.py):
   - `approve` needs category, exporter and reference_path from YOU; none is
-    inferred from the metric name. The type and HELP come from what Prometheus
-    reports right now, and a metric Prometheus gave no usable type for cannot
-    be approved. The reference_path must be an existing domain reference of
-    the stated exporter (references/<exporter>/<file>.md).
+    inferred from the metric name. The reference_path must be an existing
+    domain reference of the stated exporter (references/<exporter>/<file>.md).
+  - Type and HELP default to what Prometheus reports right now. --type and
+    --help-text are optional human overrides that take precedence over the
+    Prometheus value, each one independently: supply either, both or neither.
+    --type must be counter, gauge, histogram or summary (a MetricType
+    value) and --help-text must be non-blank; an invalid or blank value is
+    refused, never replaced by the Prometheus value. (The flag is
+    --help-text because argparse reserves --help.) The effective values are
+    what is saved. A metric Prometheus gave no usable type for is still not
+    reviewable, so --type does not make such a metric approvable.
   - A metric already in the vendor catalog cannot be approved (it already is);
     it can be rejected, and a rejection can be lifted with `clear`.
   - Changing an existing decision needs --replace. Repeating an identical
@@ -140,6 +148,7 @@ def _approve(args, settings, inputs, emit) -> int:
         reference_path=args.reference_path, discovered=discovered,
         vendor_names=inputs.vendor_names, skills_root=args.skills_root or settings.skills_root,
         note=args.note, replace=args.replace,
+        type_override=args.type_override, help_override=args.help_override,
     )
     _persist(outcome, args.reviews_path)
     emit(f"Approve {name}: {outcome.action}.")
@@ -196,6 +205,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ap.add_argument("--category", required=True)
     p_ap.add_argument("--exporter", required=True)
     p_ap.add_argument("--reference-path", required=True)
+    p_ap.add_argument("--type", dest="type_override", default=None, metavar="TYPE",
+                      help="Optional: metric type that overrides the Prometheus-reported one.")
+    p_ap.add_argument("--help-text", dest="help_override", default=None, metavar="TEXT",
+                      help="Optional: HELP text that overrides the Prometheus-reported one.")
     p_ap.add_argument("--note", default="")
     p_ap.add_argument("--replace", action="store_true", help="Overwrite an existing, different decision.")
     p_ap.set_defaults(handler=_approve)

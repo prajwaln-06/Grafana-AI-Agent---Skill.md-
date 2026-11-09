@@ -15,6 +15,7 @@ import requests
 
 from app.catalog import reconciler as rc
 from app.catalog import reviews as rv
+from app.catalog import runtime as rt
 from app.catalog.schema import Catalog, CatalogEntry, Priority
 from app.config import Settings
 from scripts import review_catalog as cli
@@ -225,3 +226,86 @@ def test_a_failed_write_is_reported_and_leaves_the_store_intact(env):
         code, text = _cli(env, ["reject", "node_load1"])
     assert code == cli.EXIT_REFUSED and "read-only filesystem" in text
     assert (env[0] / "reviews.json").read_bytes() == before
+
+
+# ---- human type / HELP overrides ---------------------------------------------
+
+PROM_META = {"acme_new": [{"type": "gauge", "help": "Current queue depth."}]}
+HUMAN_HELP = "Total jobs processed since startup."
+
+
+def _ov_cli(env, extra, name="acme_new"):
+    return _cli(env, _approve_args(name) + extra, session=_session(names=("node_load1", name), metadata=PROM_META))
+
+
+def _saved(env):
+    rec = _reviews(env)["decisions"][0]
+    return rec["type"], rec["help"], rec.get("help_source")
+
+
+def _entry(env, name="acme_new"):
+    _, settings = env
+    inputs = rt.load_inputs(settings.catalog_path, settings.catalog_reviews_path)
+    return inputs.universe.get(name)
+
+
+@pytest.mark.parametrize("extra,expected", [
+    ([], ("gauge", "Current queue depth.", None)),
+    (["--type", "counter", "--help-text", HUMAN_HELP], ("counter", HUMAN_HELP, "human")),
+    (["--type", "counter"], ("counter", "Current queue depth.", None)),
+    (["--help-text", "Human-provided HELP text."], ("gauge", "Human-provided HELP text.", "human")),
+])
+def test_cli_overrides_are_independent_and_survive_catalog_reconstruction(env, extra, expected):
+    code, text = _ov_cli(env, extra)
+    assert code == cli.EXIT_OK and "added" in text
+    assert _saved(env) == expected
+    entry = _entry(env)
+    assert (entry.type, entry.help) == expected[:2]
+
+
+def test_cli_override_survives_a_real_runtime_refresh_with_different_prometheus_metadata(env):
+    _, settings = env
+    _ov_cli(env, ["--type", "counter", "--help-text", HUMAN_HELP])
+    runtime = rt.CatalogRuntime(settings)
+    drifted = {"acme_new": [{"type": "gauge", "help": "Prometheus now says something else."}]}
+    with patch.object(rc, "_get_session", return_value=_session(names=("node_load1", "acme_new"), metadata=drifted)):
+        outcome = runtime.refresh()
+    assert outcome.status == rt.PUBLISHED
+    entry = runtime.catalog().get("acme_new")
+    assert (entry.status, entry.type, entry.help) == ("approved", "counter", HUMAN_HELP)
+
+
+def test_cli_without_overrides_is_unchanged_from_before(env):
+    code, _ = _cli(env, _approve_args())
+    assert code == cli.EXIT_OK
+    assert _saved(env) == ("gauge", "A new gauge", None)
+    assert "help_source" not in _reviews(env)["decisions"][0]
+
+
+def test_cli_repeating_identical_overrides_changes_nothing_but_new_help_needs_replace(env):
+    extra = ["--help-text", HUMAN_HELP]
+    _ov_cli(env, extra)
+    first = (env[0] / "reviews.json").read_bytes()
+    code, text = _ov_cli(env, extra)
+    assert code == cli.EXIT_OK and "unchanged" in text
+    assert (env[0] / "reviews.json").read_bytes() == first
+    code, text = _ov_cli(env, ["--help-text", "Different curated text."])
+    assert code == cli.EXIT_REFUSED and "--replace" in text
+    assert (env[0] / "reviews.json").read_bytes() == first
+
+
+@pytest.mark.parametrize("extra,why", [
+    (["--type", "untyped"], "Type override"),
+    (["--type", ""], "Type override"),
+    (["--help-text", "   "], "HELP override"),
+])
+def test_cli_refuses_invalid_overrides_and_writes_nothing(env, extra, why):
+    code, text = _ov_cli(env, extra)
+    assert code == cli.EXIT_REFUSED and why in text
+    assert _reviews(env) is None
+
+
+def test_cli_type_override_does_not_make_an_untyped_metric_reviewable(env):
+    code, text = _cli(env, _approve_args("acme_untyped") + ["--type", "counter"])
+    assert code == cli.EXIT_REFUSED and "no usable single type" in text
+    assert _reviews(env) is None

@@ -15,6 +15,27 @@ Prometheus can supply (type, HELP) is passed in by the caller; metadata only a
 human can supply (category, exporter, reference_path) is validated, never
 inferred from the metric name.
 
+---- Type / HELP precedence at approval time
+
+An approval may carry optional human overrides for type and HELP. Each field
+is resolved independently:
+
+    type  : human override if supplied, else the Prometheus-reported type
+    HELP  : human override if supplied, else the Prometheus-reported HELP
+
+A supplied type must be a MetricType value; a supplied HELP must be non-blank
+text. Both are rejected rather than silently replaced by the Prometheus value.
+The effective values are what is stored, so they survive reload, catalog
+rebuilds and runtime refreshes. When no type override is supplied, Prometheus
+must still have reported a valid type (it is never guessed).
+
+Provenance: a record whose HELP was supplied by a human carries
+`"help_source": "human"`. Its absence means "Prometheus-reported" -- which is
+also how every record written before this field existed is read, so old files
+load unchanged. The marker exists only so that same_decision_as() can tell a
+curated HELP (an explicit decision, compared) from a Prometheus HELP snapshot
+(informational, ignored). Type needs no marker: it is always compared.
+
 ---- File format (schema_version 1)
 
     {
@@ -22,7 +43,7 @@ inferred from the metric name.
       "decisions": [
         {"name": "acme_queue_depth", "decision": "approved",
          "decided_at": "2026-10-27T05:00:00Z",
-         "type": "gauge", "help": "...",
+         "type": "gauge", "help": "...", "help_source": "human",
          "category": "Queues", "exporter": "node-exporter",
          "reference_path": "references/node-exporter/cpu.md", "note": "..."},
         {"name": "go_goroutines", "decision": "rejected",
@@ -95,9 +116,11 @@ _VALID_TYPES = {t.value for t in MetricType}
 _METRIC_NAME_RE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _ALLOWED_KEYS = {
-    "name", "decision", "decided_at", "type", "help",
+    "name", "decision", "decided_at", "type", "help", "help_source",
     "category", "exporter", "reference_path", "note",
 }
+HELP_SOURCE_HUMAN = "human"
+_HELP_SOURCES = {HELP_SOURCE_HUMAN}
 _APPROVAL_ONLY_KEYS = ("category", "exporter", "reference_path")
 
 
@@ -130,6 +153,7 @@ class ReviewRecord:
     decided_at: str
     type: str | None = None
     help: str = ""
+    help_source: str | None = None  # "human" when HELP was supplied at approval; None = Prometheus
     category: str | None = None
     exporter: str | None = None
     reference_path: str | None = None
@@ -158,6 +182,21 @@ class ReviewRecord:
                 f"Review record {name!r}: type {self.type!r} must be one of "
                 f"{sorted(_VALID_TYPES)} (or omitted for a rejection)."
             )
+        if self.help_source is not None:
+            if self.help_source not in _HELP_SOURCES:
+                raise ReviewRecordError(
+                    f"Review record {name!r}: help_source {self.help_source!r} must be one of "
+                    f"{sorted(_HELP_SOURCES)} (or omitted)."
+                )
+            if self.decision != APPROVED:
+                raise ReviewRecordError(
+                    f"Review record {name!r}: only an approval can carry help_source."
+                )
+            if not isinstance(self.help, str) or not self.help.strip():
+                raise ReviewRecordError(
+                    f"Review record {name!r}: help_source {self.help_source!r} requires a "
+                    f"non-empty help."
+                )
         if self.decision == APPROVED:
             if self.type is None:
                 raise ReviewRecordError(
@@ -214,6 +253,7 @@ class ReviewRecord:
             decided_at=data["decided_at"],
             type=data.get("type"),
             help=data.get("help") or "",
+            help_source=data.get("help_source"),
             category=data.get("category"),
             exporter=data.get("exporter"),
             reference_path=data.get("reference_path"),
@@ -226,25 +266,31 @@ class ReviewRecord:
             "decision": self.decision,
             "decided_at": self.decided_at,
         }
-        for key in ("type", "help", "category", "exporter", "reference_path", "note"):
+        for key in ("type", "help", "help_source", "category", "exporter", "reference_path", "note"):
             value = getattr(self, key)
             if value:
                 out[key] = value
         return out
 
     def same_decision_as(self, other: "ReviewRecord") -> bool:
-        """Semantic equality for idempotence: ignores decided_at, note and
-        HELP (informational snapshots). Two rejections are the same decision;
-        two approvals are the same only if every field that affects query
-        integration matches."""
+        """Semantic equality for idempotence: ignores decided_at and note.
+        Two rejections are the same decision; two approvals are the same only
+        if every field that affects query integration matches. A Prometheus-
+        reported HELP is an informational snapshot and is ignored; a HELP a
+        human supplied is a curation decision, so the HELP source and (when
+        human-supplied) the text must match too."""
         if self.decision != other.decision:
             return False
         if self.decision == REJECTED:
             return True
-        return all(
+        if not all(
             getattr(self, k) == getattr(other, k)
-            for k in ("type", "category", "exporter", "reference_path")
-        )
+            for k in ("type", "category", "exporter", "reference_path", "help_source")
+        ):
+            return False
+        if self.help_source == HELP_SOURCE_HUMAN:
+            return self.help == other.help
+        return True
 
 
 @dataclass(frozen=True)
@@ -403,6 +449,25 @@ def validate_reference_path(skills_root: Path, exporter: str, reference_path: st
         )
 
 
+def _validated_type_override(name: str, value: object) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    if text not in _VALID_TYPES:
+        raise ReviewOperationError(
+            f"Type override {value!r} for {name!r} must be one of {sorted(_VALID_TYPES)}."
+        )
+    return text
+
+
+def _validated_help_override(name: str, value: object) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        raise ReviewOperationError(
+            f"HELP override for {name!r} must be non-blank text; omit it to keep the "
+            f"Prometheus-reported HELP."
+        )
+    return text
+
+
 def approve(
     store: ReviewStore,
     *,
@@ -416,25 +481,42 @@ def approve(
     note: str = "",
     replace: bool = False,
     now: str | None = None,
+    type_override: str | None = None,
+    help_override: str | None = None,
 ) -> ReviewOutcome:
     """Records an explicit approval. `discovered` supplies the Prometheus-
     reported type/HELP; category, exporter and reference_path are the human's
-    statement and are validated, never derived from `name`."""
+    statement and are validated, never derived from `name`.
+
+    `type_override` / `help_override` are optional human values that take
+    precedence over the Prometheus-reported ones, independently of each other
+    (None = not supplied). A supplied value is validated and refused if
+    invalid or blank; it never silently falls back to Prometheus."""
     if name in vendor_names:
         raise ReviewOperationError(
             f"{name!r} is defined by the vendor catalog, which is already approved; a review "
             f"approval would be a second definition. To exclude it use `reject`; to lift an "
             f"earlier rejection use `clear`."
         )
-    if discovered.type not in _VALID_TYPES:
+    if type_override is not None:
+        effective_type = _validated_type_override(name, type_override)
+    elif discovered.type in _VALID_TYPES:
+        effective_type = discovered.type
+    else:
         raise ReviewOperationError(
             f"Prometheus did not report a valid type for {name!r} (got {discovered.type!r}); "
             f"it will not be guessed, so it cannot be approved."
         )
+    if help_override is not None:
+        effective_help = _validated_help_override(name, help_override)
+        help_source = HELP_SOURCE_HUMAN
+    else:
+        effective_help = discovered.help or ""
+        help_source = None
     validate_reference_path(skills_root, exporter, reference_path)
     record = ReviewRecord(
-        name=name, decision=APPROVED, decided_at=now or _now(), type=discovered.type,
-        help=discovered.help or "", category=category, exporter=exporter,
+        name=name, decision=APPROVED, decided_at=now or _now(), type=effective_type,
+        help=effective_help, help_source=help_source, category=category, exporter=exporter,
         reference_path=reference_path, note=note,
     )
     return _store_record(store, record, replace=replace)

@@ -310,3 +310,200 @@ def test_rejection_is_not_applied_by_the_universe_builder_it_is_a_reconcile_inpu
     universe, _ = rv.build_approved_universe(_vendor("node_load1"), store)
     assert universe.get("node_load1").status == "approved"
     assert "node_load1" in store.rejections()
+
+
+# ---- human type / HELP overrides at approval -------------------------------
+
+PROM = RuntimeMetricInfo(type="gauge", help="Current queue depth.")
+HUMAN_HELP = "Total jobs processed since startup."
+
+
+def _eff(outcome):
+    rec = outcome.store.get("acme_queue_depth")
+    return rec.type, rec.help
+
+
+def test_no_overrides_retains_prometheus_type_and_help(skills):
+    out = _approve(rv.ReviewStore(), skills, discovered=PROM)
+    assert _eff(out) == ("gauge", "Current queue depth.")
+    assert out.record.help_source is None
+    assert "help_source" not in out.record.to_dict()
+
+
+def test_both_overrides_win_over_prometheus(skills):
+    out = _approve(rv.ReviewStore(), skills, discovered=PROM,
+                   type_override="counter", help_override=HUMAN_HELP)
+    assert _eff(out) == ("counter", HUMAN_HELP)
+    assert out.record.help_source == rv.HELP_SOURCE_HUMAN
+
+
+def test_type_only_override_keeps_prometheus_help(skills):
+    out = _approve(rv.ReviewStore(), skills, discovered=PROM, type_override="counter")
+    assert _eff(out) == ("counter", "Current queue depth.")
+    assert out.record.help_source is None
+
+
+def test_help_only_override_keeps_prometheus_type(skills):
+    out = _approve(rv.ReviewStore(), skills, discovered=PROM, help_override="Human-provided HELP text.")
+    assert _eff(out) == ("gauge", "Human-provided HELP text.")
+    assert out.record.help_source == rv.HELP_SOURCE_HUMAN
+
+
+def test_override_values_are_stripped(skills):
+    out = _approve(rv.ReviewStore(), skills, discovered=PROM, type_override=" counter ", help_override="  text \n")
+    assert _eff(out) == ("counter", "text")
+
+
+@pytest.mark.parametrize("bad", ["untyped", "Counter", "", "   ", "info"])
+def test_invalid_or_blank_type_override_is_rejected_not_replaced_by_prometheus(skills, bad):
+    with pytest.raises(rv.ReviewOperationError, match="Type override"):
+        _approve(rv.ReviewStore(), skills, discovered=PROM, type_override=bad)
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "\n\t"])
+def test_blank_help_override_is_rejected_not_replaced_by_prometheus(skills, bad):
+    with pytest.raises(rv.ReviewOperationError, match="HELP override"):
+        _approve(rv.ReviewStore(), skills, discovered=PROM, help_override=bad)
+
+
+@pytest.mark.parametrize("bad", [5, ["x"], b"x"])
+def test_non_string_overrides_are_rejected(skills, bad):
+    with pytest.raises(rv.ReviewOperationError):
+        _approve(rv.ReviewStore(), skills, discovered=PROM, type_override=bad)
+    with pytest.raises(rv.ReviewOperationError):
+        _approve(rv.ReviewStore(), skills, discovered=PROM, help_override=bad)
+
+
+@pytest.mark.parametrize("prom_type", [None, "untyped", ""])
+def test_invalid_prometheus_type_blocks_approval_without_a_valid_type_override(skills, prom_type):
+    disc = RuntimeMetricInfo(type=prom_type, help="x")
+    with pytest.raises(rv.ReviewOperationError, match="not be guessed"):
+        _approve(rv.ReviewStore(), skills, discovered=disc)
+    with pytest.raises(rv.ReviewOperationError, match="not be guessed"):
+        _approve(rv.ReviewStore(), skills, discovered=disc, help_override="human help")
+
+
+def test_overrides_do_not_relax_the_other_validations(skills):
+    with pytest.raises(rv.ReviewOperationError, match="does not exist"):
+        _approve(rv.ReviewStore(), skills, type_override="counter", help_override="h",
+                 reference_path="references/node-exporter/missing.md")
+    with pytest.raises(rv.ReviewOperationError, match="vendor catalog"):
+        _approve(rv.ReviewStore(), skills, type_override="counter",
+                 vendor_names=frozenset({"acme_queue_depth"}))
+    with pytest.raises(rv.ReviewRecordError, match="placeholder"):
+        _approve(rv.ReviewStore(), skills, type_override="counter", category="uncategorized")
+
+
+# ---- persistence of overrides ---------------------------------------------
+
+
+def test_overrides_survive_save_and_reload(tmp_path, skills):
+    store = _approve(rv.ReviewStore(), skills, discovered=PROM,
+                     type_override="counter", help_override=HUMAN_HELP).store
+    path = tmp_path / "reviews.json"
+    rv.save_reviews(store, path)
+    on_disk = json.loads(path.read_text())["decisions"][0]
+    assert (on_disk["type"], on_disk["help"], on_disk["help_source"]) == ("counter", HUMAN_HELP, "human")
+    loaded = rv.load_reviews(path)
+    assert loaded.get("acme_queue_depth") == store.get("acme_queue_depth")
+
+
+def test_prometheus_derived_record_writes_no_provenance_field(tmp_path, skills):
+    path = tmp_path / "reviews.json"
+    rv.save_reviews(_approve(rv.ReviewStore(), skills, discovered=PROM).store, path)
+    assert "help_source" not in json.loads(path.read_text())["decisions"][0]
+
+
+def test_legacy_review_file_without_provenance_still_loads_as_prometheus_help(tmp_path):
+    path = tmp_path / "reviews.json"
+    _write(path, [
+        _approved_dict(help="old help"),
+        {"name": "go_x", "decision": "rejected", "decided_at": T1, "type": "gauge", "help": "h"},
+    ])
+    store = rv.load_reviews(path)
+    rec = store.get("acme_queue_depth")
+    assert (rec.help, rec.help_source) == ("old help", None)
+    assert store.get("go_x").decision == rv.REJECTED
+
+
+@pytest.mark.parametrize("extra", [
+    {"help_source": "prometheus"},            # unknown value
+    {"help_source": "human", "help": ""},     # human provenance with no text
+    {"help_source": 1},                       # wrong type
+])
+def test_invalid_help_source_fails_the_whole_file(tmp_path, extra):
+    path = tmp_path / "reviews.json"
+    _write(path, [_approved_dict(**extra)])
+    with pytest.raises(rv.ReviewStoreError):
+        rv.load_reviews(path)
+
+
+def test_rejection_cannot_carry_help_source(tmp_path):
+    with pytest.raises(rv.ReviewRecordError, match="help_source"):
+        rv.ReviewRecord.from_dict(
+            {"name": "m", "decision": "rejected", "decided_at": T1, "help": "h", "help_source": "human"})
+
+
+def test_build_approved_universe_uses_the_saved_effective_values(skills):
+    store = _approve(rv.ReviewStore(), skills, discovered=PROM,
+                     type_override="counter", help_override=HUMAN_HELP).store
+    entry = rv.build_approved_universe(_vendor("node_load1"), store)[0].get("acme_queue_depth")
+    assert (entry.type, entry.help) == ("counter", HUMAN_HELP)
+
+
+def test_universe_from_a_reloaded_file_keeps_the_overrides(tmp_path, skills):
+    path = tmp_path / "reviews.json"
+    rv.save_reviews(_approve(rv.ReviewStore(), skills, discovered=PROM, help_override=HUMAN_HELP).store, path)
+    entry = rv.build_approved_universe(_vendor(), rv.load_reviews(path))[0].get("acme_queue_depth")
+    assert (entry.type, entry.help) == ("gauge", HUMAN_HELP)
+
+
+# ---- idempotence with overrides ---------------------------------------------
+
+
+def test_repeating_an_identical_human_override_is_unchanged(skills):
+    first = _approve(rv.ReviewStore(), skills, discovered=PROM, type_override="counter",
+                     help_override=HUMAN_HELP, now=T1)
+    again = _approve(first.store, skills, discovered=PROM, type_override="counter",
+                     help_override=HUMAN_HELP, now=T2, note="n")
+    assert again.action == "unchanged" and again.store is first.store
+    assert again.store.get("acme_queue_depth").decided_at == T1
+
+
+def test_identical_human_help_stays_unchanged_even_if_prometheus_help_later_changes(skills):
+    first = _approve(rv.ReviewStore(), skills, discovered=PROM, help_override=HUMAN_HELP)
+    again = _approve(first.store, skills, discovered=RuntimeMetricInfo("gauge", "Prometheus reworded it"),
+                     help_override=HUMAN_HELP)
+    assert again.action == "unchanged"
+
+
+def test_changing_a_human_curated_help_is_not_unchanged(skills):
+    first = _approve(rv.ReviewStore(), skills, discovered=PROM, help_override=HUMAN_HELP)
+    with pytest.raises(rv.ReviewOperationError, match="--replace"):
+        _approve(first.store, skills, discovered=PROM, help_override="A different curated help.")
+    out = _approve(first.store, skills, discovered=PROM, help_override="A different curated help.",
+                   replace=True, now=T2)
+    assert out.action == "replaced" and _eff(out) == ("gauge", "A different curated help.")
+
+
+def test_dropping_or_adding_a_help_override_is_a_change(skills):
+    curated = _approve(rv.ReviewStore(), skills, discovered=PROM, help_override=HUMAN_HELP)
+    with pytest.raises(rv.ReviewOperationError, match="--replace"):
+        _approve(curated.store, skills, discovered=PROM)  # would silently lose the curated text
+    plain = _approve(rv.ReviewStore(), skills, discovered=PROM)
+    with pytest.raises(rv.ReviewOperationError, match="--replace"):
+        _approve(plain.store, skills, discovered=PROM, help_override=HUMAN_HELP)
+
+
+def test_prometheus_derived_help_idempotence_is_unchanged(skills):
+    first = _approve(rv.ReviewStore(), skills, discovered=PROM, now=T1)
+    again = _approve(first.store, skills, discovered=RuntimeMetricInfo("gauge", "changed upstream"), now=T2)
+    assert again.action == "unchanged" and again.store is first.store
+
+
+def test_changing_type_still_requires_replace(skills):
+    first = _approve(rv.ReviewStore(), skills, discovered=PROM)
+    with pytest.raises(rv.ReviewOperationError, match="--replace"):
+        _approve(first.store, skills, discovered=PROM, type_override="counter")
+    out = _approve(first.store, skills, discovered=PROM, type_override="counter", replace=True, now=T2)
+    assert out.action == "replaced" and _eff(out) == ("counter", "Current queue depth.")
