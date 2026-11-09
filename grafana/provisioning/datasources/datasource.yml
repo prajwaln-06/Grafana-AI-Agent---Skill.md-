@@ -10,7 +10,7 @@ datasources:
     access: proxy
     orgId: 1
     uid: prometheus
-    url: http://prometheus:9090
+    url: http://host.docker.internal:9090
     isDefault: true
     version: 1
     editable: true

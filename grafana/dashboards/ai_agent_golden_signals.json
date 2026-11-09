@@ -603,7 +603,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "process_resident_memory_bytes{job=\"ai-agent-backend\"} / 1024 / 1024",
+          "expr": "process_resident_memory_bytes{job=~\"ai.*agent.*\"} / 1024 / 1024",
           "legendFormat": "RSS Memory (MB)",
           "refId": "A"
         }

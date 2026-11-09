@@ -113,7 +113,7 @@ def test_datasource_provisioning_config():
     prom = datasources[0]
     assert prom["type"] == "prometheus"
     assert prom["uid"] == "prometheus"
-    assert "http://prometheus:9090" in prom["url"]
+    assert "9090" in prom["url"] and ("prometheus" in prom["url"] or "host.docker.internal" in prom["url"])
     assert prom["isDefault"] is True
 
 
