@@ -383,6 +383,35 @@ def test_invalid_prometheus_type_blocks_approval_without_a_valid_type_override(s
         _approve(rv.ReviewStore(), skills, discovered=disc, help_override="human help")
 
 
+def test_valid_prometheus_type_with_a_type_override_uses_the_override(skills):
+    out = _approve(rv.ReviewStore(), skills, discovered=PROM, type_override="counter")
+    assert out.store.get("acme_queue_depth").type == "counter"
+
+
+@pytest.mark.parametrize("prom_type", [None, "untyped", ""])
+def test_type_override_cannot_make_a_metric_with_missing_or_invalid_prometheus_type_approvable(skills, prom_type):
+    disc = RuntimeMetricInfo(type=prom_type, help="x")
+    with pytest.raises(rv.ReviewOperationError, match="not be guessed"):
+        _approve(rv.ReviewStore(), skills, discovered=disc, type_override="counter")
+    with pytest.raises(rv.ReviewOperationError, match="not be guessed"):
+        _approve(rv.ReviewStore(), skills, discovered=disc, type_override="counter", help_override="h")
+
+
+def test_reviewrecord_positional_argument_order_is_backward_compatible():
+    rec = rv.ReviewRecord(
+        "acme_queue_depth", "approved", T1, "gauge", "the help", "Queues", "node-exporter",
+        "references/node-exporter/cpu.md", "a note",
+    )
+    assert (rec.type, rec.help, rec.category, rec.exporter, rec.reference_path, rec.note) == (
+        "gauge", "the help", "Queues", "node-exporter", "references/node-exporter/cpu.md", "a note")
+    assert rec.help_source is None
+
+
+def test_approval_without_a_valid_type_says_a_valid_metric_type_is_required():
+    with pytest.raises(rv.ReviewRecordError, match="requires a valid metric type"):
+        rv.ReviewRecord.from_dict(_approved_dict(type=None))
+
+
 def test_overrides_do_not_relax_the_other_validations(skills):
     with pytest.raises(rv.ReviewOperationError, match="does not exist"):
         _approve(rv.ReviewStore(), skills, type_override="counter", help_override="h",

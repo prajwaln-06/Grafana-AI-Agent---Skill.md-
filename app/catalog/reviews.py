@@ -26,8 +26,10 @@ is resolved independently:
 A supplied type must be a MetricType value; a supplied HELP must be non-blank
 text. Both are rejected rather than silently replaced by the Prometheus value.
 The effective values are what is stored, so they survive reload, catalog
-rebuilds and runtime refreshes. When no type override is supplied, Prometheus
-must still have reported a valid type (it is never guessed).
+rebuilds and runtime refreshes. Prometheus must always have reported a valid
+type for the metric, even when a type override is supplied: an override may
+correct a reported type but never makes a metric with a missing or invalid
+reported type approvable (it is never guessed).
 
 Provenance: a record whose HELP was supplied by a human carries
 `"help_source": "human"`. Its absence means "Prometheus-reported" -- which is
@@ -153,11 +155,12 @@ class ReviewRecord:
     decided_at: str
     type: str | None = None
     help: str = ""
-    help_source: str | None = None  # "human" when HELP was supplied at approval; None = Prometheus
     category: str | None = None
     exporter: str | None = None
     reference_path: str | None = None
     note: str = ""
+    # Appended last so every pre-existing positional argument keeps its meaning.
+    help_source: str | None = None  # "human" when HELP was supplied at approval; None = Prometheus
 
     def __post_init__(self) -> None:
         name = self.name
@@ -200,8 +203,8 @@ class ReviewRecord:
         if self.decision == APPROVED:
             if self.type is None:
                 raise ReviewRecordError(
-                    f"Review record {name!r}: an approval requires the type Prometheus "
-                    f"reported; it is never guessed."
+                    f"Review record {name!r}: an approval requires a valid metric type "
+                    f"({', '.join(sorted(_VALID_TYPES))}); it is never guessed."
                 )
             for key in _APPROVAL_ONLY_KEYS:
                 value = getattr(self, key)
@@ -491,22 +494,24 @@ def approve(
     `type_override` / `help_override` are optional human values that take
     precedence over the Prometheus-reported ones, independently of each other
     (None = not supplied). A supplied value is validated and refused if
-    invalid or blank; it never silently falls back to Prometheus."""
+    invalid or blank; it never silently falls back to Prometheus. Prometheus
+    must still have reported a valid type: a type override can correct it but
+    cannot make a metric with a missing/invalid reported type approvable."""
     if name in vendor_names:
         raise ReviewOperationError(
             f"{name!r} is defined by the vendor catalog, which is already approved; a review "
             f"approval would be a second definition. To exclude it use `reject`; to lift an "
             f"earlier rejection use `clear`."
         )
-    if type_override is not None:
-        effective_type = _validated_type_override(name, type_override)
-    elif discovered.type in _VALID_TYPES:
-        effective_type = discovered.type
-    else:
+    if discovered.type not in _VALID_TYPES:
         raise ReviewOperationError(
             f"Prometheus did not report a valid type for {name!r} (got {discovered.type!r}); "
             f"it will not be guessed, so it cannot be approved."
         )
+    effective_type = (
+        _validated_type_override(name, type_override) if type_override is not None
+        else discovered.type
+    )
     if help_override is not None:
         effective_help = _validated_help_override(name, help_override)
         help_source = HELP_SOURCE_HUMAN
