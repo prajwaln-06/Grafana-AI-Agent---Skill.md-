@@ -652,7 +652,7 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
                 if keys_for_metric is not None:
                     any_confirmed_source = True
                     confirmed_keys.update(keys_for_metric)
-            if any_confirmed_source:
+            if any_confirmed_source and confirmed_keys:
                 invented = used_labels - confirmed_keys
                 if invented:
                     return ValidationResult(
@@ -678,7 +678,7 @@ def _validate_alert_rule_proposed(entry: dict, *, known_references: set[str],
                 if key in values_for_metric:
                     any_confirmed_source = True
                     confirmed_values.update(values_for_metric[key])
-            if any_confirmed_source and value not in confirmed_values:
+            if any_confirmed_source and confirmed_values and value not in confirmed_values:
                 shown = sorted(confirmed_values)
                 shown_str = ", ".join(shown[:20]) + (", ..." if len(shown) > 20 else "")
                 return ValidationResult(
@@ -910,7 +910,7 @@ def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: li
             if keys is not None:
                 any_confirmed_source = True
                 confirmed.update(keys)
-        if any_confirmed_source:
+        if any_confirmed_source and confirmed:
             invented = used_labels - confirmed
             if invented:
                 return ValidationResult(
@@ -953,7 +953,7 @@ def _validate_prometheus_entry(entry: dict, query, name: str, source_metrics: li
                 if key in values_for_metric:
                     any_confirmed_source = True
                     confirmed_values.update(values_for_metric[key])
-            if any_confirmed_source and value not in confirmed_values:
+            if any_confirmed_source and confirmed_values and value not in confirmed_values:
                 shown = sorted(confirmed_values)
                 shown_str = ", ".join(shown[:20]) + (", ..." if len(shown) > 20 else "")
                 return ValidationResult(

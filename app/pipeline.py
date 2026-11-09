@@ -1569,7 +1569,7 @@ def _apply_alert_rule_defaults(contract: dict, settings: Settings) -> dict:
         return contract
     updated_alert_rule = dict(alert_rule)
     if not updated_alert_rule.get("folder"):
-        updated_alert_rule["folder"] = settings.grafana_default_folder_uid
+        updated_alert_rule["folder"] = settings.grafana_default_folder_uid or "alerts"
     # Always overwritten, never merely defaulted -- Section 12.5 requires
     # this to be null regardless of anything the Generator supplied, since a
     # datasource UID is live Grafana configuration the Generator has no way
@@ -1662,6 +1662,8 @@ def _finalize(contract: dict, unresolved_topics: list[dict], **validator_kwargs)
 
 
 def _package_validated(merged: dict, result) -> dict:
+    from app import telemetry
+    telemetry.record_validation_result(result.passed)
     """The logging + success/failure-shape half of what used to be all of
     `_finalize` -- split out in Batch 2 so the Level-1/Level-2 retry
     orchestration in `run_pipeline` can validate a contract once (via
@@ -2723,7 +2725,9 @@ def catalog_narrowing_candidates(catalog: Catalog, question: str,
     consistent with the Batch 2 clarification that pending-review metrics
     must not become eligible for query generation.
     """
-    results = catalog_search.search(catalog, question, top_n=_NARROW_SEARCH_TOP_N)
+    from app import telemetry
+    with telemetry.time_pipeline_step("catalog_search"):
+        results = catalog_search.search(catalog, question, top_n=_NARROW_SEARCH_TOP_N)
     if not results:
         return NarrowingDecision(confident=False, suggested_paths=frozenset(), top_score=None)
 
@@ -2769,7 +2773,9 @@ def catalog_metric_candidates(catalog: Catalog, question: str,
     Generator-context behavior for this request, never surface an error
     or an empty-but-mandatory candidate list.
     """
-    results = catalog_search.search(catalog, question, top_n=_NARROW_SEARCH_TOP_N)
+    from app import telemetry
+    with telemetry.time_pipeline_step("catalog_search"):
+        results = catalog_search.search(catalog, question, top_n=_NARROW_SEARCH_TOP_N)
     if not results:
         return MetricCandidateDecision(confident=False, candidates=(), top_score=None)
 

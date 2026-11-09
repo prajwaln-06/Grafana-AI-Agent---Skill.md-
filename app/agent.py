@@ -10,7 +10,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from app.catalog import runtime as catalog_runtime
 from app.pipeline import ALREADY_EXECUTED_MARKER, PipelineContext, run_pipeline
 from app.config import get_settings
-from app import executor
+from app import executor, telemetry
 from app.skill_index import SkillIndex
 
 logger = logging.getLogger(__name__)
@@ -76,19 +76,23 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                         service_account_token=settings.grafana_service_account_token,
                     )
                     if outcome.status == "success":
+                        telemetry.record_alert_proposal("confirmed")
                         result = {
                             "status": "created",
                             "rule_uid": outcome.rule_uid,
                             "deeplink": outcome.deeplink,
                         }
                     else:
+                        telemetry.record_alert_proposal("failed")
                         result = {"error": f"Grafana error ({outcome.status}): {outcome.error}"}
                         retain_proposal = outcome.status != "conflict"
                 except Exception as e:
+                    telemetry.record_alert_proposal("failed")
                     logger.exception("Failed to create alert rule")
                     result = {"error": f"Unexpected error: {str(e)}"}
                     retain_proposal = True
             else:
+                telemetry.record_alert_proposal("discarded")
                 result = {"status": "discarded"}
 
             # Clear state and return confirmation outcome
@@ -169,6 +173,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             return
 
         if needs_conf:
+            telemetry.record_alert_proposal("proposed")
             proposal_entry = None
             if contract.get("status") == "alert_rule_proposed":
                 proposal_entry = contract

@@ -38,7 +38,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from app import normalizer, opensearch_client, prometheus_client, time_utils
+from app import normalizer, opensearch_client, prometheus_client, telemetry, time_utils
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -102,9 +102,11 @@ def _execute_one_entry(entry: dict, settings: Settings) -> dict:
 
     data_source = (entry.get("data_source") or "").strip().lower()
     if data_source == "prometheus":
-        execution = _execute_prometheus_entry(entry, settings)
+        with telemetry.time_pipeline_step("prometheus_fetch"):
+            execution = _execute_prometheus_entry(entry, settings)
     elif data_source == "opensearch":
-        execution = _execute_opensearch_entry(entry, settings)
+        with telemetry.time_pipeline_step("opensearch_fetch"):
+            execution = _execute_opensearch_entry(entry, settings)
     else:
         execution = {
             "execution_status": "not_executed",
@@ -167,6 +169,10 @@ def _execute_prometheus_entry(entry: dict, settings: Settings) -> dict:
             "step_seconds": step_seconds,
             "step_widened": widened,
         }
+
+    if outcome.status == "empty_result":
+        telemetry.record_empty_result()
+        return _error_block(outcome.status, outcome.error, base_url, resolved_time_range=resolved_time_range)
 
     if outcome.status != "success":
         return _error_block(outcome.status, outcome.error, base_url, resolved_time_range=resolved_time_range)
@@ -281,6 +287,7 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
         return block
 
     if outcome.status == "empty_result":
+        telemetry.record_empty_result()
         meta = response_metadata(raw, policy)
         meta["query_window"] = window
         meta["count"] = {"value": 0, "relation": "eq", "exact": True}
@@ -413,6 +420,8 @@ def _find_range_clauses(node: Any) -> list[tuple[str, dict]]:
 
 def _success_block(normalized: normalizer.NormalizedResult, endpoint: str,
                     resolved_time_range: dict | None) -> dict:
+    if normalized.count == 0:
+        telemetry.record_empty_result()
     return {
         "execution_status": "success" if normalized.count > 0 else "empty_result",
         "resolved_time_range": resolved_time_range,

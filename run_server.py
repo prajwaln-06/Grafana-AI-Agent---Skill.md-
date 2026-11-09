@@ -5,11 +5,14 @@ import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
+import time
+
+from app import telemetry
 
 from google.adk.cli.utils.service_factory import create_session_service_from_options, create_artifact_service_from_options, create_memory_service_from_options
 from google.adk.cli.utils.agent_loader import AgentLoader
@@ -98,7 +101,7 @@ app = adk_web_server.get_fast_api_app(lifespan=_catalog_runtime_lifespan)
 #                       (compared in constant time).
 #   * API_KEY unset  -> open (local development), and a warning is logged once.
 #   * CORS_ALLOW_ORIGINS -> applied for real. The default "*" is only sensible locally.
-_PUBLIC_PATHS = {"/readyz", "/health"}
+_PUBLIC_PATHS = {"/readyz", "/health", "/metrics"}
 _startup_settings = get_settings()
 if not _startup_settings.api_key:
     logger.warning("API_KEY is not set: every endpoint is unauthenticated. Set API_KEY before exposing this service.")
@@ -145,6 +148,15 @@ class ConfirmAlertRequest(BaseModel):
 @app.get("/readyz")
 async def readyz():
     return {"status": "ready", "skill_name": "observability-query-builder"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics scrape endpoint, implementing Google SRE's 4 Golden Signals."""
+    return Response(
+        content=telemetry.generate_metrics_bytes(),
+        media_type=telemetry.CONTENT_TYPE_LATEST,
+    )
 
 
 @app.get("/api/v1/capabilities")
@@ -215,62 +227,97 @@ async def reload_skill():
     }
 
 
+_ACTIVE_SESSIONS: set[str] = set()
+
+
+def _update_active_sessions_gauge() -> None:
+    try:
+        svc = getattr(adk_web_server, "session_service", None)
+        sessions_dict = getattr(svc, "_sessions", getattr(svc, "sessions", None))
+        if isinstance(sessions_dict, dict):
+            telemetry.set_active_sessions_count(len(sessions_dict))
+            return
+    except Exception:
+        pass
+    telemetry.set_active_sessions_count(len(_ACTIVE_SESSIONS))
+
+
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query(body: QueryRequest, request: Request) -> QueryResponse:
-    runner = await adk_web_server.get_runner_async("app")
-    session_id = body.session_id
-    
-    if session_id:
-        session = await adk_web_server.session_service.get_session(
-            app_name="app", user_id="default_user", session_id=session_id
-        )
-        if not session:
-            raise HTTPException(
-                status_code=410,
-                detail="This session has expired or doesn't exist. Please ask the original question again."
-            )
-    else:
-        import uuid
-        session_id = "s-" + str(uuid.uuid4())
+    start_time = time.perf_counter()
+    status_label = "server_error"
+    with telemetry.track_in_flight():
+        try:
+            runner = await adk_web_server.get_runner_async("app")
+            session_id = body.session_id
+            
+            if session_id:
+                session = await adk_web_server.session_service.get_session(
+                    app_name="app", user_id="default_user", session_id=session_id
+                )
+                if not session:
+                    raise HTTPException(
+                        status_code=410,
+                        detail="This session has expired or doesn't exist. Please ask the original question again."
+                    )
+            else:
+                import uuid
+                session_id = "s-" + str(uuid.uuid4())
 
-    events = []
-    try:
-        async for event in runner.run_async(
-            user_id="default_user",
-            session_id=session_id,
-            new_message=types.Content(parts=[types.Part(text=body.question)]),
-        ):
-            events.append(event)
-    except Exception:
-        logger.exception("Agent run failed")
-        raise HTTPException(status_code=502, detail="The query pipeline failed unexpectedly. Please try again.")
+            events = []
+            try:
+                async for event in runner.run_async(
+                    user_id="default_user",
+                    session_id=session_id,
+                    new_message=types.Content(parts=[types.Part(text=body.question)]),
+                ):
+                    events.append(event)
+            except Exception:
+                logger.exception("Agent run failed")
+                raise HTTPException(status_code=502, detail="The query pipeline failed unexpectedly. Please try again.")
 
-    if not events:
-        raise HTTPException(status_code=502, detail="The query pipeline failed unexpectedly. Please try again.")
+            if not events:
+                raise HTTPException(status_code=502, detail="The query pipeline failed unexpectedly. Please try again.")
 
-    last_event = events[-1]
-    text_content = "".join(part.text for part in last_event.content.parts if part.text)
-    
-    try:
-        response_data = json.loads(text_content)
-    except Exception:
-        return QueryResponse(
-            result={"status": "error", "explanation": text_content},
-            session_id=None
-        )
+            last_event = events[-1]
+            text_content = "".join(part.text for part in last_event.content.parts if part.text)
+            
+            try:
+                response_data = json.loads(text_content)
+            except Exception:
+                status_label = "client_error"
+                return QueryResponse(
+                    result={"status": "error", "explanation": text_content},
+                    session_id=None
+                )
 
-    if "error" in response_data:
-        error_msg = response_data["error"]
-        if "took longer than" in error_msg.lower() or "timeout" in error_msg.lower():
-            raise HTTPException(status_code=504, detail=error_msg)
-        else:
-            raise HTTPException(status_code=502, detail=error_msg)
+            if "error" in response_data:
+                error_msg = response_data["error"]
+                if "took longer than" in error_msg.lower() or "timeout" in error_msg.lower():
+                    raise HTTPException(status_code=504, detail=error_msg)
+                else:
+                    raise HTTPException(status_code=502, detail=error_msg)
 
-    result = response_data.get("result")
-    resp_session_id = response_data.get("session_id")
-    if resp_session_id:
-        return QueryResponse(result=result, session_id=session_id)
-    return QueryResponse(result=result, session_id=None)
+            result = response_data.get("result")
+            status_label = "success"
+            resp_session_id = response_data.get("session_id")
+            if resp_session_id:
+                _ACTIVE_SESSIONS.add(session_id)
+                return QueryResponse(result=result, session_id=session_id)
+            else:
+                _ACTIVE_SESSIONS.discard(session_id)
+                return QueryResponse(result=result, session_id=None)
+        except HTTPException as e:
+            status_label = "client_error" if 400 <= e.status_code < 500 else "server_error"
+            raise
+        except Exception:
+            status_label = "server_error"
+            raise
+        finally:
+            elapsed = time.perf_counter() - start_time
+            telemetry.record_request_duration(elapsed)
+            telemetry.record_request_status(status_label)
+            _update_active_sessions_gauge()
 
 
 @app.post("/api/v1/alerts/confirm")
@@ -312,6 +359,9 @@ async def confirm_alert(body: ConfirmAlertRequest):
             }
         )
         await adk_web_server.session_service.append_event(session=session, event=discard_event)
+        telemetry.record_alert_proposal("discarded")
+        _ACTIVE_SESSIONS.discard(body.session_id)
+        _update_active_sessions_gauge()
         return {"status": "discarded"}
 
     from app import grafana_client
@@ -349,18 +399,25 @@ async def confirm_alert(body: ConfirmAlertRequest):
             await adk_web_server.session_service.append_event(session=session, event=clear_event)
 
         if outcome.status == "success":
+            telemetry.record_alert_proposal("confirmed")
+            _ACTIVE_SESSIONS.discard(body.session_id)
+            _update_active_sessions_gauge()
             return {
                 "status": "created",
                 "rule_uid": outcome.rule_uid,
                 "deeplink": outcome.deeplink,
             }
         elif outcome.status == "configuration_error":
+            telemetry.record_alert_proposal("failed")
             raise HTTPException(status_code=500, detail=f"Grafana configuration error: {outcome.error}")
         elif outcome.status == "endpoint_unreachable":
+            telemetry.record_alert_proposal("failed")
             raise HTTPException(status_code=502, detail=f"Grafana unreachable: {outcome.error}")
         elif outcome.status == "conflict":
+            telemetry.record_alert_proposal("failed")
             raise HTTPException(status_code=409, detail=f"Conflict: {outcome.error}")
         else:
+            telemetry.record_alert_proposal("failed")
             raise HTTPException(status_code=500, detail=f"Failed to create alert rule: {outcome.error}")
     except HTTPException:
         raise

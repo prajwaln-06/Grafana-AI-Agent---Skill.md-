@@ -1,0 +1,19 @@
+# =============================================================================
+# Grafana Dashboard Auto-Provisioning Provider
+# Automatically loads all dashboards from the dashboards directory
+# =============================================================================
+apiVersion: 1
+
+providers:
+  - name: 'ai-agent-dashboards'
+    orgId: 1
+    folder: 'AI Agent Monitoring'
+    folderUid: 'ai-agent-monitoring'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 15
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false
+

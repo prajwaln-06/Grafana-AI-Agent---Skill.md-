@@ -36,6 +36,8 @@ import logging
 import time
 from dataclasses import dataclass
 
+from app import telemetry
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
@@ -71,23 +73,24 @@ def call_llm_json(prompt: str, system_instruction: str, api_key: str, model: str
     attempt returns text that doesn't parse as JSON (also treated as a
     failure -- a phase that can't parse its own model's output has nothing
     safe to do with it)."""
-    last_error: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            text = _call_gemini_once(prompt, system_instruction, api_key, model)
-            parsed = _parse_json_response(text)
-            return LLMResponse(text=text, parsed=parsed)
-        except _PermanentError as e:
-            raise LLMCallError(f"LLM call failed with a non-retryable error: {e}") from e
-        except (_TransientError, json.JSONDecodeError) as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                backoff = BASE_BACKOFF_SECONDS * (2 ** attempt)
-                logger.warning("LLM call attempt %d/%d failed (%s); retrying in %ds",
-                                attempt + 1, max_retries, e, backoff)
-                time.sleep(backoff)
-                continue
-    raise LLMCallError(f"LLM call failed after {max_retries} attempts: {last_error}")
+    with telemetry.time_pipeline_step("llm_generation"):
+        last_error: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                text = _call_gemini_once(prompt, system_instruction, api_key, model)
+                parsed = _parse_json_response(text)
+                return LLMResponse(text=text, parsed=parsed)
+            except _PermanentError as e:
+                raise LLMCallError(f"LLM call failed with a non-retryable error: {e}") from e
+            except (_TransientError, json.JSONDecodeError) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    backoff = BASE_BACKOFF_SECONDS * (2 ** attempt)
+                    logger.warning("LLM call attempt %d/%d failed (%s); retrying in %ds",
+                                    attempt + 1, max_retries, e, backoff)
+                    time.sleep(backoff)
+                    continue
+        raise LLMCallError(f"LLM call failed after {max_retries} attempts: {last_error}")
 
 
 class _TransientError(Exception):
@@ -121,6 +124,18 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
             ),
         )
         text = response.text
+        usage = getattr(response, "usage_metadata", None)
+        if usage and not hasattr(usage, "_mock_return_value"):
+            prompt_tokens = getattr(usage, "prompt_token_count", None)
+            candidate_tokens = getattr(usage, "candidates_token_count", None)
+            total_tokens = getattr(usage, "total_token_count", None)
+            if isinstance(prompt_tokens, (int, float)) and prompt_tokens > 0:
+                telemetry.record_tokens(int(prompt_tokens), "prompt")
+            if isinstance(candidate_tokens, (int, float)) and candidate_tokens > 0:
+                telemetry.record_tokens(int(candidate_tokens), "completion")
+            if isinstance(total_tokens, (int, float)) and total_tokens > 0 and not (prompt_tokens or candidate_tokens):
+                telemetry.record_tokens(int(total_tokens), "total")
+
         if text is None:
             raise _TransientError("Gemini returned an empty response body.")
         return text
@@ -128,6 +143,8 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
         raise
     except errors.APIError as e:
         code = getattr(e, "code", None)
+        if isinstance(code, (int, str)) and not hasattr(code, "_mock_return_value"):
+            telemetry.record_llm_api_error(code)
         if code in _PERMANENT_HTTP_STATUS_CODES:
             raise _PermanentError(
                 f"HTTP {code} from Gemini API (model={model!r}): {getattr(e, 'message', e)}. "

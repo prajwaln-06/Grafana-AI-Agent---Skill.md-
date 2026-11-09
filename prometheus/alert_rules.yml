@@ -1,0 +1,226 @@
+# =============================================================================
+# Prometheus Alerting Rules: Complete 4 Golden Signals Suite
+# Reference: Google SRE Handbook (Chapter 6: Monitoring Distributed Systems)
+# Covers: Availability, Latency, Traffic, Errors, Saturation
+# =============================================================================
+
+groups:
+  - name: ai-agent-golden-signals
+    rules:
+      # =======================================================================
+      # 0. SERVICE AVAILABILITY (Liveness)
+      # =======================================================================
+      - alert: AIAgentServiceDown
+        expr: up{job="ai-agent-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          signal: availability
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Agent backend service is DOWN"
+          description: "Prometheus cannot scrape http://localhost:8000/metrics for over 1 minute. The agent process or container has crashed or stopped."
+
+      # =======================================================================
+      # SIGNAL 1: LATENCY (Response Time & Step Decomposition)
+      # =======================================================================
+      # 1.1 End-to-End Latency SLA Breach (p95 > 4.0s)
+      - alert: AIAgentHighLatency
+        expr: histogram_quantile(0.95, rate(adk_request_duration_seconds_bucket[5m])) > 4.0
+        for: 5m
+        labels:
+          severity: warning
+          signal: latency
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Agent response latency is degrading (p95 > 4.0s)"
+          description: "95% of incoming user requests took longer than 4.0s over the last 5 minutes (current p95: {{ $value | printf \"%.2f\" }}s). Violates target SLA."
+
+      # 1.2 Critical Latency / Near-Timeout (p95 > 8.0s)
+      - alert: AIAgentCriticalLatency
+        expr: histogram_quantile(0.95, rate(adk_request_duration_seconds_bucket[5m])) > 8.0
+        for: 2m
+        labels:
+          severity: critical
+          signal: latency
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Agent response latency is CRITICAL (p95 > 8.0s)"
+          description: "95% of requests took longer than 8.0s (current: {{ $value | printf \"%.2f\" }}s). High risk of request timeouts and user abandonment."
+
+      # 1.3 LLM Thinking Latency Spike (LLM step > 3.0s)
+      - alert: AIAgentLLMGenerationSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(adk_pipeline_step_duration_seconds_bucket{step="llm_generation"}[5m]))) > 3.0
+        for: 5m
+        labels:
+          severity: warning
+          signal: latency
+          service: ai-agent-backend
+        annotations:
+          summary: "Upstream LLM query generation is slow (> 3.0s)"
+          description: "The AI model (Gemini/OpenAI) is taking more than 3.0 seconds to generate PromQL queries (current p95: {{ $value | printf \"%.2f\" }}s)."
+
+      # 1.4 Database Query Latency Spike (DB step > 1.5s)
+      - alert: AIAgentDatabaseFetchSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(adk_pipeline_step_duration_seconds_bucket{step=~"prometheus_fetch|opensearch_fetch"}[5m]))) > 1.5
+        for: 5m
+        labels:
+          severity: warning
+          signal: latency
+          service: ai-agent-backend
+        annotations:
+          summary: "Database fetch execution is slow (> 1.5s)"
+          description: "Prometheus or OpenSearch queries are taking more than 1.5s to return time-series data (current p95: {{ $value | printf \"%.2f\" }}s)."
+
+      # =======================================================================
+      # SIGNAL 2: TRAFFIC (Workload Demand, QPS Surges, and Token Cost)
+      # =======================================================================
+      # 2.1 Critical Token Burn Spike (> 1,000,000 tokens/hr)
+      - alert: AIAgentTokenBurnSpike
+        expr: sum(increase(adk_llm_tokens_total[1h])) > 1000000
+        for: 15m
+        labels:
+          severity: critical
+          signal: traffic
+          service: ai-agent-backend
+        annotations:
+          summary: "Runaway AI token burn spike (> 1M tokens/hr)"
+          description: "AI token consumption exceeded 1,000,000 tokens within the past hour (current: {{ $value }} tokens). Check for prompt loops or runaway retry storms."
+
+      # 2.2 Token Budget Warning (> 500,000 tokens/hr)
+      - alert: AIAgentTokenBudgetWarning
+        expr: sum(increase(adk_llm_tokens_total[1h])) > 500000
+        for: 30m
+        labels:
+          severity: warning
+          signal: traffic
+          service: ai-agent-backend
+        annotations:
+          summary: "High AI token consumption velocity (> 500k tokens/hr)"
+          description: "AI token burn rate is elevated (> 500k tokens/hr). Review API quota and cost burn."
+
+      # 2.3 Traffic Surge / Potential Loop Storm (QPS > 20)
+      - alert: AIAgentRequestSurge
+        expr: sum(rate(adk_requests_total[5m])) > 20
+        for: 2m
+        labels:
+          severity: warning
+          signal: traffic
+          service: ai-agent-backend
+        annotations:
+          summary: "Abnormal surge in user questions (> 20 QPS)"
+          description: "Request volume spiked above 20 questions/second (current: {{ $value | printf \"%.1f\" }} QPS). Check for automated scripts or looping clients."
+
+      # =======================================================================
+      # SIGNAL 3: ERRORS (Infrastructure, Hallucinations, Empty Results)
+      # =======================================================================
+      # 3.1 HTTP 5xx Server Error Rate (> 5%)
+      - alert: AIAgentHighServerErrorRate
+        expr: (sum(rate(adk_requests_total{status="server_error"}[5m])) / sum(rate(adk_requests_total[5m]))) * 100 > 5
+        for: 3m
+        labels:
+          severity: critical
+          signal: errors
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Agent HTTP 5xx server error rate > 5%"
+          description: "Over 5% of user requests are failing with internal 500/502/504 errors (current: {{ $value | printf \"%.1f\" }}%)."
+
+      # 3.2 Upstream AI Provider Rate Limit / Quota Exhaustion (HTTP 429)
+      - alert: AIAgentUpstreamQuotaExhausted
+        expr: sum(rate(adk_llm_api_errors_total{status_code="429"}[1m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          signal: errors
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Provider API quota exhausted (HTTP 429)"
+          description: "The AI agent is receiving HTTP 429 rate limit errors from Gemini/OpenAI. User requests are actively failing."
+
+      # 3.3 Upstream AI Provider Outage (HTTP 5xx from LLM)
+      - alert: AIAgentUpstreamProviderOutage
+        expr: sum(rate(adk_llm_api_errors_total{status_code=~"5.*"}[1m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+          signal: errors
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Provider cloud service outage (HTTP 5xx)"
+          description: "Upstream LLM provider is returning HTTP 5xx server errors. The external AI service is degraded or down."
+
+      # 3.4 AI Hallucinations & Syntax Validation Failure Rate (> 5%)
+      - alert: AIAgentHighHallucinationRate
+        expr: (sum(rate(adk_query_validation_total{result="invalid"}[5m])) / sum(rate(adk_requests_total[5m]))) * 100 > 5
+        for: 5m
+        labels:
+          severity: warning
+          signal: errors
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Hallucination rate exceeded 5%"
+          description: "Over 5% of AI-synthesized queries failed validation (current: {{ $value | printf \"%.1f\" }}%). The model is attempting to invent fake metric names."
+
+      # 3.5 Empty Results / Blank Charts Rate (> 3%)
+      - alert: AIAgentHighEmptyResultRate
+        expr: (sum(rate(adk_query_empty_results_total[5m])) / sum(rate(adk_requests_total[5m]))) * 100 > 3
+        for: 5m
+        labels:
+          severity: warning
+          signal: errors
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Agent returning blank charts (> 3% empty results)"
+          description: "Over 3% of executed queries returned 0 data points (current: {{ $value | printf \"%.1f\" }}%). Queries are valid but target inactive or wrong nodes."
+
+      # =======================================================================
+      # SIGNAL 4: SATURATION (Memory Fullness & Concurrency Overload)
+      # =======================================================================
+      # 4.1 In-Memory Chat Session Accumulation (Warning: > 5,000 sessions)
+      - alert: AIAgentHighInMemorySessionCount
+        expr: adk_active_sessions_gauge > 5000
+        for: 10m
+        labels:
+          severity: warning
+          signal: saturation
+          service: ai-agent-backend
+        annotations:
+          summary: "High session context accumulation in memory (> 5,000)"
+          description: "Over 5,000 chat sessions are retained in RAM (current: {{ $value }}). Abandoned browser tabs may be leaking memory."
+
+      # 4.2 In-Memory Chat Session Critical Leak (Critical: > 10,000 sessions)
+      - alert: AIAgentCriticalSessionMemoryLeak
+        expr: adk_active_sessions_gauge > 10000
+        for: 5m
+        labels:
+          severity: critical
+          signal: saturation
+          service: ai-agent-backend
+        annotations:
+          summary: "CRITICAL: Chat session memory accumulation (> 10,000)"
+          description: "Over 10,000 sessions in RAM (current: {{ $value }}). Container is at severe risk of an Out-Of-Memory (OOM) kill."
+
+      # 4.3 Concurrent Request Queue Saturation (> 50 in-flight)
+      - alert: AIAgentConcurrencySaturation
+        expr: adk_in_flight_requests > 50
+        for: 2m
+        labels:
+          severity: warning
+          signal: saturation
+          service: ai-agent-backend
+        annotations:
+          summary: "High concurrent question queueing (> 50 in-flight)"
+          description: "More than 50 user questions are being processed concurrently (current: {{ $value }}). Backend worker threads are saturated."
+
+      # 4.4 Process RAM High Threshold (> 1.5 GB RSS)
+      - alert: AIAgentProcessMemoryHigh
+        expr: process_resident_memory_bytes{job="ai-agent-backend"} > 1610612736
+        for: 5m
+        labels:
+          severity: warning
+          signal: saturation
+          service: ai-agent-backend
+        annotations:
+          summary: "AI Agent process memory usage high (> 1.5 GB)"
+          description: "The AI agent container RSS memory utilization has exceeded 1.5 GB (current: {{ $value | humanize1024 }}B)."
