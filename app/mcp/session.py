@@ -1,4 +1,6 @@
 import asyncio
+import concurrent.futures
+import contextvars
 import json
 import os
 import threading
@@ -44,7 +46,39 @@ _loop_thread = threading.Thread(target=_run_loop, daemon=True)
 _loop_thread.start()
 
 def run_sync(coro):
-    future = asyncio.run_coroutine_threadsafe(coro, _loop)
+    """Run a coroutine on the shared background loop and return its result.
+
+    The coroutine executes on a dedicated event loop in a dedicated thread.
+    A thread does not inherit the caller's context variables, so the
+    caller's context -- and with it the authenticated Principal that the
+    authorization layer binds to it -- is copied explicitly into the task
+    that runs the coroutine. The copy is what the wrappers rely on to
+    authorize the caller; it is stated here rather than left to the event
+    loop's incidental handling of the submitting thread.
+    """
+    context = contextvars.copy_context()
+    future: concurrent.futures.Future = concurrent.futures.Future()
+
+    def _submit() -> None:
+        try:
+            task = _loop.create_task(coro, context=context)
+        except BaseException as exc:  # noqa: BLE001 - reported to the caller
+            if not future.done():
+                future.set_exception(exc)
+            return
+
+        def _finished(completed: asyncio.Task) -> None:
+            if future.done():
+                return
+            error = completed.exception()
+            if error is not None:
+                future.set_exception(error)
+            else:
+                future.set_result(completed.result())
+
+        task.add_done_callback(_finished)
+
+    _loop.call_soon_threadsafe(_submit)
     return future.result()
 
 _session_manager: Optional[MCPSessionManager] = None

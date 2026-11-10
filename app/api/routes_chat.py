@@ -18,13 +18,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.adk_agent import run_adk_agent
+from app.auth.audit import AuditEvent, record_denial
 from app.auth.dependencies import require_principal
+from app.auth.environment import EnvironmentDenied, EnvironmentRequired, resolve_environment
 from app.auth.policy import (
     authorize_alert_propose,
     authorize_dashboard_propose,
     authorize_promql,
 )
 from app.auth.principal import Principal
+from app.auth.resource_scope import (
+    AuthorizationDenied,
+    resolve_destination_folder,
+)
 from app.config import get_settings
 from app.llm_provider import LLMProviderConfigError
 from app.pipeline import run_pipeline
@@ -35,6 +41,31 @@ from chart_selection.selector import select_chart_type
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Unified Chat"])
+
+
+def _audit_dashboard_denial(
+    principal: Principal,
+    *,
+    reason: str,
+    operation: str,
+    target: str | None = None,
+) -> None:
+    """Record a refused dashboard operation from the chat surface.
+
+    The chat endpoint is a natural-language interface, so a refusal is
+    reported to the caller as an RBAC denial. It is also recorded: a refusal
+    is exactly the kind of event the audit log exists for. The record is
+    written on a best-effort basis and can never turn the refusal into an
+    allow.
+    """
+    record_denial(
+        AuditEvent.DASHBOARD_ACCESS_DENIED,
+        principal=principal,
+        reason=reason,
+        target_type="dashboard",
+        target_id=target or None,
+        details={"operation": operation, "surface": "chat"},
+    )
 
 
 # ============================================================================
@@ -91,6 +122,13 @@ class ChatRequest(BaseModel):
     conversationId: Optional[str] = None
     target: Optional[str] = None
     timeRange: Optional[str] = "1h"
+    environment: Optional[str] = Field(
+        default=None,
+        description="The target environment. It is validated against the "
+                    "deployment's environment catalogue and the caller's "
+                    "permitted environments before any query or Grafana write "
+                    "is performed; omitting it uses the deployment default.",
+    )
 
 
 class ChatStep(BaseModel):
@@ -142,6 +180,24 @@ async def unified_chat_endpoint(
 
     logger.info("Unified Chat | session=%s | role=%s | message=%r", session.session_id, principal.role, text[:100])
 
+    # The environment context is resolved lazily, from server-side data, and
+    # only for the operations that are actually environment-scoped (metric
+    # queries and alert rules). Reading a dashboard is not an
+    # environment-scoped operation, so it must not be blocked by a missing
+    # environment assignment.
+    _environment_cache: dict[str, Any] = {}
+
+    def environment_context() -> str | None:
+        """The validated environment for this turn (403/400 when unusable)."""
+        if "value" not in _environment_cache:
+            try:
+                _environment_cache["value"] = resolve_environment(principal, req.environment)
+            except EnvironmentDenied as exc:
+                raise HTTPException(status_code=403, detail=f"RBAC policy denied: {exc.reason}")
+            except EnvironmentRequired as exc:
+                raise HTTPException(status_code=400, detail=f"RBAC policy denied: {exc.reason}")
+        return _environment_cache["value"]
+
     def respond(res: ChatResponse) -> ChatResponse:
         session.history.append({"role": "assistant", "text": res.answer})
         return res
@@ -182,7 +238,20 @@ async def unified_chat_endpoint(
             ))
 
     if session.pending_action == "awaiting_metric_for_alert":
-        alert_dec = authorize_alert_propose(principal)
+        try:
+            alert_environment = environment_context()
+        except HTTPException as exc:
+            session.pending_action = None
+            session.pending_payload = None
+            return respond(ChatResponse(
+                status="policy_denied",
+                sessionId=session.session_id,
+                intent="alert_rule",
+                agents=["Policy Module"],
+                steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                answer=f"🚫 **Access Denied (RBAC)**: {exc.detail}",
+            ))
+        alert_dec = authorize_alert_propose(principal, environment=alert_environment)
         if not alert_dec.allowed:
             session.pending_action = None
             session.pending_payload = None
@@ -196,7 +265,7 @@ async def unified_chat_endpoint(
             ))
 
     if session.pending_action == "awaiting_metric_for_query":
-        prom_dec = authorize_promql(principal, is_custom=True, expr=text)
+        prom_dec = authorize_promql(principal, is_custom=True, expr=text, environment=environment_context())
         if not prom_dec.allowed:
             session.pending_action = None
             session.pending_payload = None
@@ -365,7 +434,18 @@ async def unified_chat_endpoint(
 
     # A) Alert Rule Creation / Management
     if is_alert_request:
-        alert_dec = authorize_alert_propose(principal)
+        try:
+            alert_environment = environment_context()
+        except HTTPException as exc:
+            return respond(ChatResponse(
+                status="policy_denied",
+                sessionId=session.session_id,
+                intent="alert_rule",
+                agents=["Policy Module"],
+                steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                answer=f"🚫 **Access Denied (RBAC)**: {exc.detail}",
+            ))
+        alert_dec = authorize_alert_propose(principal, environment=alert_environment)
         if not alert_dec.allowed:
             return respond(ChatResponse(
                 status="policy_denied",
@@ -452,8 +532,16 @@ async def unified_chat_endpoint(
         if is_mutation:
             op_map = {"CREATE": "create", "UPDATE": "update", "REMOVE": "delete"}
             target_op = op_map.get(intent_kind, "create" if re.search(r"\b(add|create|make|build|insert|append)\b", text, re.I) else ("delete" if re.search(r"\b(remove|delete|drop)\b", text, re.I) else "update"))
+            # Role-level gate first: observers and operators are refused the
+            # whole capability, exactly as before.
             dash_dec = authorize_dashboard_propose(principal, operation=target_op)
             if not dash_dec.allowed:
+                _audit_dashboard_denial(
+                    principal,
+                    reason=dash_dec.reason,
+                    operation=target_op,
+                    target=resolved_target,
+                )
                 return respond(ChatResponse(
                     status="policy_denied",
                     sessionId=session.session_id,
@@ -463,10 +551,63 @@ async def unified_chat_endpoint(
                     answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{dash_dec.reason}",
                 ))
 
+            # Resource scope: a creation must name an authorized destination
+            # folder. The target dashboard of an update or a deletion is
+            # resolved (and authorized) inside the proposal builder, which
+            # reads the folder from Grafana.
+            if target_op == "create":
+                from app.grafana_tools.dashboard_writing import extract_requested_folder_uid
+                try:
+                    destination_folder = resolve_destination_folder(
+                        principal,
+                        extract_requested_folder_uid(text),
+                        default_folder_uid=settings.grafana_default_folder_uid,
+                    )
+                except AuthorizationDenied as exc:
+                    _audit_dashboard_denial(
+                        principal,
+                        reason=exc.reason,
+                        operation=target_op,
+                        target=resolved_target,
+                    )
+                    raise HTTPException(
+                        status_code=exc.status_code,
+                        detail=f"RBAC policy denied: {exc.reason}",
+                    )
+                scope_dec = authorize_dashboard_propose(
+                    principal,
+                    operation="create",
+                    folder_uid=destination_folder,
+                    require_target=True,
+                )
+                if not scope_dec.allowed:
+                    _audit_dashboard_denial(
+                        principal,
+                        reason=scope_dec.reason,
+                        operation=target_op,
+                        target=resolved_target,
+                    )
+                    raise HTTPException(status_code=403, detail=f"RBAC policy denied: {scope_dec.reason}")
+
         if intent_kind in ("CREATE", "UPDATE", "REMOVE"):
             prop_res = propose_dashboard(request=text, target=resolved_target, time_range=req.timeRange or "1h")
             pid = prop_res.get("proposalId")
             status = prop_res.get("status", "success")
+
+            # A scope violation detected while resolving the target dashboard
+            # is reported as HTTP 403 -- nothing was proposed or written.
+            if status == "policy_denied":
+                reason = prop_res.get("reason") or "the request is outside your permitted scope."
+                _audit_dashboard_denial(
+                    principal,
+                    reason=reason,
+                    operation=target_op,
+                    target=resolved_target,
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"RBAC policy denied: {reason}",
+                )
 
             if pid:
                 proposal_obj = PROPOSALS.get(pid)
@@ -588,7 +729,9 @@ async def unified_chat_endpoint(
                             target_name = cand
 
             if target_name and not target_uid:
-                dashes = run_sync(_find_dashboards(target_name))
+                # Only dashboards inside the caller's scope can be resolved by
+                # name -- an out-of-scope dashboard is not even discoverable.
+                dashes = run_sync(_find_dashboards(target_name, principal))
                 if dashes:
                     target_uid = dashes[0].get("uid")
                     target_name = dashes[0].get("title", target_name)
@@ -596,7 +739,13 @@ async def unified_chat_endpoint(
                     target_uid = target_name
 
             if target_uid:
-                panels_text = get_dashboard_panels(target_uid)
+                try:
+                    panels_text = get_dashboard_panels(target_uid)
+                except AuthorizationDenied as exc:
+                    raise HTTPException(
+                        status_code=exc.status_code,
+                        detail=f"RBAC policy denied: {exc.reason}",
+                    )
                 session.last_target = target_uid
                 return respond(ChatResponse(
                     status="ok",
@@ -607,7 +756,13 @@ async def unified_chat_endpoint(
                     answer=panels_text,
                 ))
             else:
-                dash_list_text = list_dashboards()
+                try:
+                    dash_list_text = list_dashboards()
+                except AuthorizationDenied as exc:
+                    raise HTTPException(
+                        status_code=exc.status_code,
+                        detail=f"RBAC policy denied: {exc.reason}",
+                    )
                 return respond(ChatResponse(
                     status="ok",
                     sessionId=session.session_id,
@@ -636,10 +791,16 @@ async def unified_chat_endpoint(
                     search_kw = named_kw.group(1)
 
             answer_text = ""
-            if search_kw:
-                answer_text = search_dashboards(search_kw)
-            if not answer_text or answer_text.startswith("Error"):
-                answer_text = list_dashboards()
+            try:
+                if search_kw:
+                    answer_text = search_dashboards(search_kw)
+                if not answer_text or answer_text.startswith("Error"):
+                    answer_text = list_dashboards()
+            except AuthorizationDenied as exc:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=f"RBAC policy denied: {exc.reason}",
+                )
 
             # Store the first dashboard's UID as session.last_target if found
             first_uid_match = re.search(r"UID:\s*`?([A-Za-z0-9_-]+)`?", answer_text) or re.search(r"\(`([A-Za-z0-9_-]+)`\)", answer_text)
@@ -661,6 +822,7 @@ async def unified_chat_endpoint(
             conversation_id=session.session_id,
             target=resolved_target,
             time_range=req.timeRange,
+            principal=principal,
         )
 
         # Extract UID if mentioned to store as last_target
@@ -694,7 +856,7 @@ async def unified_chat_endpoint(
 
     # C) Telemetry Metric Query (SKILL.md PromQL Engine)
     if skill_index:
-        prom_dec = authorize_promql(principal, is_custom=True, expr=text)
+        prom_dec = authorize_promql(principal, is_custom=True, expr=text, environment=environment_context())
         if not prom_dec.allowed:
             return respond(ChatResponse(
                 status="policy_denied",
@@ -822,7 +984,7 @@ async def unified_chat_endpoint(
     # enforce role restrictions before calling the fallback runner.
     if principal.role == "observer":
         if re.search(r"\b(cpu|memory|mem|disk|load|usage|metric|metrics|query|queries|promql|prometheus|rate|bytes)\b", text, re.I):
-            prom_dec = authorize_promql(principal, is_custom=True, expr=text)
+            prom_dec = authorize_promql(principal, is_custom=True, expr=text, environment=environment_context())
             if not prom_dec.allowed:
                 return respond(ChatResponse(
                     status="policy_denied",
@@ -844,7 +1006,7 @@ async def unified_chat_endpoint(
                     answer=f"🚫 **Access Denied (RBAC)**: Your assigned role is **`{principal.role}`**.\n\n{dash_dec.reason}",
                 ))
 
-    adk_out = run_adk_agent(request=text, conversation_id=session.session_id)
+    adk_out = run_adk_agent(request=text, conversation_id=session.session_id, principal=principal)
     return respond(ChatResponse(
         status="ok",
         sessionId=session.session_id,
@@ -870,14 +1032,20 @@ async def confirm_alert_endpoint(
     principal: Principal = Depends(require_principal),
 ) -> dict:
     from app.auth.policy import authorize_alert_execute
-    alert_dec = authorize_alert_execute(principal)
+    settings = get_settings()
+    try:
+        environment = resolve_environment(principal, None)
+    except EnvironmentDenied as exc:
+        raise HTTPException(status_code=403, detail=f"RBAC policy denied: {exc.reason}")
+    except EnvironmentRequired as exc:
+        raise HTTPException(status_code=400, detail=f"RBAC policy denied: {exc.reason}")
+    alert_dec = authorize_alert_execute(principal, environment=environment)
     if not alert_dec.allowed:
         raise HTTPException(
             status_code=403,
             detail=f"RBAC policy denied: {alert_dec.reason}",
         )
     from app.grafana_client import create_alert_rule
-    settings = get_settings()
     session = SESSION_STORE.get_or_create(req.session_id)
 
     if not req.confirm:
@@ -912,6 +1080,16 @@ async def confirm_alert_endpoint(
     duration = rule_data.get("for_duration") or "5m"
     folder_uid = rule_data.get("folder_uid") or settings.grafana_default_folder_uid
     datasource_uid = rule_data.get("datasource_uid") or settings.grafana_default_datasource_uid
+
+    # The destination folder is authorized before the rule is created.
+    from app.auth.resource_scope import folder_in_scope
+    if not folder_in_scope(principal, folder_uid):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "RBAC policy denied: the alert folder is outside your permitted folders."
+            ),
+        )
 
     outcome = create_alert_rule(
         grafana_url=settings.grafana_url,

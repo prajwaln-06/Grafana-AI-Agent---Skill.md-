@@ -539,6 +539,76 @@ def _end_session(settings: Any, request: Request) -> str:
     return _end_session_url(settings, id_token=id_token)
 
 
+def _audit_logout(request: Request) -> None:
+    """Record the end of an application session.
+
+    The identity is taken from the signed session cookie that is being
+    ended -- it is a server-side, cryptographically verified value, never
+    anything the client supplies. A logout with no readable session is still
+    recorded, just without an actor.
+    """
+    try:
+        from app.auth.audit import AuditEvent, record_event
+        from app.auth.session import SignedSession
+        from app.storage.database import get_db_session
+        from app.storage.user_store import UserStore
+
+        settings = get_settings()
+        principal = None
+        actor_id = None
+        actor_subject = None
+        actor_issuer = None
+        try:
+            session = SignedSession(
+                secret=(getattr(settings, "authentik_session_secret", None) or "").strip(),
+                max_age_seconds=int(getattr(settings, "authentik_session_max_age_seconds", 3600) or 3600),
+                cookie_name=getattr(settings, "authentik_session_cookie_name", "grafana_ai_session"),
+            )
+            payload = session.decode(request.cookies.get(session.cookie_name))
+            actor_issuer = str(payload.get("iss") or "")
+            actor_subject = str(payload.get("sub") or "")
+            with get_db_session() as db:
+                user = UserStore.get_user_by_identity(db, actor_issuer, actor_subject)
+                if user is not None:
+                    actor_id = user.user_id
+                    principal = Principal.from_user_model(user)
+        except Exception as exc:  # pragma: no cover - the logout itself must not fail
+            logger.debug("Could not resolve the logging-out identity: %s", exc)
+
+        record_event(
+            AuditEvent.LOGOUT,
+            principal=principal,
+            decision="ALLOW",
+            reason="application_logout",
+            target_type="session",
+            details={
+                "method": request.method,
+                "actorSubject": actor_subject,
+                "actorIssuer": actor_issuer,
+            },
+        )
+        if actor_id and not principal:
+            # The user record could not be loaded, but the session did carry a
+            # verified identity: record it explicitly.
+            from app.storage.audit_store import AuditStore
+            from app.storage.database import get_db_session
+
+            with get_db_session() as db:
+                AuditStore.log_event(
+                    db,
+                    event_type=AuditEvent.LOGOUT,
+                    actor_id=actor_id,
+                    actor_issuer=actor_issuer,
+                    actor_subject=actor_subject,
+                    decision="ALLOW",
+                    reason="application_logout",
+                    target_type="session",
+                    details={"method": request.method},
+                )
+    except Exception as exc:  # pragma: no cover - auditing must not break logout
+        logger.warning("Could not write the logout audit record: %s", exc)
+
+
 @router.get(LOGOUT_PATH)
 async def logout_get(request: Request) -> RedirectResponse:
     """End the application session and the Authentik session.
@@ -550,6 +620,7 @@ async def logout_get(request: Request) -> RedirectResponse:
     settings = get_settings()
     session = _session(settings)
     transaction = _login_transaction(settings)
+    _audit_logout(request)
     response = RedirectResponse(
         _end_session(settings, request), status_code=status.HTTP_302_FOUND
     )
@@ -571,6 +642,7 @@ async def logout(request: Request) -> dict[str, Any]:
     settings = get_settings()
     session = _session(settings)
     transaction = _login_transaction(settings)
+    _audit_logout(request)
     end_session_url = _end_session(settings, request)
     response = JSONResponse(
         content={

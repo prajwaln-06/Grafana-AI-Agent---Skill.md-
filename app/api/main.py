@@ -76,6 +76,15 @@ async def lifespan(app: FastAPI):
     # Initialize PostgreSQL/SQLite database tables and seed initial RBAC dummy data
     from app.storage.database import init_db
     init_db(auto_seed=bool(getattr(settings, "database_auto_seed", True)))
+
+    # Report demo seed accounts whose Grafana references do not exist on this
+    # instance. This is a diagnostic only -- it never changes a user's scope.
+    try:
+        from app.storage.seed_audit import log_seed_warnings
+
+        await log_seed_warnings()
+    except Exception as exc:  # pragma: no cover - a diagnostic must never block start-up
+        logger.warning("Could not audit the demo seed references: %s", exc)
     yield
 
 

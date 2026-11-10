@@ -48,11 +48,17 @@ async def fetch_dashboard_list(*, refresh: bool = False) -> list[dict]:
         uid = d.get("uid") or d.get("UID") or d.get("id", "")
         if not uid:
             continue
+        folder_uid = d.get("folderUid", d.get("folderUID"))
         dashboards.append({
             "uid": str(uid),
             "title": d.get("title", ""),
             "tags": [t for t in d.get("tags", []) if isinstance(t, str)],
             "url": d.get("url", ""),
+            # The folder a dashboard lives in is part of its RBAC scope, so it
+            # travels with the listing. ``None`` means "unknown" -- callers
+            # must fail closed rather than assume the General folder.
+            "folderUid": str(folder_uid) if folder_uid is not None else None,
+            "folderTitle": d.get("folderTitle", "") or "",
         })
 
     _dashboard_list = dashboards
@@ -94,6 +100,47 @@ def flatten_panels(raw_panels: list[dict]) -> list[dict]:
 
 async def search_dashboards_mcp(query: str) -> str:
     return await mcp_call("search_dashboards", {"query": query.strip()})
+
+
+async def fetch_dashboard_folder_uid(uid: str, *, refresh: bool = False) -> tuple[bool, str | None]:
+    """Resolve ``(exists, folder_uid)`` for a dashboard from Grafana.
+
+    The folder UID is the dashboard's authoritative RBAC dimension, and it
+    is taken from Grafana -- never from the request. To learn it, only
+    *metadata* is fetched: the search listing already reports the folder of
+    every dashboard it returns, so no dashboard body is retrieved for the
+    common case.
+
+    The complete dashboard JSON is fetched only as a fallback, when the
+    listing does not know the dashboard (for instance because it is beyond
+    the listing's page). Even then the body stays internal: only the folder
+    field is read out of it, and it is never returned, logged or passed on.
+    A dashboard that lives in the General folder reports an empty folder
+    UID, which is Grafana's own representation of "no folder".
+    """
+    uid = str(uid or "").strip()
+    if not uid:
+        return False, None
+
+    # --- Metadata-only lookup: the search listing reports each dashboard's
+    # folder, so the dashboard body is never needed for the scope decision.
+    for item in await fetch_dashboard_list(refresh=refresh):
+        if str(item.get("uid")) == uid:
+            folder_uid = item.get("folderUid")
+            return True, (str(folder_uid) if folder_uid is not None else None)
+
+    # --- Fallback: the listing did not report this dashboard. Read the
+    # folder out of the dashboard's own metadata, keeping the body internal.
+    detail = await fetch_dashboard_detail(uid, refresh=refresh)
+    if isinstance(detail, dict):
+        meta = detail.get("meta") if isinstance(detail.get("meta"), dict) else {}
+        folder_uid = meta.get("folderUid", meta.get("folderUID"))
+        if folder_uid is None:
+            folder_uid = detail.get("folderUid", detail.get("folderUID"))
+        if folder_uid is not None:
+            return True, str(folder_uid)
+
+    return False, None
 
 
 async def get_dashboard_summary_mcp(uid: str) -> str:

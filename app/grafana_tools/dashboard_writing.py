@@ -13,6 +13,22 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from app.auth.policy import (
+    authorize_dashboard_execute,
+    authorize_dashboard_propose,
+    classify_impact,
+    requires_second_approver,
+    revalidate_proposal_for_execution,
+)
+from app.auth.principal import Principal, get_current_principal
+from app.auth.resource_scope import (
+    AuthorizationDenied,
+    filter_dashboards_in_scope,
+    require_active_principal,
+    resolve_dashboard_scope,
+    resolve_destination_folder,
+)
+from app.config import get_settings
 from app.dashboard.intent import Intent, resolve_intent
 from app.dashboard.results import (
     CATEGORICAL, DOCUMENTS, GEOGRAPHIC, GRAPH, HEATMAP, HISTOGRAM, SCALAR,
@@ -573,6 +589,24 @@ async def build_proposal(request: str, target: str | None = None, time_range: st
         raise ValueError(f"Unsupported dashboard intent: {resolution.intent.value}")
     if time_range not in TIME_RANGES:
         raise ValueError(f"Unsupported time range. Choose one of: {', '.join(sorted(TIME_RANGES))}.")
+
+    # The destination folder is resolved and authorized BEFORE anything is
+    # built, so a dashboard is never silently placed in the General folder.
+    principal = _requesting_principal()
+    destination_folder = resolve_destination_folder(
+        principal,
+        extract_requested_folder_uid(request),
+        default_folder_uid=get_settings().grafana_default_folder_uid,
+    )
+    decision = authorize_dashboard_propose(
+        principal,
+        operation="create",
+        folder_uid=destination_folder,
+        require_target=True,
+    )
+    if not decision.allowed:
+        raise AuthorizationDenied(decision.reason)
+
     dashboard_name = _create_dashboard_name(request)
     classified = classify_dashboard_panels(request)
     prometheus_requested = [panel for panel in classified if panel["datasourceType"] == "prometheus"]
@@ -613,6 +647,9 @@ async def build_proposal(request: str, target: str | None = None, time_range: st
         "variables": [],
         "timeConfig": {"from": f"now-{time_range}", "to": "now"},
         "panels": panels,
+        # The authorized destination folder travels with the proposal so the
+        # compiled payload lands the dashboard in exactly that folder.
+        "folderUid": destination_folder,
     }
     if resolution_errors:
         ir["resolutionStatus"] = "partial"
@@ -679,8 +716,11 @@ def _normalized_dashboard_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
-async def _find_dashboards(name: str) -> list[dict]:
+async def _find_dashboards(name: str, principal: Principal | None = None) -> list[dict]:
+    """Find dashboards by name, restricted to the caller's permitted scope."""
     dashboards = await fetch_dashboard_list(refresh=True)
+    if principal is not None:
+        dashboards = await filter_dashboards_in_scope(principal, dashboards)
     wanted = _normalized_dashboard_name(name)
     exact = [item for item in dashboards if _normalized_dashboard_name(str(item.get("title", ""))) == wanted]
     if exact:
@@ -694,11 +734,71 @@ async def _find_dashboards(name: str) -> list[dict]:
     ]
 
 
-async def _resolve_dashboard(request: str, operation: str = "update", target: str | None = None) -> tuple[str, dict]:
+def extract_requested_folder_uid(request: str) -> str | None:
+    """Extract an explicitly requested destination folder UID from a request.
+
+    The value is only a *request*: it is validated against the caller's
+    permitted folders before it is used, and it never replaces the
+    authoritative folder of an existing dashboard.
+    """
+    if not request:
+        return None
+    patterns = (
+        r"\b(?:in|into|to|under|within)\s+(?:the\s+|my\s+)?(?:folder|folder\s+uid|folder\s+id)\s*[:=]?\s*['\"]?([A-Za-z0-9_-]{2,})['\"]?",
+        r"\bfolder\s+(?:uid|id|named|called)\s*[:=]?\s*['\"]?([A-Za-z0-9_-]{2,})['\"]?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, request, re.I)
+        if match:
+            return match.group(1).rstrip(" \t\r\n.?!,;:'\"")
+    return None
+
+
+def _requesting_principal() -> Principal:
+    """The principal bound to the current request, or a hard failure.
+
+    Proposal building always happens inside an authenticated request. When no
+    principal is bound the operation fails closed instead of silently
+    running with full privileges.
+
+    The bound principal is refreshed against the role store, so a proposal
+    is never built with a role or a scope that has been revoked since the
+    request began.
+    """
+    principal = get_current_principal()
+    if principal is None:
+        raise AuthorizationDenied(
+            "An authenticated identity is required for this operation.",
+            status_code=401,
+        )
+    from app.auth.refresh import current_principal
+
+    return current_principal(
+        principal,
+        error=lambda reason: AuthorizationDenied(reason, status_code=403),
+    )
+
+
+async def _resolve_dashboard(
+    request: str,
+    operation: str = "update",
+    target: str | None = None,
+    principal: Principal | None = None,
+) -> tuple[str, dict, str | None]:
+    """Resolve the target dashboard of a proposal and its authoritative folder.
+
+    Only dashboards inside the caller's permitted scope can be resolved, and
+    the returned folder UID always comes from Grafana -- never from the
+    request text.
+    """
+    principal = principal or _requesting_principal()
     uid_match = re.search(r"\buid\s+['\"]?([A-Za-z0-9_.:-]+)['\"]?", request, re.I)
     if uid_match:
         uid = uid_match.group(1).rstrip(" \t\r\n.?!,;:'\"")
     else:
+        # The dashboard is resolved against every dashboard Grafana knows, so
+        # that an out-of-scope dashboard is reported as a scope violation
+        # rather than silently disappearing from the listing.
         dashboards = await fetch_dashboard_list(refresh=True)
         candidates = []
 
@@ -734,13 +834,53 @@ async def _resolve_dashboard(request: str, operation: str = "update", target: st
             uids_str = ", ".join(f"`{c.get('uid')}`" for c in candidates)
             raise ValueError(f"Multiple dashboards match ({uids_str}). Identify the intended dashboard by UID.")
         uid = str(candidates[0]["uid"])
+
+    # The scope decision comes *before* the dashboard body is read. The
+    # folder is resolved from Grafana's metadata (see
+    # ``fetch_dashboard_folder_uid``), the caller is authorized against it,
+    # and only then is the dashboard content fetched. A dashboard outside
+    # the caller's scope is therefore never even downloaded, and its content
+    # can never reach the caller or the agent.
+    exists, folder_uid = await resolve_dashboard_scope(uid)
+    if not exists:
+        raise ValueError(f"Dashboard '{uid}' was not found through Grafana MCP.")
+
+    if folder_uid is None:
+        # The folder could not be established from the listing. Read it out
+        # of the dashboard's own metadata -- the body stays internal and is
+        # only used for the folder.
+        detail = await fetch_dashboard_detail(uid, refresh=True)
+        if not detail:
+            raise ValueError(f"Dashboard '{uid}' was not found through Grafana MCP.")
+        raw = detail.get("dashboard", detail)
+        meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+        folder_uid = meta.get("folderUid", meta.get("folderUID"))
+        folder_uid = str(folder_uid) if folder_uid is not None else None
+
+    decision = authorize_dashboard_propose(
+        principal,
+        operation=operation,
+        dashboard_uid=uid,
+        folder_uid=folder_uid,
+        require_target=True,
+    )
+    if not decision.allowed:
+        logger.info(
+            "Denied dashboard proposal (operation=%s) for principal=%s dashboard=%s: %s",
+            operation, principal.user_id, uid, decision.reason,
+        )
+        raise AuthorizationDenied(decision.reason)
+
+    # Authorized: now the content may be read.
     detail = await fetch_dashboard_detail(uid, refresh=True)
     if not detail:
         raise ValueError(f"Dashboard '{uid}' was not found through Grafana MCP.")
-    return uid, detail.get("dashboard", detail)
+    raw = detail.get("dashboard", detail)
+
+    return uid, raw, folder_uid
 
 
-def _hydrate_dashboard(uid: str, raw: dict) -> dict:
+def _hydrate_dashboard(uid: str, raw: dict, folder_uid: str | None = None) -> dict:
     datasource = raw.get("datasource") or {"type": "prometheus", "uid": ""}
     panels = []
     for index, panel in enumerate(flatten_panels(raw.get("panels", []))):
@@ -789,6 +929,9 @@ def _hydrate_dashboard(uid: str, raw: dict) -> dict:
         "variables": raw.get("templating", {}).get("list", []),
         "timeConfig": raw.get("time", {"from": "now-1h", "to": "now"}),
         "panels": panels,
+        # The dashboard's current folder is carried through the proposal so an
+        # update never drops the dashboard into the General folder.
+        "folderUid": folder_uid,
     }
 
 
@@ -849,8 +992,28 @@ async def _populate_query_results(ir: dict, time_range: str) -> None:
 
 
 async def _build_update_proposal(request: str, target: str | None, time_range: str) -> dict:
-    uid, raw = await _resolve_dashboard(request, "update", target=target)
-    ir = _hydrate_dashboard(uid, raw)
+    principal = _requesting_principal()
+    uid, raw, folder_uid = await _resolve_dashboard(request, "update", target=target, principal=principal)
+    ir = _hydrate_dashboard(uid, raw, folder_uid)
+    # A move to another folder is only allowed when the destination folder is
+    # authorized too; the source folder was already validated above.
+    requested_folder = extract_requested_folder_uid(request)
+    if requested_folder and requested_folder != (folder_uid or ""):
+        destination = resolve_destination_folder(
+            principal,
+            requested_folder,
+            default_folder_uid=get_settings().grafana_default_folder_uid,
+        )
+        decision = authorize_dashboard_propose(
+            principal,
+            operation="update",
+            dashboard_uid=uid,
+            folder_uid=destination,
+            require_target=True,
+        )
+        if not decision.allowed:
+            raise AuthorizationDenied(decision.reason)
+        ir["folderUid"] = destination
     await _populate_query_results(ir, time_range)
     classified_panels = classify_dashboard_panels(request)
     requested_panels = [panel for panel in classified_panels if panel["datasourceType"] == "prometheus"]
@@ -934,8 +1097,9 @@ async def _build_update_proposal(request: str, target: str | None, time_range: s
 
 
 async def _build_remove_proposal(request: str, target: str | None = None) -> dict:
-    uid, raw = await _resolve_dashboard(request, "remove", target=target)
-    ir = _hydrate_dashboard(uid, raw)
+    principal = _requesting_principal()
+    uid, raw, folder_uid = await _resolve_dashboard(request, "remove", target=target, principal=principal)
+    ir = _hydrate_dashboard(uid, raw, folder_uid)
     is_delete_dash = not re.search(r"\b(panel|panels)\b", request, re.I) or bool(
         re.search(r"\b(delete|remove)\s+(?:this|the|my)?\s*dashboard\b", request, re.I)
     )
@@ -1104,14 +1268,37 @@ def compile_dashboard(ir: dict) -> dict:
             "refresh": "10s",
             "time": ir["timeConfig"],
             "templating": {"list": ir.get("variables", [])},
+            # The folder is part of the dashboard JSON as well, so a new
+            # dashboard is created in its authorized folder and an existing
+            # dashboard keeps the folder it already lives in.
+            "folderUid": ir.get("folderUid"),
             "panels": panels,
         },
+        # Grafana reads the target folder from the top level of the request
+        # body, not from the dashboard JSON. Without it a create lands in the
+        # General folder and an update can move the dashboard out of its own
+        # folder.
+        "folderUid": ir.get("folderUid"),
         "overwrite": ir.get("operation") in {"update", "remove"},
         "message": "Updated from an explicitly approved dashboard proposal" if ir.get("operation") in {"update", "remove"} else "Created from an explicitly approved dashboard proposal",
     }
 
 
 class ProposalStore:
+    """In-memory store for dashboard proposals.
+
+    Three invariants are enforced here rather than only in the route layer,
+    so that every caller -- the HTTP API, the ADK agent and the MCP server
+    -- gets the same behaviour:
+
+    * the proposer is the authenticated principal and never changes once the
+      proposal exists;
+    * the impact classification is derived from the operation, never from the
+      payload;
+    * an approval records who approved it, and a destructive proposal cannot
+      be approved by its own proposer.
+    """
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._items: dict[str, dict] = {}
@@ -1124,14 +1311,81 @@ class ProposalStore:
         errors = validate_ir(ir)
         if errors:
             raise ValueError("; ".join(errors))
+        # The proposer is taken from the authenticated server-side principal --
+        # never from anything the client supplied.
+        principal = get_current_principal()
+        proposer_id = principal.user_id if principal else None
+        proposer_role = (principal.role or "").lower() if principal else None
+        operation = str(ir.get("operation") or "create")
+        # The impact class is derived from the operation alone. A payload that
+        # carries its own ``impact_class`` or ``requires_second_approver`` is
+        # ignored here, so a client cannot downgrade a destructive operation.
+        impact_class = classify_impact(operation, ir)
         with self._lock:
             pid = proposal_id or secrets.token_urlsafe(12)
             previous = self._items.get(pid)
             version = (previous or {}).get("version", 0) + 1
-            item = {"proposalId": pid, "version": version, "status": "proposed", "approvalToken": None, "approvedAt": None, "ir": copy.deepcopy(ir)}
+            # The proposer identity is immutable: a modification keeps the
+            # original proposer, it does not re-attribute the proposal to
+            # whoever edited it last.
+            if previous and previous.get("proposer_id"):
+                proposer_id = previous["proposer_id"]
+                proposer_role = previous.get("proposer_role")
+            item = {
+                "proposalId": pid,
+                "version": version,
+                "status": "proposed",
+                "approvalToken": None,
+                "approvedAt": None,
+                "approvedBy": None,
+                "approverRole": None,
+                "rejectedBy": None,
+                "rejectedAt": None,
+                "ir": copy.deepcopy(ir),
+                "proposer_id": proposer_id,
+                "proposer_role": proposer_role,
+                "operation": operation,
+                "impact_class": impact_class,
+                "requires_second_approver": requires_second_approver(impact_class),
+                "target_resource": {
+                    "dashboardUid": ir.get("dashboardUid"),
+                    "folderUid": ir.get("folderUid"),
+                },
+            }
             item["digest"] = self._digest(item["ir"])
             self._items[pid] = item
+            self._audit_lifecycle(previous, item)
             return copy.deepcopy(item)
+
+    def _audit_lifecycle(self, previous: dict | None, item: dict) -> None:
+        """Record the creation (or modification) of a proposal.
+
+        The audit happens in the store rather than in a route, so a proposal
+        created through the chat pipeline, the ADK agent or the MCP server is
+        recorded exactly once -- there is no second, route-level record that
+        could duplicate it.
+        """
+        from app.auth.audit import AuditEvent, record_event
+
+        event = AuditEvent.PROPOSAL_CREATED if previous is None else AuditEvent.PROPOSAL_MODIFIED
+        record_event(
+            event,
+            principal=get_current_principal(),
+            decision="ALLOW",
+            reason="proposal_created" if previous is None else "proposal_modified",
+            target_type="proposal",
+            target_id=item.get("proposalId"),
+            proposal_id=item.get("proposalId"),
+            folder_uid=(item.get("target_resource") or {}).get("folderUid"),
+            dashboard_uid=(item.get("target_resource") or {}).get("dashboardUid"),
+            impact_class=item.get("impact_class"),
+            details={
+                "version": item.get("version"),
+                "operation": item.get("operation"),
+                "proposerId": item.get("proposer_id"),
+                "targetResource": item.get("target_resource"),
+            },
+        )
 
     def get(self, pid: str) -> dict:
         with self._lock:
@@ -1142,24 +1396,70 @@ class ProposalStore:
     def modify(self, pid: str, ir: dict) -> dict:
         return self.create(ir, pid)
 
-    def approve(self, pid: str, version: int) -> dict:
+    def approve(
+        self,
+        pid: str,
+        version: int,
+        *,
+        approver_id: str | None = None,
+        approver_role: str | None = None,
+    ) -> dict:
+        """Record an approval.
+
+        The approver identity is supplied by the caller, which resolves it
+        from the authenticated principal -- it is never taken from the
+        request. The separation-of-duties rule is enforced here as well as
+        in the policy layer, so a destructive proposal cannot be approved by
+        its own proposer even through a path that forgot to ask the policy.
+        """
         with self._lock:
             item = self._items.get(pid)
             if not item or item["version"] != version:
                 raise ValueError("Approval version is stale or proposal does not exist.")
+            if item["status"] == "rejected":
+                raise ValueError("A rejected proposal cannot be approved.")
+            if item["status"] == "approved":
+                raise ValueError("This proposal version has already been approved.")
+            if item.get("requires_second_approver"):
+                proposer_id = item.get("proposer_id")
+                if proposer_id and approver_id and str(proposer_id) == str(approver_id):
+                    raise PermissionError(
+                        "Policy Denied: Separation of duties requires a second, different approver."
+                    )
+                if proposer_id and not approver_id:
+                    raise PermissionError(
+                        "Policy Denied: an approver identity is required for a proposal "
+                        "that requires a second approver."
+                    )
             item["status"] = "approved"
             item["approvalToken"] = secrets.token_urlsafe(24)
             item["approvedAt"] = datetime.now(timezone.utc).isoformat()
+            item["approvedBy"] = approver_id
+            item["approverRole"] = approver_role
             return copy.deepcopy(item)
 
-    def reject(self, pid: str, version: int) -> dict:
+    def reject(
+        self,
+        pid: str,
+        version: int,
+        *,
+        approver_id: str | None = None,
+        approver_role: str | None = None,
+    ) -> dict:
+        """Record a rejection."""
         with self._lock:
             item = self._items.get(pid)
             if not item or item["version"] != version:
                 raise ValueError("Rejection version is stale or proposal does not exist.")
+            if item["status"] == "executed" or item["status"] == "built":
+                raise ValueError("An executed proposal cannot be rejected.")
             item["status"] = "rejected"
             item["approvalToken"] = None
             item["approvedAt"] = None
+            item["approvedBy"] = None
+            item["rejectedBy"] = approver_id
+            item["rejectedAt"] = datetime.now(timezone.utc).isoformat()
+            item["rejectedByRole"] = approver_role
             return copy.deepcopy(item)
 
     def set_status(self, pid: str, status: str) -> dict:
@@ -1180,19 +1480,219 @@ class ProposalStore:
 PROPOSALS = ProposalStore()
 
 
+async def _verify_dashboard_folder(dashboard_uid: str | None, expected_folder_uid: str | None) -> None:
+    """Verify that Grafana really placed the dashboard in the expected folder."""
+    if not dashboard_uid:
+        return
+    try:
+        exists, actual = await resolve_dashboard_scope(str(dashboard_uid))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not verify the folder of dashboard %s: %s", dashboard_uid, exc)
+        return
+    if not exists:
+        logger.warning("Could not verify the folder of dashboard %s: it was not found again.", dashboard_uid)
+        return
+    expected = "" if expected_folder_uid is None else str(expected_folder_uid)
+    actual = "" if actual is None else str(actual)
+    if expected != actual:
+        raise RuntimeError(
+            f"Grafana placed dashboard '{dashboard_uid}' in folder '{actual}' instead of the "
+            f"authorized folder '{expected}'."
+        )
+
+
+def _panel_identity(panel: dict) -> str:
+    """A stable identity for a panel, used to diff two dashboard states."""
+    if not isinstance(panel, dict):
+        return ""
+    return str(panel.get("id") or panel.get("title") or "")
+
+
+def _panel_diff(before: list[dict], after: list[dict]) -> dict[str, list[str]]:
+    """Diff two panel lists into added / updated / removed panel identities."""
+    before_map = {_panel_identity(p): p for p in (before or []) if _panel_identity(p)}
+    after_map = {_panel_identity(p): p for p in (after or []) if _panel_identity(p)}
+    added = [key for key in after_map if key not in before_map]
+    removed = [key for key in before_map if key not in after_map]
+    updated = [
+        key for key in after_map
+        if key in before_map and before_map[key] != after_map[key]
+    ]
+    return {"added": added, "updated": updated, "removed": removed}
+
+
+async def _current_panels(dashboard_uid: str | None) -> list[dict]:
+    """The panels a dashboard currently has in Grafana (best effort)."""
+    if not dashboard_uid:
+        return []
+    try:
+        detail = await fetch_dashboard_detail(str(dashboard_uid))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not read the current panels of %s: %s", dashboard_uid, exc)
+        return []
+    if not isinstance(detail, dict):
+        return []
+    return flatten_panels(detail.get("panels") or [])
+
+
+def _audit_dashboard_mutation(
+    *,
+    principal: Principal | None,
+    proposal_id: str,
+    operation: str,
+    dashboard_uid: str | None,
+    folder_uid: str | None,
+    previous_folder_uid: str | None,
+    panel_diff: dict[str, list[str]],
+    impact_class: str | None,
+    environment: str | None = None,
+) -> None:
+    """Record the dashboard and panel mutations an execution performed.
+
+    The dashboard event names the operation; every individual panel change
+    is recorded as its own event so the log shows exactly which panels were
+    added, changed or removed.
+    """
+    from app.auth.audit import AuditEvent, record_event
+
+    moved = (
+        previous_folder_uid is not None
+        and folder_uid is not None
+        and str(previous_folder_uid) != str(folder_uid)
+    )
+
+    if operation == "remove":
+        dashboard_event = AuditEvent.DASHBOARD_DELETED
+    elif operation == "create":
+        dashboard_event = AuditEvent.DASHBOARD_CREATED
+    elif moved:
+        dashboard_event = AuditEvent.DASHBOARD_MOVED
+    else:
+        dashboard_event = AuditEvent.DASHBOARD_UPDATED
+
+    details: dict[str, Any] = {"operation": operation}
+    if moved:
+        details["previousFolderUid"] = previous_folder_uid
+        details["newFolderUid"] = folder_uid
+
+    record_event(
+        dashboard_event,
+        principal=principal,
+        decision="ALLOW",
+        reason=f"approved_dashboard_{operation}",
+        target_type="dashboard",
+        target_id=str(dashboard_uid) if dashboard_uid else None,
+        proposal_id=proposal_id,
+        folder_uid=folder_uid,
+        dashboard_uid=str(dashboard_uid) if dashboard_uid else None,
+        environment=environment,
+        impact_class=impact_class,
+        details=details,
+    )
+
+    for key, event_type in (
+        ("added", AuditEvent.PANEL_CREATED),
+        ("updated", AuditEvent.PANEL_UPDATED),
+        ("removed", AuditEvent.PANEL_DELETED),
+    ):
+        for panel in panel_diff.get(key, []):
+            record_event(
+                event_type,
+                principal=principal,
+                decision="ALLOW",
+                reason=f"panel_{key[:-1]}",
+                target_type="panel",
+                target_id=panel,
+                proposal_id=proposal_id,
+                folder_uid=folder_uid,
+                dashboard_uid=str(dashboard_uid) if dashboard_uid else None,
+                environment=environment,
+                details={"panel": panel},
+            )
+
+
 async def execute_approved_mutation(proposal_id: str, version: int, approval_token: str) -> dict:
     item = PROPOSALS.verified(proposal_id, version, approval_token)
-    from app.auth.principal import get_current_principal
-    principal = get_current_principal()
-    if principal:
-        from app.auth.policy import authorize_dashboard_execute
-        dec = authorize_dashboard_execute(principal, proposal=item)
-        if not dec.allowed:
-            raise PermissionError(f"RBAC policy denied: {dec.reason}")
+
+    # --- Revalidate everything immediately before the write -----------------
+    # The approval that was granted earlier is never trusted on its own: the
+    # executor's role, status, dashboard scope, folder scope and environment
+    # are re-checked here, and the target is re-read from Grafana.
+    #
+    # The executor's *current* permissions are re-read from the role store
+    # as well: a role that was downgraded, a scope that was revoked or an
+    # account that was deactivated after the request started must stop the
+    # write, not be honoured because the request began with the old values.
+    from app.auth.refresh import current_principal
+
+    principal = current_principal(
+        get_current_principal(),
+        error=PermissionError,
+    )
+
+    ir = item["ir"]
+    operation = str(ir.get("operation") or "create")
+    dashboard_uid = ir.get("dashboardUid")
+    folder_uid = ir.get("folderUid")
+    default_folder_uid = get_settings().grafana_default_folder_uid
+
+    # The approval itself is re-validated: the proposal must still be in the
+    # approved state, its impact classification must still match its content,
+    # and a destructive proposal must have been approved by somebody other
+    # than its proposer.
+    reval = revalidate_proposal_for_execution(principal, item, environment=ir.get("environment"))
+    if not reval.allowed:
+        raise PermissionError(f"RBAC policy denied: {reval.reason}")
+
+    if operation == "create":
+        # The destination folder must still be authorized for the executor.
+        folder_uid = resolve_destination_folder(
+            principal,
+            folder_uid,
+            default_folder_uid=default_folder_uid,
+        )
+        previous_folder_uid = None
+        before_panels: list[dict] = []
+    else:
+        exists, live_folder = await resolve_dashboard_scope(str(dashboard_uid))
+        if not exists:
+            raise PermissionError("The target dashboard no longer exists in Grafana.")
+        live_folder = "" if live_folder is None else str(live_folder)
+        previous_folder_uid = live_folder
+        requested_folder = ir.get("folderUid")
+        if requested_folder is not None and str(requested_folder) != live_folder:
+            # A move: the destination folder must be authorized as well.
+            folder_uid = resolve_destination_folder(
+                principal,
+                requested_folder,
+                default_folder_uid=default_folder_uid,
+            )
+        else:
+            folder_uid = live_folder
+        # The panel state before the write, so the audit log can name exactly
+        # which panels were added, changed or removed.
+        before_panels = await _current_panels(dashboard_uid)
+
+    decision = authorize_dashboard_execute(
+        principal,
+        proposal=item,
+        dashboard_uid=str(dashboard_uid) if dashboard_uid else None,
+        folder_uid=folder_uid,
+        environment=ir.get("environment"),
+        require_target=True,
+    )
+    if not decision.allowed:
+        raise PermissionError(f"RBAC policy denied: {decision.reason}")
 
     if os.environ.get("GRAFANA_MCP_ENABLE_WRITE", "").lower() not in {"1", "true", "yes", "on"}:
         raise PermissionError("Grafana MCP writes are disabled. Set GRAFANA_MCP_ENABLE_WRITE=true for manual E2E testing.")
     payload = compile_dashboard(item["ir"])
+    if payload.get("dashboard") is not None:
+        # The compiled payload carries the authorized folder, never a stale or
+        # client-supplied one. Grafana reads the folder from the top level of
+        # the request body, so both places are set.
+        payload["dashboard"]["folderUid"] = folder_uid
+        payload["folderUid"] = folder_uid
     PROPOSALS.set_status(proposal_id, "executing")
     try:
         if item["ir"].get("operation") == "remove" and item["ir"].get("removeDashboard"):
@@ -1203,7 +1703,7 @@ async def execute_approved_mutation(proposal_id: str, version: int, approval_tok
                 timeout=30.0,
             )
         elif item["ir"].get("operation") in {"update", "remove"}:
-            result = await mcp_call("update_dashboard", {"dashboard": payload["dashboard"], "overwrite": True, "message": payload.get("message", "Approved dashboard update")}, raw=True, timeout=30.0)
+            result = await mcp_call("update_dashboard", {"dashboard": payload["dashboard"], "folderUid": folder_uid, "overwrite": True, "message": payload.get("message", "Approved dashboard update")}, raw=True, timeout=30.0)
             if not result:
                 # If direct overwrite failed (e.g. Grafana blocks overwriting provisioned system dashboards),
                 # seamlessly save as an editable custom copy.
@@ -1214,7 +1714,7 @@ async def execute_approved_mutation(proposal_id: str, version: int, approval_tok
                 orig_title = cloned.get("title", "Dashboard")
                 if not orig_title.endswith("(Custom)"):
                     cloned["title"] = f"{orig_title} (Custom)"
-                result = await mcp_call("update_dashboard", {"dashboard": cloned, "overwrite": False, "message": "Cloned editable dashboard copy"}, raw=True, timeout=30.0)
+                result = await mcp_call("update_dashboard", {"dashboard": cloned, "folderUid": folder_uid, "overwrite": False, "message": "Cloned editable dashboard copy"}, raw=True, timeout=30.0)
         else:
             result = await mcp_call("update_dashboard", payload, raw=True, timeout=30.0)
     except Exception:
@@ -1223,8 +1723,40 @@ async def execute_approved_mutation(proposal_id: str, version: int, approval_tok
     if not result:
         PROPOSALS.set_status(proposal_id, "failed")
         raise RuntimeError("Grafana MCP mutation failed to save to Grafana.")
-    final = PROPOSALS.set_status(proposal_id, "built")
     parsed = _json(result)
+    final = PROPOSALS.set_status(proposal_id, "built")
+
+    # Verify the dashboard really ended up in the authorized folder.
+    written_uid = None
+    if isinstance(parsed, dict):
+        written_uid = (
+            parsed.get("uid")
+            or (parsed.get("dashboard") or {}).get("uid")
+            or parsed.get("dashboardUid")
+        )
+    try:
+        await _verify_dashboard_folder(written_uid or dashboard_uid, folder_uid)
+    except Exception:
+        PROPOSALS.set_status(proposal_id, "failed")
+        raise
+
+    # The write happened: record what actually changed.
+    if operation == "remove" and item["ir"].get("removeDashboard"):
+        after_panels: list[dict] = []
+    else:
+        after_panels = list((payload.get("dashboard") or {}).get("panels") or [])
+    _audit_dashboard_mutation(
+        principal=principal,
+        proposal_id=proposal_id,
+        operation=operation,
+        dashboard_uid=str(written_uid or dashboard_uid) if (written_uid or dashboard_uid) else None,
+        folder_uid=folder_uid,
+        previous_folder_uid=previous_folder_uid,
+        panel_diff=_panel_diff(before_panels, after_panels),
+        impact_class=item.get("impact_class"),
+        environment=ir.get("environment"),
+    )
+
     return {"proposal": final, "grafanaPayload": payload, "grafanaResult": parsed if parsed is not None else result}
 
 
@@ -1234,18 +1766,21 @@ def propose_dashboard(
     time_range: Literal["15m", "1h", "6h", "12h", "24h", "7d"] = "1h",
 ) -> dict:
     """ADK boundary: always return a non-empty, JSON-serializable terminal outcome."""
-    from app.auth.principal import get_current_principal
-    principal = get_current_principal()
-    if principal:
-        from app.auth.policy import authorize_dashboard_propose
-        dec = authorize_dashboard_propose(principal)
-        if not dec.allowed:
-            return {
-                "status": "policy_denied",
-                "question": f"Access Denied (RBAC): Your role '{principal.role}' is not allowed to create or modify dashboards/panels.",
-                "reason": dec.reason,
-                "errors": [{"message": dec.reason}],
-            }
+    # The proposal is authorized against the authenticated caller. Without
+    # one the tool refuses: it never proposes a dashboard change for an
+    # unidentified caller.
+    principal = require_active_principal()
+    dec = authorize_dashboard_propose(principal)
+    if not dec.allowed:
+        from app.auth.audit import record_tool_denial
+
+        record_tool_denial(dec.reason, target_id="propose_dashboard")
+        return {
+            "status": "policy_denied",
+            "question": f"Access Denied (RBAC): Your role '{principal.role}' is not allowed to create or modify dashboards/panels.",
+            "reason": dec.reason,
+            "errors": [{"message": dec.reason}],
+        }
 
     equivalent_durations = {
         "900": "15m",
@@ -1295,6 +1830,26 @@ def propose_dashboard(
             (proposal_ready - tool_started) * 1000,
             (serialized - proposal_ready) * 1000,
             len(json.dumps(proposal, separators=(",", ":"))),
+            len(json.dumps(result, separators=(",", ":"))),
+            (time.perf_counter() - tool_started) * 1000,
+        )
+        return result
+    except AuthorizationDenied as exc:
+        # A scope violation (unauthorized folder, out-of-scope dashboard) is a
+        # policy denial, not a generic failure -- and nothing was written.
+        logger.info("Dashboard proposal denied: %s", exc.reason)
+        outcome = {
+            "status": "policy_denied",
+            "question": f"Access Denied (RBAC): {exc.reason}",
+            "reason": exc.reason,
+            "errors": [{"message": exc.reason}],
+        }
+        result = json.loads(json.dumps(outcome, allow_nan=False))
+        logger.info(
+            "[dashboard] tool_complete status=%s model_result_bytes=%d total_ms=%.1f",
+            # The denial can be raised before the try block assigned a
+            # status, so the outcome's own status is used here.
+            outcome["status"],
             len(json.dumps(result, separators=(",", ":"))),
             (time.perf_counter() - tool_started) * 1000,
         )

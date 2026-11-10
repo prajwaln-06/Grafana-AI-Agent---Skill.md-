@@ -1,7 +1,7 @@
 import json
 import logging
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, Any
 
@@ -13,6 +13,7 @@ from google.adk.evaluation.local_eval_sets_manager import LocalEvalSetsManager
 from google.adk.evaluation.local_eval_set_results_manager import LocalEvalSetResultsManager
 from google.genai import types
 
+from app.auth.dependencies import require_admin_principal
 from app.config import get_settings
 from app.skill_index import SkillIndex
 
@@ -86,7 +87,12 @@ async def capabilities():
 
 
 @app.post("/api/v1/admin/reload-skill")
-async def reload_skill():
+async def reload_skill(principal = Depends(require_admin_principal)):
+    """Reload the skill package.
+
+    Administrator-only: the endpoint changes what every subsequent request
+    does, so the role is checked on the server rather than in the UI.
+    """
     import dataclasses
     from app.agent import root_agent
     from app.skill_index import SkillIndexError

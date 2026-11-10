@@ -178,7 +178,7 @@ def test_promql_formulas_for_catalog_metrics():
     assert "time() - node_boot_time_seconds" in uptime_q
 
 
-def test_numeric_selection_from_clarification():
+def test_numeric_selection_from_clarification(api_principal):
     """Verify that replying with '5' resolves candidate 5 from pending clarification."""
     from fastapi.testclient import TestClient
     from app.api.main import app
@@ -211,7 +211,7 @@ def test_numeric_selection_from_clarification():
     assert "DCGM_FI_DEV_GPU_TEMP" in data["answer"] or data.get("proposalId") is not None
 
 
-def test_delete_dashboard_proposal():
+def test_delete_dashboard_proposal(api_principal):
     """Verify that 'delete dashboard Observability Overview' generates a proper delete proposal."""
     from fastapi.testclient import TestClient
     from app.api.main import app
@@ -235,7 +235,7 @@ def test_delete_dashboard_proposal():
     assert ir.get("operation") == "remove"
 
 
-def test_panel_inspection_query():
+def test_panel_inspection_query(api_principal):
     """Verify that asking for panels in a dashboard returns panel details."""
     from fastapi.testclient import TestClient
     from app.api.main import app
@@ -252,7 +252,7 @@ def test_panel_inspection_query():
     assert "observability-overview" in data["answer"]
 
 
-def test_dashboard_search_query():
+def test_dashboard_search_query(api_principal):
     """Verify that searching for dashboards returns clean matches with UIDs."""
     from fastapi.testclient import TestClient
     from app.api.main import app
@@ -268,7 +268,7 @@ def test_dashboard_search_query():
     assert "UID:" in data["answer"]
 
 
-def test_awaiting_dashboard_uid_resolution():
+def test_awaiting_dashboard_uid_resolution(api_principal):
     """Verify that clicking/sending a dashboard UID resolves pending dashboard action."""
     from fastapi.testclient import TestClient
     from app.api.main import app
@@ -305,7 +305,7 @@ def test_awaiting_dashboard_uid_resolution():
     assert data2.get("proposalId") is not None
 
 
-def test_pending_clarification_abandoned_on_new_command():
+def test_pending_clarification_abandoned_on_new_command(api_principal):
     """Verify that entering a new command like 'List the panels...' abandons pending metric clarification."""
     from fastapi.testclient import TestClient
     from app.api.main import app
@@ -333,7 +333,7 @@ def test_pending_clarification_abandoned_on_new_command():
 
 
 
-def test_awaiting_metric_for_alert_resolution():
+def test_awaiting_metric_for_alert_resolution(api_principal):
     """Verify that picking a metric from pending alert clarification re-runs the alert pipeline."""
     from fastapi.testclient import TestClient
     from app.api.main import app
@@ -348,7 +348,20 @@ def test_awaiting_metric_for_alert_resolution():
         "candidates": ["DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_DEV_GPU_TEMP"],
     }
     # User clicks/sends the metric name
-    resp = client.post("/api/chat", json={"message": "DCGM_FI_DEV_GPU_UTIL", "sessionId": session_id})
+    #
+    # The alert pipeline is stubbed: this test verifies the pending-action
+    # hand-off, not the language model behind it, so it must not depend on a
+    # reachable LLM endpoint.
+    from unittest.mock import AsyncMock, patch
+
+    canned = {
+        "mode": "single",
+        "status": "ok",
+        "alert_rule": {"title": "GPU utilization alert", "condition_query": "DCGM_FI_DEV_GPU_UTIL"},
+        "explanation": "Alert rule proposed.",
+    }
+    with patch("app.api.routes_chat.run_pipeline", new=AsyncMock(return_value=canned)):
+        resp = client.post("/api/chat", json={"message": "DCGM_FI_DEV_GPU_UTIL", "sessionId": session_id})
     assert resp.status_code == 200
     data = resp.json()
     # pending_action must be cleared
@@ -357,7 +370,7 @@ def test_awaiting_metric_for_alert_resolution():
     assert data["intent"] in ("alert_rule", "prometheus", "clarification", "ok")
 
 
-def test_awaiting_metric_for_query_resolution():
+def test_awaiting_metric_for_query_resolution(api_principal):
     """Verify that picking a metric from pending PromQL clarification re-runs the query pipeline."""
     from fastapi.testclient import TestClient
     from app.api.main import app

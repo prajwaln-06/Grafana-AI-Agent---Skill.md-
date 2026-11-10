@@ -565,7 +565,7 @@ def test_dashboard_catalog_is_independent_of_the_structured_catalog():
     assert DASHBOARD_CATALOG != REAL_CATALOG
 
 
-def test_catalog_api_endpoint_still_serves_the_dashboard_catalog():
+def test_catalog_api_endpoint_still_serves_the_dashboard_catalog(api_principal):
     from app.api import main as api_main
 
     with TestClient(api_main.app) as client:
@@ -585,7 +585,7 @@ def _small_catalog_settings(tmp_path, count):
     return Settings(gemini_api_key="test-key-not-real", skills_root=SKILLS, catalog_path=path), path
 
 
-def test_app_starts_and_serves_when_the_structured_catalog_is_missing(monkeypatch, tmp_path):
+def test_app_starts_and_serves_when_the_structured_catalog_is_missing(monkeypatch, tmp_path, api_principal):
     from app.api import main as api_main
 
     broken = Settings(gemini_api_key="test-key-not-real", skills_root=SKILLS,
@@ -597,7 +597,7 @@ def test_app_starts_and_serves_when_the_structured_catalog_is_missing(monkeypatc
     assert rt.get_structured_catalog(broken) is None
 
 
-def test_admin_reload_refreshes_the_catalog_and_survives_a_bad_catalog_edit(monkeypatch, tmp_path):
+def test_admin_reload_refreshes_the_catalog_and_survives_a_bad_catalog_edit(monkeypatch, tmp_path, api_principal):
     from app.api import main as api_main
 
     settings, path = _small_catalog_settings(tmp_path, 5)

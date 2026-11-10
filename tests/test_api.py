@@ -221,7 +221,7 @@ def test_multi_mode_with_one_ambiguous_entry_defers_all_execution():
     assert body["result"] == mixed_contract  # returned as-is, not partially executed
 
 
-def test_reload_skill_picks_up_a_new_routing_row(tmp_path, monkeypatch):
+def test_reload_skill_picks_up_a_new_routing_row(tmp_path, monkeypatch, api_principal):
     refs = tmp_path / "references"
     refs.mkdir()
     (refs / "cpu.md").write_text("# CPU\n", encoding="utf-8")
@@ -260,7 +260,7 @@ def test_reload_skill_picks_up_a_new_routing_row(tmp_path, monkeypatch):
         assert len(r3.json()["routing_rows"]) == 2
 
 
-def test_reload_skill_keeps_previous_skill_on_bad_edit(tmp_path, monkeypatch):
+def test_reload_skill_keeps_previous_skill_on_bad_edit(tmp_path, monkeypatch, api_principal):
     refs = tmp_path / "references"
     refs.mkdir()
     (refs / "cpu.md").write_text("# CPU\n", encoding="utf-8")

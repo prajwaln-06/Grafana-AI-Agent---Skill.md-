@@ -1,9 +1,20 @@
 # --- Secrets and local configuration ---------------------------------------
 # The real .env holds the Authentik client secret, the session secret and the
-# credentials of the local stack. Only .env.example is tracked.
+# credentials of the local stack. Only the configuration *templates*
+# (.env.example, .env.test.example, grafana_ai/.env.example) are tracked.
+#
+# The pattern ".env" has no slash in it, so it already matches at every
+# directory level (ui/.env, grafana_ai/.env, ...). The explicit entries below
+# name the other local override spellings. Note that ".env.*" is deliberately
+# NOT used: it would also match the tracked .env.example templates.
 .env
 .env.local
 .env.*.local
+.env.test
+.env.dev
+.env.development
+.env.prod
+.env.production
 ui/.env
 ui/.env.local
 grafana_ai/.env
@@ -11,22 +22,47 @@ grafana_ai/.env
 # Local credentials of the development stack (they also live in .env).
 LOGINS.txt
 
+# --- Private keys and signing material -------------------------------------
+# Nothing in this repository is signed, and no key belongs in version
+# control. Only public material (certificates, JWKS) may be committed.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.asc
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+.secrets/
+secrets/
+
 # --- Python -----------------------------------------------------------------
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.pytype/
+.tox/
+.nox/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .venv/
 venv/
 env/
+__pypackages__/
 *.egg-info/
+pip-wheel-metadata/
 build/
 dist/
 *.pid
+*.pid.lock
 
 # --- Node / frontend --------------------------------------------------------
 node_modules/
@@ -34,7 +70,14 @@ ui/node_modules/
 ui/dist/
 ui/coverage/
 .vite/
+ui/.vite/
+.npm/
+.yarn/
+.pnp.*
 *.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # --- Application data -------------------------------------------------------
 # The local RBAC database and the runtime state of the agent.
@@ -42,6 +85,24 @@ app_data/
 .adk/
 app/.adk/
 data/
+.cache/
+.ipynb_checkpoints/
+
+# Local SQLite databases and their sidecar files. The tracked provisioning
+# data (grafana/dashboards/*.json, dataset/*.csv) is deliberately not matched.
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- Generated audit exports and test output --------------------------------
+audit_export*
+*-audit-export.*
+rbac-test-evidence/
+test-results/
+playwright-report/
+junit*.xml
 
 # --- Editors and logs -------------------------------------------------------
 .DS_Store
@@ -51,3 +112,8 @@ Thumbs.db
 *.rej
 *.log
 server.log
+logs/
+.idea/
+.vscode/
+*.code-workspace
+.fleet/

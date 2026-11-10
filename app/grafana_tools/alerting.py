@@ -26,6 +26,13 @@ from typing import Any
 from .datasource import resolve_datasource
 from .prometheus import list_prometheus_label_names, list_prometheus_metric_metadata, list_prometheus_metric_names
 from .promql import build_promql, infer_unit, TARGET_LABEL_CANDIDATES
+from app.auth.policy import (
+    classify_impact,
+    requires_second_approver,
+    revalidate_proposal_for_execution,
+)
+from app.auth.principal import get_current_principal
+from app.auth.resource_scope import AuthorizationDenied
 from app.mcp.session import mcp_call, run_sync
 from .utils import logger
 
@@ -100,6 +107,40 @@ def _find_metric_in_schema(term: str, discovered: list[str]) -> str:
         f"No Prometheus metric matching '{term}' was found. "
         f"Use 'list metrics' or check your Prometheus instance for available metric names."
     )
+
+
+#: Natural-language comparison words the alert parser understands. (These maps
+#: were referenced by the parser but never defined, which made every alert
+#: proposal fail with a NameError before it could reach the policy module.)
+_CONDITION_ALIASES = {
+    "greater than or equal to": "gte",
+    "less than or equal to": "lte",
+    "greater than": "gt",
+    "less than": "lt",
+    "higher than": "gt",
+    "at least": "gte",
+    "at most": "lte",
+    "exceeds": "gt",
+    "above": "gt",
+    "over": "gt",
+    "below": "lt",
+    "under": "lt",
+    "equals": "eq",
+    "not equal": "ne",
+}
+
+#: Natural-language severity words the alert parser understands.
+_SEVERITY_ALIASES = {
+    "critical": "critical",
+    "fatal": "critical",
+    "sev1": "critical",
+    "warning": "warning",
+    "warn": "warning",
+    "sev2": "warning",
+    "info": "info",
+    "informational": "info",
+    "sev3": "info",
+}
 
 
 def parse_alert_request(request: str) -> dict[str, Any]:
@@ -245,6 +286,15 @@ def resolve_alert_intent(request: str) -> dict:
 # ---------------------------------------------------------------------------
 
 class AlertProposalStore:
+    """In-memory store for alert-rule proposals.
+
+    Mirrors :class:`app.grafana_tools.dashboard_writing.ProposalStore`: the
+    proposer is the authenticated principal and never changes, the impact
+    class is derived from the operation, and an approval records who
+    approved it. A destructive alert proposal cannot be approved by its own
+    proposer.
+    """
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._items: dict[str, dict] = {}
@@ -256,21 +306,74 @@ class AlertProposalStore:
         ).hexdigest()
 
     def create(self, ir: dict, proposal_id: str | None = None) -> dict:
+        # The proposer is taken from the authenticated server-side principal.
+        principal = get_current_principal()
+        proposer_id = principal.user_id if principal else None
+        proposer_role = (principal.role or "").lower() if principal else None
+        operation = str(ir.get("operation") or "alert_rule")
+        # Derived server-side: a payload that carries its own impact class
+        # cannot downgrade the operation.
+        impact_class = classify_impact(operation, ir)
         with self._lock:
             pid = proposal_id or secrets.token_urlsafe(12)
             previous = self._items.get(pid)
             version = (previous or {}).get("version", 0) + 1
+            if previous and previous.get("proposer_id"):
+                proposer_id = previous["proposer_id"]
+                proposer_role = previous.get("proposer_role")
             item = {
                 "proposalId": pid,
                 "version": version,
                 "status": "proposed",
                 "approvalToken": None,
                 "approvedAt": None,
+                "approvedBy": None,
+                "approverRole": None,
+                "rejectedBy": None,
+                "rejectedAt": None,
                 "ir": copy.deepcopy(ir),
+                "proposer_id": proposer_id,
+                "proposer_role": proposer_role,
+                "operation": operation,
+                "impact_class": impact_class,
+                "requires_second_approver": requires_second_approver(impact_class),
+                "target_resource": {
+                    "folderUid": ir.get("folderUID"),
+                    "environment": ir.get("environment"),
+                },
             }
             item["digest"] = self._digest(item["ir"])
             self._items[pid] = item
+            self._audit_lifecycle(previous, item)
             return copy.deepcopy(item)
+
+    def _audit_lifecycle(self, previous: dict | None, item: dict) -> None:
+        """Record the creation (or modification) of an alert proposal.
+
+        The audit lives in the store so that a proposal created through the
+        chat pipeline, the ADK agent or the MCP server produces exactly one
+        record.
+        """
+        from app.auth.audit import AuditEvent, record_event
+
+        record_event(
+            AuditEvent.ALERT_PROPOSED,
+            principal=get_current_principal(),
+            decision="ALLOW",
+            reason="alert_proposal_created" if previous is None else "alert_proposal_modified",
+            target_type="alert_proposal",
+            target_id=item.get("proposalId"),
+            proposal_id=item.get("proposalId"),
+            folder_uid=(item.get("target_resource") or {}).get("folderUid"),
+            environment=(item.get("target_resource") or {}).get("environment") or None,
+            impact_class=item.get("impact_class"),
+            details={
+                "version": item.get("version"),
+                "operation": item.get("operation"),
+                "proposerId": item.get("proposer_id"),
+                "title": (item.get("ir") or {}).get("title"),
+            },
+        )
 
     def get(self, pid: str) -> dict:
         with self._lock:
@@ -285,24 +388,61 @@ class AlertProposalStore:
     def modify(self, pid: str, ir: dict) -> dict:
         return self.create(ir, pid)
 
-    def approve(self, pid: str, version: int) -> dict:
+    def approve(
+        self,
+        pid: str,
+        version: int,
+        *,
+        approver_id: str | None = None,
+        approver_role: str | None = None,
+    ) -> dict:
         with self._lock:
             item = self._items.get(pid)
             if not item or item["version"] != version:
                 raise ValueError("Approval version is stale or alert proposal does not exist.")
+            if item["status"] == "rejected":
+                raise ValueError("A rejected alert proposal cannot be approved.")
+            if item["status"] == "approved":
+                raise ValueError("This alert proposal version has already been approved.")
+            if item.get("requires_second_approver"):
+                proposer_id = item.get("proposer_id")
+                if proposer_id and approver_id and str(proposer_id) == str(approver_id):
+                    raise PermissionError(
+                        "Policy Denied: Separation of duties requires a second, different approver."
+                    )
+                if proposer_id and not approver_id:
+                    raise PermissionError(
+                        "Policy Denied: an approver identity is required for a proposal "
+                        "that requires a second approver."
+                    )
             item["status"] = "approved"
             item["approvalToken"] = secrets.token_urlsafe(24)
             item["approvedAt"] = datetime.now(timezone.utc).isoformat()
+            item["approvedBy"] = approver_id
+            item["approverRole"] = approver_role
             return copy.deepcopy(item)
 
-    def reject(self, pid: str, version: int) -> dict:
+    def reject(
+        self,
+        pid: str,
+        version: int,
+        *,
+        approver_id: str | None = None,
+        approver_role: str | None = None,
+    ) -> dict:
         with self._lock:
             item = self._items.get(pid)
             if not item or item["version"] != version:
                 raise ValueError("Rejection version is stale or alert proposal does not exist.")
+            if item["status"] in ("executed", "built"):
+                raise ValueError("An executed alert proposal cannot be rejected.")
             item["status"] = "rejected"
             item["approvalToken"] = None
             item["approvedAt"] = None
+            item["approvedBy"] = None
+            item["rejectedBy"] = approver_id
+            item["rejectedAt"] = datetime.now(timezone.utc).isoformat()
+            item["rejectedByRole"] = approver_role
             return copy.deepcopy(item)
 
     def set_status(self, pid: str, status: str) -> dict:
@@ -490,11 +630,70 @@ async def _ensure_alert_folder(folder_name: str) -> str:
     return ""  # General folder
 
 
+async def _list_grafana_folders() -> list[dict]:
+    """The folders that exist in Grafana (empty list when unavailable)."""
+    try:
+        raw = await mcp_call(
+            "grafana_api_request",
+            {"method": "GET", "endpoint": "/api/folders"},
+            raw=True,
+            timeout=15.0,
+        )
+        folders = json.loads(raw) if raw else []
+        if isinstance(folders, list):
+            return [f for f in folders if isinstance(f, dict)]
+    except Exception as exc:
+        logger.warning(f"[alerting] Could not list folders: {exc}")
+    return []
+
+
+async def _resolve_alert_folder(principal, requested_folder_uid: str | None = None) -> str:
+    """Resolve the folder an alert rule may be created in.
+
+    The destination folder has to be one the caller is authorized to write
+    to -- alert rules are no longer parked in an arbitrary (possibly
+    unauthorized) folder. A folder is never created on the caller's behalf
+    unless the caller is an administrator.
+    """
+    from app.auth.resource_scope import folder_in_scope, resolve_destination_folder
+    from app.config import get_settings
+
+    settings = get_settings()
+    destination = resolve_destination_folder(
+        principal,
+        requested_folder_uid,
+        default_folder_uid=settings.grafana_default_folder_uid,
+    )
+
+    folders = await _list_grafana_folders()
+    known = {str(folder.get("uid", "")): folder for folder in folders}
+    if destination in known:
+        return destination
+
+    # The authorized destination does not exist in Grafana yet. The
+    # well-known alert folder is only usable when it already exists and the
+    # caller may write there.
+    for uid, folder in known.items():
+        if str(folder.get("title", "")).lower() == "infrastructure alerts":
+            if folder_in_scope(principal, uid):
+                return uid
+            break
+
+    if principal is not None and (principal.role or "").lower() == "admin":
+        # Administrators may create the alert folder.
+        return await _ensure_alert_folder("Infrastructure Alerts")
+
+    raise AuthorizationDenied(
+        f"The authorized alert folder '{destination}' does not exist in Grafana and no "
+        "authorized alternative is available."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public tools exposed to the agent
 # ---------------------------------------------------------------------------
 
-async def _propose_alert_rule_async(request: str) -> dict:
+async def _propose_alert_rule_async(request: str, principal=None, environment: str | None = None) -> dict:
     """Parse request, discover metric, build AlertRuleIR, store in ALERT_PROPOSALS."""
     logger.info(f"[alerting] propose_alert_rule request='{request[:120]}'")
     start = time.perf_counter()
@@ -552,8 +751,8 @@ async def _propose_alert_rule_async(request: str) -> dict:
         wildcard=True, metric_type=metric_type,
     )
 
-    # 7. Resolve / create alert folder
-    folder_uid = await _ensure_alert_folder("Infrastructure Alerts")
+    # 7. Resolve the alert folder -- it must be one the caller may write to
+    folder_uid = await _resolve_alert_folder(principal)
 
     # 8. Assemble AlertRuleIR
     ir = {
@@ -574,6 +773,7 @@ async def _propose_alert_rule_async(request: str) -> dict:
         "evaluationInterval": "1m",
         "folderUID": folder_uid,
         "folderTitle": "Infrastructure Alerts",
+        "environment": environment or "",
         "noDataState": "NoData",
         "execErrState": "Alerting",
         "extraLabels": {},
@@ -586,23 +786,42 @@ async def _propose_alert_rule_async(request: str) -> dict:
     return proposal
 
 
-def propose_alert_rule(request: str) -> dict:
+def propose_alert_rule(request: str, environment: str = "") -> dict:
     """Parse a natural-language alert request and return an AlertRuleIR proposal for human review.
 
     The proposal is stored in ALERT_PROPOSALS and must be explicitly approved before any
     Grafana write occurs. Returns a summary dict (not the raw IR) suitable for the LLM.
+
+    ``environment`` names the target environment. It is validated against the
+    deployment's environment catalogue and the caller's permitted environments
+    before any Prometheus or Grafana call is made.
     """
-    from app.auth.principal import get_current_principal
-    principal = get_current_principal()
-    if principal:
-        from app.auth.policy import authorize_alert_propose
-        dec = authorize_alert_propose(principal)
-        if not dec.allowed:
-            return {"status": "policy_denied", "error": dec.reason, "proposalId": None}
+    # The proposal is authorized against the authenticated caller. Without
+    # one the tool refuses: it never proposes an alert rule for an
+    # unidentified caller.
+    from app.auth.resource_scope import require_active_principal
+
+    principal = require_active_principal()
+    resolved_environment = ""
+    from app.auth.policy import authorize_alert_propose
+    dec = authorize_alert_propose(principal, environment=environment or None)
+    if not dec.allowed:
+        from app.auth.audit import record_tool_denial
+
+        record_tool_denial(dec.reason, target_id="propose_alert_rule")
+        return {"status": "policy_denied", "error": dec.reason, "proposalId": None}
+    from app.auth.environment import resolve_environment
+    try:
+        resolved_environment = resolve_environment(principal, environment or None) or ""
+    except Exception as exc:
+        from app.auth.audit import record_tool_denial
+
+        record_tool_denial(str(exc), target_id="propose_alert_rule")
+        return {"status": "policy_denied", "error": str(exc), "proposalId": None}
 
     tool_started = time.perf_counter()
     try:
-        proposal = run_sync(_propose_alert_rule_async(request))
+        proposal = run_sync(_propose_alert_rule_async(request, principal=principal, environment=resolved_environment))
         proposal = json.loads(json.dumps(proposal, allow_nan=False))
         ir = proposal.get("ir", {})
         unit = infer_unit(ir.get("metric", ""))
@@ -621,6 +840,7 @@ def propose_alert_rule(request: str) -> dict:
             "condition": f"{cond_human} {threshold_str}",
             "for_duration": ir.get("for_duration"),
             "severity": ir.get("severity"),
+            "environment": ir.get("environment") or resolved_environment,
             "target": ir.get("target") or "all instances",
             "folder": ir.get("folderTitle"),
             "ruleGroup": ir.get("ruleGroup"),
@@ -639,8 +859,13 @@ def propose_alert_rule(request: str) -> dict:
         return {"status": "error", "errors": [{"type": type(exc).__name__, "message": msg}]}
 
 
-async def _list_alert_rules_async() -> str:
-    """Fetch all alert rules from Grafana via the provisioning API."""
+async def _list_alert_rules_async(principal=None) -> str:
+    """Fetch alert rules from Grafana via the provisioning API.
+
+    When a principal is given, only rules that live in a folder the caller
+    may manage are returned -- an operator sees the rules in its own
+    folders, not every rule in the Grafana instance.
+    """
     logger.info("[alerting] list_alert_rules")
     raw = await mcp_call(
         "grafana_api_request",
@@ -656,6 +881,17 @@ async def _list_alert_rules_async() -> str:
         rules = data if isinstance(data, list) else data.get("rules", data.get("data", []))
     except json.JSONDecodeError:
         return f"Grafana returned unexpected response: {raw[:200]}"
+
+    if principal is not None:
+        from app.auth.resource_scope import folder_in_scope
+        visible = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            folder_uid = rule.get("folderUID", rule.get("folderUid", ""))
+            if folder_in_scope(principal, folder_uid if folder_uid is not None else ""):
+                visible.append(rule)
+        rules = visible
 
     if not rules:
         return "No alert rules are currently configured in Grafana."
@@ -691,9 +927,19 @@ async def _list_alert_rules_async() -> str:
     return "\n".join(lines).strip()
 
 
-def list_alert_rules() -> str:
-    """List all Grafana alert rules. Returns a human-readable summary."""
-    return run_sync(_list_alert_rules_async())
+def list_alert_rules(principal=None) -> str:
+    """List Grafana alert rules. Returns a human-readable summary.
+
+    When a principal is supplied, the listing is restricted to the folders
+    that principal is allowed to manage. When none is supplied the
+    authenticated caller is resolved from the request context -- the listing
+    is never produced for an unidentified caller.
+    """
+    if principal is None:
+        from app.auth.resource_scope import require_active_principal
+
+        principal = require_active_principal()
+    return run_sync(_list_alert_rules_async(principal))
 
 
 async def execute_approved_alert(proposal_id: str, version: int, approval_token: str) -> dict:
@@ -709,6 +955,37 @@ async def execute_approved_alert(proposal_id: str, version: int, approval_token:
 
     item = ALERT_PROPOSALS.verified(proposal_id, version, approval_token)
     ir = item["ir"]
+
+    # --- Revalidate immediately before the Grafana write --------------------
+    # The executor's *current* permissions are re-read from the role store:
+    # a role that was downgraded, a scope that was revoked or an account
+    # that was deactivated after the request started must stop the write.
+    from app.auth.refresh import current_principal
+
+    principal = current_principal(
+        get_current_principal(),
+        error=PermissionError,
+    )
+    from app.auth.policy import authorize_alert_execute
+    decision = authorize_alert_execute(principal, environment=ir.get("environment") or None)
+    if not decision.allowed:
+        raise PermissionError(f"RBAC policy denied: {decision.reason}")
+
+    # The approval itself is re-validated: the proposal must still be
+    # approved, its impact classification must still match its content, and a
+    # destructive proposal must have been approved by somebody other than its
+    # proposer.
+    reval = revalidate_proposal_for_execution(principal, item, environment=ir.get("environment") or None)
+    if not reval.allowed:
+        raise PermissionError(f"RBAC policy denied: {reval.reason}")
+
+    from app.auth.resource_scope import folder_in_scope
+    folder_uid = ir.get("folderUID")
+    if folder_uid is not None and not folder_in_scope(principal, folder_uid):
+        raise PermissionError(
+            f"RBAC policy denied: alert folder '{folder_uid}' is outside your permitted folders."
+        )
+
     ALERT_PROPOSALS.set_status(proposal_id, "executing")
 
     try:
@@ -749,6 +1026,27 @@ async def execute_approved_alert(proposal_id: str, version: int, approval_token:
         parsed = result_raw
 
     logger.info(f"[alerting] Alert rule created/updated for proposal={proposal_id}")
+
+    from app.auth.audit import AuditEvent, record_event
+
+    record_event(
+        AuditEvent.ALERT_EXECUTED,
+        principal=principal,
+        decision="ALLOW",
+        reason="approved_alert_execution",
+        target_type="alert_rule",
+        target_id=str(ir.get("uid") or proposal_id),
+        proposal_id=proposal_id,
+        folder_uid=ir.get("folderUID"),
+        environment=ir.get("environment") or None,
+        impact_class=item.get("impact_class"),
+        details={
+            "title": ir.get("title"),
+            "method": method,
+            "endpoint": endpoint,
+        },
+    )
+
     return {
         "proposal": final,
         "alertPayload": alert_json,

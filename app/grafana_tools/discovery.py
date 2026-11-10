@@ -72,6 +72,7 @@ async def ensure_panel_index() -> list[dict]:
                         "dashboard_uid": dash["uid"],
                         "dashboard_title": dash["title"],
                         "dashboard_tags": dash.get("tags", []),
+                        "dashboard_folder_uid": dash.get("folderUid"),
                         "panel_title": panel_title,
                         "panel_description": panel_desc,
                         "panel_type": panel_type,
@@ -87,3 +88,25 @@ async def ensure_panel_index() -> list[dict]:
             f"across {len(dashboards)} dashboard(s) in {elapsed:.2f}s"
         )
         return index
+
+
+async def panel_index_for(principal) -> list[dict]:
+    """The panel index, restricted to the dashboards the caller may see.
+
+    The index itself is a global cache of Grafana metadata; what a caller is
+    allowed to learn from it is decided here, per request, against the same
+    resource scope that governs dashboard reads.
+    """
+    from app.auth.resource_scope import dashboard_in_scope
+
+    index = await ensure_panel_index()
+    if principal is None:
+        return []
+    return [
+        entry for entry in index
+        if dashboard_in_scope(
+            principal,
+            entry.get("dashboard_uid"),
+            entry.get("dashboard_folder_uid"),
+        )
+    ]

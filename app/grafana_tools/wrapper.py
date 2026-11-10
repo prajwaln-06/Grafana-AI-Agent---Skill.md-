@@ -4,13 +4,22 @@ import re
 from typing import Any
 
 from .utils import logger, cap, normalize_to_text
+from app.auth.audit import record_tool_denial
 from app.mcp.session import run_sync
+from app.auth.resource_scope import (
+    AuthorizationDenied,
+    authorize_dashboard_access,
+    current_principal,
+    filter_dashboards_in_scope,
+    require_active_principal,
+    require_principal_context,
+)
 from .dashboard import (
     fetch_dashboard_list,
     search_dashboards_mcp,
     get_dashboard_summary_mcp,
 )
-from .discovery import ensure_panel_index
+from .discovery import panel_index_for
 from .datasource import resolve_datasource, datasources_summary, _SUPPORTED_DS_TYPES
 from .prometheus import execute_prometheus, format_prometheus_result
 from .opensearch import execute_opensearch, normalize_opensearch_result
@@ -33,20 +42,22 @@ def get_raw_json():
 
 
 def list_dashboards() -> str:
-    """Return every Grafana dashboard as a numbered human-readable list."""
+    """Return every Grafana dashboard the caller may see, as a numbered list."""
     return run_sync(_list_dashboards_async())
 
 async def _list_dashboards_async() -> str:
     logger.info("Wrapper: list_dashboards")
     start = time.perf_counter()
 
+    principal = require_active_principal()
     dashboards = await fetch_dashboard_list()
+    dashboards = await filter_dashboards_in_scope(principal, dashboards)
 
     if not dashboards:
         return (
-            "No dashboards were found in this Grafana instance.\n"
-            "Check that GRAFANA_URL and GRAFANA_SERVICE_ACCOUNT_TOKEN are correct "
-            "and that at least one dashboard exists."
+            "No dashboards are available to you in this Grafana instance.\n"
+            "You may only see dashboards that sit in your assigned folders, "
+            "or that are assigned to you directly."
         )
 
     lines = [f"Available dashboards ({len(dashboards)} total):\n"]
@@ -80,6 +91,7 @@ async def _search_dashboards_async(query: str) -> str:
             "To see all dashboards, call list_dashboards() instead."
         )
 
+    principal = require_active_principal()
     result_str = await search_dashboards_mcp(query)
 
     if result_str.startswith("Error"):
@@ -88,6 +100,12 @@ async def _search_dashboards_async(query: str) -> str:
     try:
         data = json.loads(result_str)
         dashboards = data.get("dashboards", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        if not dashboards:
+            return f"No dashboards found matching '{query}'."
+        # Search results are filtered against the caller's scope exactly like
+        # the full listing: an out-of-scope dashboard must not even be visible
+        # as a search hit.
+        dashboards = await filter_dashboards_in_scope(principal, dashboards)
         if not dashboards:
             return f"No dashboards found matching '{query}'."
         lines = [f"Found {len(dashboards)} dashboard(s) matching '{query}':\n"]
@@ -103,11 +121,17 @@ async def _search_dashboards_async(query: str) -> str:
         elapsed = time.perf_counter() - start
         logger.info(f"Wrapper search_dashboards done in {elapsed:.3f}s — {len(dashboards)} dashboard(s)")
         return cap("\n".join(lines).strip())
-    except Exception:
-        normalized = normalize_to_text(result_str)
+    except AuthorizationDenied:
+        raise
+    except Exception as exc:
+        # The raw search response lists *every* matching dashboard, including
+        # the ones outside the caller's scope. It must never be returned
+        # unfiltered, so a failure in the scope filter is reported as an
+        # error instead of falling back to the unfiltered payload.
+        logger.warning("Could not scope the dashboard search results: %s", exc)
         elapsed = time.perf_counter() - start
-        logger.info(f"Wrapper search_dashboards done in {elapsed:.3f}s")
-        return cap(normalized)
+        logger.info(f"Wrapper search_dashboards failed in {elapsed:.3f}s")
+        return "Error: The dashboard search results could not be authorized for your account."
 
 
 def get_dashboard_panels(uid: str) -> str:
@@ -119,7 +143,12 @@ async def _get_dashboard_panels_async(uid: str) -> str:
     start = time.perf_counter()
 
     if not uid or not uid.strip():
-        return "Error: Dashboard UID cannot be empty."
+        raise AuthorizationDenied("A dashboard UID is required to inspect its panels.")
+
+    principal = require_active_principal()
+    decision = await authorize_dashboard_access(principal, uid)
+    if not decision.allowed:
+        raise AuthorizationDenied(decision.reason)
 
     result_str = await get_dashboard_summary_mcp(uid)
 
@@ -226,23 +255,32 @@ def query_prometheus_metric(
     expr: str = "",
     lookback: str = "1h",
     step_seconds: int = 60,
+    environment: str = "",
 ) -> str:
-    """Query live metrics. Use metric= for natural language or expr= for explicit PromQL."""
-    return run_sync(_query_prometheus_metric_async(metric, expr, lookback, step_seconds))
+    """Query live metrics. Use metric= for natural language or expr= for explicit PromQL.
+
+    ``environment`` names the target environment; it is validated against the
+    deployment's environment catalogue and the caller's permitted environments
+    before any PromQL is sent.
+    """
+    return run_sync(_query_prometheus_metric_async(metric, expr, lookback, step_seconds, environment))
 
 async def _query_prometheus_metric_async(
     metric: str = "",
     expr: str = "",
     lookback: str = "1h",
     step_seconds: int = 60,
+    environment: str = "",
 ) -> str:
-    from app.auth.principal import get_current_principal
-    principal = get_current_principal()
-    if principal:
-        from app.auth.policy import authorize_promql
-        dec = authorize_promql(principal, is_custom=bool(expr), expr=expr or metric)
-        if not dec.allowed:
-            return f"Error: RBAC Access Denied - {dec.reason}"
+    # A query is authorized against the authenticated caller. Without one the
+    # wrapper refuses: it never falls back to an anonymous or unrestricted
+    # identity just because the context was empty.
+    principal = require_active_principal()
+    from app.auth.policy import authorize_promql
+    dec = authorize_promql(principal, is_custom=bool(expr), expr=expr or metric, environment=environment or None)
+    if not dec.allowed:
+        record_tool_denial(dec.reason, target_id="query_prometheus_metric")
+        return f"Error: RBAC Access Denied - {dec.reason}"
 
     logger.info(f"Wrapper: query_prometheus_metric metric='{metric}' expr='{expr}'")
     start = time.perf_counter()
@@ -266,7 +304,9 @@ async def _query_prometheus_metric_async(
         keyword = str(metric).strip()
         logger.info(f"  Route: dynamic discovery for '{keyword}'")
 
-        index = await ensure_panel_index()
+        # The panel index is filtered to the caller's scope: a dashboard the
+        # caller may not read must not be discoverable through it either.
+        index = await panel_index_for(principal)
         matched_entry = None
         lower_kw = keyword.lower()
         if index:
@@ -342,9 +382,10 @@ def query_opensearch_logs(
     index: str = "consolelog-*,heartbeat,syslog-*",
     lookback: str = "1h",
     limit: int = 20,
+    environment: str = "",
 ) -> dict:
     """Query OpenSearch documents through Grafana MCP and return normalized documents."""
-    return run_sync(_query_opensearch_logs_async(query, service, host, severity, index, lookback, limit))
+    return run_sync(_query_opensearch_logs_async(query, service, host, severity, index, lookback, limit, environment))
 
 async def _query_opensearch_logs_async(
     query: str = "*",
@@ -354,9 +395,19 @@ async def _query_opensearch_logs_async(
     index: str = "consolelog-*,heartbeat,syslog-*",
     lookback: str = "1h",
     limit: int = 20,
+    environment: str = "",
 ) -> dict:
     logger.info(f"Wrapper: query_opensearch_logs query='{query}' index='{index}' lookback='{lookback}' limit={limit}")
     start = time.perf_counter()
+
+    # Searching the log store is a query operation: it is subject to the
+    # same role and environment rules as a Prometheus query.
+    principal = require_active_principal()
+    from app.auth.policy import authorize_promql
+    dec = authorize_promql(principal, is_custom=True, expr=query, environment=environment or None)
+    if not dec.allowed:
+        record_tool_denial(dec.reason, target_id="query_opensearch_logs")
+        return {"status": "error", "error": f"RBAC Access Denied - {dec.reason}"}
 
     if not re.match(r'^\d+[smhdw]$', lookback):
         return {"status": "error", "error": f"Invalid lookback format '{lookback}'. Use values such as 15m, 1h, or 7d."}
@@ -431,7 +482,12 @@ query_logs = query_opensearch_logs
 
 def list_alert_rules() -> str:
     """List all Grafana alert rules. Returns a human-readable summary of every alert rule
-    currently configured in this Grafana instance."""
+    currently configured in this Grafana instance.
+
+    The listing is restricted to the folders the authenticated caller may
+    manage -- an operator sees the rules in its own folders, not every rule
+    in the Grafana instance.
+    """
     return _list_alert_rules_impl()
 
 

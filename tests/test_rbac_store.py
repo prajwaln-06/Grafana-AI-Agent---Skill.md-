@@ -30,7 +30,7 @@ def test_db_session():
 
 
 def test_seed_dummy_data(test_db_session):
-    """Confirm seeding creates the 6 dummy users representing all roles and statuses."""
+    """Confirm seeding creates the 8 dummy users representing all roles and statuses."""
     # Seed directly into test session
     import app.storage.database as db_mod
     original_factory = db_mod._SessionFactory
@@ -41,7 +41,7 @@ def test_seed_dummy_data(test_db_session):
         assert seeded is True
 
         users = UserStore.list_users(test_db_session)
-        assert len(users) == 6
+        assert len(users) == 8
 
         # Check Admin
         admin = UserStore.get_user_by_id(test_db_session, "usr_admin_01")
@@ -64,6 +64,20 @@ def test_seed_dummy_data(test_db_session):
 
         deact = UserStore.get_user_by_id(test_db_session, "usr_deact_01")
         assert deact.status == "deactivated"
+
+        # Check the pending test accounts (LOGINS.txt #6 and #7)
+        for user_id, username, email in (
+            ("usr_test_maurya_01", "maurya", "maurya@example.com"),
+            ("usr_test_jaidev_01", "jaidev", "jaidev@example.com"),
+        ):
+            tester = UserStore.get_user_by_id(test_db_session, user_id)
+            assert tester is not None
+            assert tester.username == username
+            assert tester.email == email
+            assert tester.status == "pending"
+            assert tester.role is None
+            assert tester.scopes.allowed_folder_uids == []
+            assert tester.scopes.allowed_environments == []
 
         # Check Audit log
         events = AuditStore.list_events(test_db_session)

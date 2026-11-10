@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
 from app.auth.oidc import (
     OidcClient,
@@ -108,6 +108,7 @@ def _extract_caller_credentials(
             ) from exc
         except OidcProtocolError as exc:
             logger.debug("Rejected Bearer token: %s", exc)
+            _audit_authentication_failure(request, f"invalid bearer token: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Invalid bearer token: {exc}",
@@ -121,6 +122,7 @@ def _extract_caller_credentials(
         payload = session.decode(raw_cookie)
     except SessionError as exc:
         logger.debug("Rejected session cookie on %s: %s", request.url.path, exc)
+        _audit_authentication_failure(request, f"invalid or expired session cookie: {exc}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required: the session is missing or has expired.",
@@ -130,6 +132,7 @@ def _extract_caller_credentials(
     issuer = str(payload.get("iss") or "")
     subject = str(payload.get("sub") or "")
     if not subject:
+        _audit_authentication_failure(request, "session cookie carries no identity")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required: the session carries no identity.",
@@ -169,7 +172,6 @@ async def _resolve_principal_from_store(
         )
 
     issuer, subject, profile = _extract_caller_credentials(request, settings)
-
     with get_db_session() as db:
         user = UserStore.get_user_by_identity(db, issuer, subject)
         if user is None:
@@ -213,11 +215,13 @@ async def _resolve_principal_from_store(
     # Status check enforcement (Section 4.4 & Section 5.2)
     if not allow_inactive:
         if principal.status == "pending":
+            _audit_authentication_failure(request, "account pending activation")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account pending activation by an administrator.",
             )
         if principal.status == "deactivated":
+            _audit_authentication_failure(request, "account deactivated")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account deactivated.",
@@ -229,6 +233,70 @@ async def _resolve_principal_from_store(
 async def require_principal(request: Request) -> Principal:
     """Standard FastAPI dependency: requires an authenticated and active user."""
     return await _resolve_principal_from_store(request, allow_inactive=False)
+
+
+async def require_admin_principal(
+    request: Request,
+    principal: Principal = Depends(require_principal),
+) -> Principal:
+    """Standard FastAPI dependency: requires an authenticated, active administrator.
+
+    Unauthenticated callers are rejected by ``require_principal`` with HTTP
+    401; an authenticated caller without the administrator role is rejected
+    here with HTTP 403. The check lives on the server, so a direct HTTP call
+    cannot reach an administrative endpoint by hiding a button in the UI.
+    """
+    if principal is None or (principal.role or "").lower() != "admin":
+        logger.warning(
+            "Rejected administrative request to %s from user %s (role=%s)",
+            request.url.path,
+            getattr(principal, "user_id", None),
+            getattr(principal, "role", None),
+        )
+        _audit_admin_denied(request, principal)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator role required.",
+        )
+    return principal
+
+
+def _audit_admin_denied(request: Request, principal: Principal | None) -> None:
+    """Record a refused administrative request.
+
+    The audit write is best-effort and happens *after* the decision: a
+    failure to persist the record can never turn the refusal into an allow.
+    """
+    try:
+        from app.auth.audit import AuditEvent, record_denial
+
+        record_denial(
+            AuditEvent.ADMIN_ACCESS_DENIED,
+            principal=principal,
+            reason="administrator role required",
+            target_type="api_route",
+            target_id=request.url.path,
+            details={"method": request.method},
+        )
+    except Exception as exc:  # pragma: no cover - auditing must not break the refusal
+        logger.warning("Could not write the administrative denial audit record: %s", exc)
+
+
+def _audit_authentication_failure(request: Request, reason: str) -> None:
+    """Record a failed authentication attempt."""
+    try:
+        from app.auth.audit import AuditEvent, record_denial
+
+        record_denial(
+            AuditEvent.AUTHENTICATION_FAILED,
+            principal=None,
+            reason=reason,
+            target_type="api_route",
+            target_id=request.url.path,
+            details={"method": request.method},
+        )
+    except Exception as exc:  # pragma: no cover - auditing must not break the refusal
+        logger.warning("Could not write the authentication failure audit record: %s", exc)
 
 
 async def resolve_principal_status(request: Request) -> Principal:
@@ -248,6 +316,7 @@ __all__ = [
     "PRINCIPAL_STATE_KEY",
     "build_session",
     "current_principal",
+    "require_admin_principal",
     "require_principal",
     "resolve_principal_status",
     "validate_oidc_settings",

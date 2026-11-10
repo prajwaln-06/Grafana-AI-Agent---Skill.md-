@@ -10,9 +10,10 @@ scope lists.
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 CURRENT_PRINCIPAL: contextvars.ContextVar[Principal | None] = contextvars.ContextVar(
     "current_principal", default=None
@@ -27,6 +28,26 @@ def get_current_principal() -> Principal | None:
 def set_current_principal(principal: Principal | None) -> contextvars.Token:
     """Bind a principal to the current context/request."""
     return CURRENT_PRINCIPAL.set(principal)
+
+
+@contextlib.contextmanager
+def principal_scope(principal: Principal | None) -> Iterator[Principal | None]:
+    """Bind a principal for the duration of a block, then restore the previous one.
+
+    This is the invocation-scoped binding the agent and the tool wrappers
+    use. The principal is bound to the *current context* only -- it is never
+    written to a module-level variable -- so two concurrent requests cannot
+    see each other's identity, and the previous binding is restored when the
+    block ends (including when it ends with an exception).
+    """
+    token = CURRENT_PRINCIPAL.set(principal)
+    try:
+        yield principal
+    finally:
+        try:
+            CURRENT_PRINCIPAL.reset(token)
+        except ValueError:  # pragma: no cover - the context was replaced meanwhile
+            CURRENT_PRINCIPAL.set(principal)
 
 
 @dataclass(frozen=True)
@@ -51,7 +72,15 @@ class Principal:
     email: str | None = None
     name: str | None = None
     app: str | None = None
+    development_mode: bool = False
     claims: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    #: True when this principal was resolved from the User and Role Store
+    #: and can therefore be re-resolved from it. It is set by
+    #: :meth:`from_user_model` -- the only constructor the application uses
+    #: for an authenticated caller -- and it is what makes the principal
+    #: refreshable against the store (see :mod:`app.auth.refresh`).
+    store_backed: bool = False
 
     @property
     def identity_key(self) -> tuple[str, str]:
@@ -60,7 +89,7 @@ class Principal:
 
     @property
     def is_active(self) -> bool:
-        return self.authenticated and self.status == "active"
+        return self.status == "active" and (self.authenticated or self.development_mode)
 
     @property
     def display_name(self) -> str | None:
@@ -74,12 +103,13 @@ class Principal:
             issuer="",
             subject="anonymous",
             authenticated=False,
-            status="active",
+            status="active",  # Unrestricted in development-only mode
             role="admin",  # Unrestricted in development-only mode
             allowed_folder_uids=frozenset({"*"}),
             allowed_environments=frozenset({"staging", "production"}),
             username="developer",
             name="Local Developer",
+            development_mode=True,
         )
 
     @classmethod
@@ -157,6 +187,10 @@ class Principal:
             name=getattr(user, "display_name", None),
             app=app,
             claims=claims or {},
+            # A principal that came from the store can be re-resolved from it,
+            # so its status, role and scopes can be refreshed after an
+            # administrator changes them.
+            store_backed=True,
         )
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -198,5 +232,6 @@ __all__ = [
     "CURRENT_PRINCIPAL",
     "Principal",
     "get_current_principal",
+    "principal_scope",
     "set_current_principal",
 ]

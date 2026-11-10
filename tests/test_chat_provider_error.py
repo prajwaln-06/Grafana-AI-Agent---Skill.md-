@@ -75,7 +75,7 @@ def client():
         yield test_client
 
 
-def test_chat_reports_a_provider_misconfiguration_as_503(client):
+def test_chat_reports_a_provider_misconfiguration_as_503(client, api_principal):
     """The pipeline's misconfiguration must not be downgraded into 'the ADK
     fallback failed too'."""
     with mock.patch(
@@ -93,7 +93,7 @@ def test_chat_reports_a_provider_misconfiguration_as_503(client):
     assert "GEMINI_API_KEY" in detail
 
 
-def test_chat_reports_an_adk_provider_misconfiguration_as_503(client):
+def test_chat_reports_an_adk_provider_misconfiguration_as_503(client, api_principal):
     """Same for the conversational fallback path."""
     with mock.patch(
         "app.pipeline.run_pipeline",

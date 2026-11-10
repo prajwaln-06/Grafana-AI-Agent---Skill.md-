@@ -12,6 +12,13 @@ class QueryRequest(BaseModel):
                     "clarification request (see `clarification` in a previous "
                     "response). Omit for a fresh question.",
     )
+    environment: str | None = Field(
+        default=None,
+        description="The target environment. It is validated against the "
+                    "deployment's environment catalogue and the caller's "
+                    "permitted environments before any query is executed; "
+                    "omitting it uses the deployment default.",
+    )
 
 
 class QueryResponse(BaseModel):

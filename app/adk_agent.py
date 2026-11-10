@@ -1,7 +1,12 @@
+import asyncio
+import contextvars
+import functools
 import logging
 import os
 import secrets
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import aclosing
 from typing import Any, Optional
 
 from google.adk.agents import LlmAgent
@@ -9,6 +14,10 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
 
+from app.auth.audit import AuditEvent, record_denial
+from app.auth.principal import Principal, get_current_principal, principal_scope
+from app.auth.refresh import authorization_operation
+from app.auth.resource_scope import AuthorizationDenied
 from app.config import get_settings
 from app.grafana_tools.wrapper import (
     clear_raw_json,
@@ -33,6 +42,55 @@ from app.grafana_tools.wrapper import (
 
 logger = logging.getLogger("grafana_ai.adk_agent")
 
+
+def scope_guarded(func):
+    """Wrap an agent tool so a scope denial becomes a safe tool result.
+
+    The tool boundary must never leak an unauthorized resource, but the
+    authorization decision itself stays on the server: the tool reports the
+    denial to the model instead of returning any dashboard content.
+
+    The denial is also written to the audit log, with the *authenticated*
+    principal as the actor -- never with anything the model supplied.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Each tool call is one protected operation: the authorization data
+        # is established once for it and never outlives it, so a revocation
+        # that lands between two tool calls is always seen.
+        with authorization_operation():
+            try:
+                return func(*args, **kwargs)
+            except AuthorizationDenied as exc:
+                logger.info("Tool %s denied by scope: %s", func.__name__, exc.reason)
+                _audit_tool_denial(func.__name__, exc)
+                status = "401" if getattr(exc, "status_code", 403) == 401 else "403"
+                return (
+                    f"Error: RBAC Access Denied ({status}) - {exc.reason}"
+                )
+
+    return wrapper
+
+
+def _audit_tool_denial(tool_name: str, exc: AuthorizationDenied) -> None:
+    """Record a denied agent tool call.
+
+    Auditing must never break the refusal, so a failure to persist the
+    record is logged and the denial still stands.
+    """
+    try:
+        record_denial(
+            AuditEvent.SCOPE_VIOLATION,
+            principal=get_current_principal(),
+            reason=exc.reason,
+            target_type="adk_tool",
+            target_id=tool_name,
+            details={"statusCode": getattr(exc, "status_code", 403)},
+        )
+    except Exception as audit_exc:  # pragma: no cover - auditing must not break the refusal
+        logger.warning("Could not write the tool-denial audit record: %s", audit_exc)
+
 AGENT_INSTRUCTION = """\
 You are a Grafana Observability Assistant.
 Retrieve infrastructure data using your tools. Summarize results in natural language.
@@ -42,6 +100,14 @@ For any request about live metric values, current usage, or monitoring data:
 -> Call query_prometheus_metric(metric="<describe what the user wants>").
 -> The wrapper automatically discovers the correct query from Grafana dashboards and Prometheus.
 -> Never generate PromQL yourself. Never guess metric names.
+
+ENVIRONMENT
+Every metric query, dashboard operation and alert rule belongs to an environment.
+-> Pass environment="<environment>" to query_prometheus_metric and propose_alert_rule
+   whenever the user names one.
+-> The environment is validated on the server against the caller's permitted
+   environments. Never invent an environment name and never retry with a
+   different one after a denial -- report the denial instead.
 
 EXPLICIT PROMQL
 If the user explicitly provides a PromQL expression:
@@ -125,6 +191,97 @@ _session_service = InMemorySessionService()
 _runner_instance: Optional[Runner] = None
 
 
+def _run_with_preserved_context(factory):
+    """Run ``factory()`` in an event loop whose context is a copy of the caller's.
+
+    The agent turn crosses two boundaries on its way to the tool wrappers:
+    the event loop that drives the agent, and the MCP session bridge's
+    background loop. Neither inherits the caller's context variables on its
+    own, so the context is copied explicitly and the copy is handed to the
+    task that runs the turn.
+
+    Running the turn through ``Runner.run_async()`` (rather than through
+    ADK's synchronous ``Runner.run()`` helper) makes that binding the
+    application's own rather than a side effect of how ADK happens to
+    spawn its worker thread -- a security-critical property should not
+    depend on a library internal. The runner, the agent and the events are
+    unchanged; ADK's own documentation recommends ``run_async`` for
+    production use.
+    """
+    context = contextvars.copy_context()
+
+    def _call() -> Any:
+        return asyncio.run(factory())
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop is running in this thread: run the turn here, in the copy.
+        return context.run(_call)
+
+    # A loop is already running in this thread (the FastAPI request handler),
+    # and a second loop cannot be started here. The turn therefore runs on a
+    # worker thread whose context is the explicit copy taken above.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="adk-turn") as pool:
+        return pool.submit(context.run, _call).result()
+
+
+async def _run_agent_turn(
+    runner: Runner,
+    *,
+    user_id: str,
+    session_id: str,
+    message: genai_types.Content,
+) -> dict[str, Any]:
+    """Run one agent turn and collect what the caller needs from it.
+
+    The turn is driven through ``Runner.run_async()`` so that it executes
+    inside the invocation's context -- the context the authenticated
+    Principal is bound to -- instead of on a thread whose context the
+    application does not control.
+    """
+    outcome: dict[str, Any] = {
+        "final_text": "",
+        "proposal_id": None,
+        "tool_outcome": None,
+        "first_tool_call_at": None,
+        "tool_response_at": None,
+        "final_response_at": None,
+    }
+
+    async with aclosing(
+        runner.run_async(user_id=user_id, session_id=session_id, new_message=message)
+    ) as events:
+        async for event in events:
+            author = getattr(event, "author", "?")
+            for fc in event.get_function_calls():
+                if outcome["first_tool_call_at"] is None:
+                    outcome["first_tool_call_at"] = time.perf_counter()
+                logger.info("LLM tool call -> %s(%s)", fc.name, list((fc.args or {}).keys()))
+
+            for fr in event.get_function_responses():
+                logger.info("Tool response <- %s", fr.name)
+                if fr.name == "propose_dashboard" and isinstance(fr.response, dict):
+                    outcome["tool_response_at"] = time.perf_counter()
+                    outcome["tool_outcome"] = fr.response
+                    pid = fr.response.get("proposalId")
+                    if pid:
+                        logger.info("propose_dashboard returned proposalId=%s", pid)
+                        outcome["proposal_id"] = pid
+
+            if event.is_final_response() and event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        outcome["final_response_at"] = time.perf_counter()
+                        outcome["final_text"] = part.text
+                        logger.info("Agent final response (author=%s): %s", author, part.text[:200])
+
+            if outcome["proposal_id"] is not None:
+                break
+
+    return outcome
+
+
 def get_adk_agent() -> LlmAgent:
     global _agent_instance
     if _agent_instance is None:
@@ -160,16 +317,21 @@ def get_adk_agent() -> LlmAgent:
             description="AI-powered Grafana observability assistant with MCP tools and proposal review.",
             instruction=AGENT_INSTRUCTION,
             tools=[
-                list_dashboards,
-                search_dashboards,
-                get_dashboard_panels,
-                query_prometheus_metric,
-                query_opensearch_logs,
-                propose_dashboard,
-                resolve_dashboard_intent,
-                list_alert_rules,
-                propose_alert_rule,
-                resolve_alert_intent,
+                # Every tool the agent may call is an application-owned
+                # wrapper. The upstream Grafana MCP tools are never exposed
+                # to the agent directly: the wrapper is the security
+                # boundary that authorizes the caller before it forwards
+                # anything to Grafana.
+                scope_guarded(list_dashboards),
+                scope_guarded(search_dashboards),
+                scope_guarded(get_dashboard_panels),
+                scope_guarded(query_prometheus_metric),
+                scope_guarded(query_opensearch_logs),
+                scope_guarded(propose_dashboard),
+                scope_guarded(resolve_dashboard_intent),
+                scope_guarded(list_alert_rules),
+                scope_guarded(propose_alert_rule),
+                scope_guarded(resolve_alert_intent),
             ],
         )
     return _agent_instance
@@ -194,8 +356,17 @@ def run_adk_agent(
     conversation_id: str,
     target: Optional[str] = None,
     time_range: Optional[str] = None,
+    *,
+    principal: Optional[Principal] = None,
 ) -> dict:
-    """Runs a single conversation turn using ADK LlmAgent and Runner."""
+    """Runs a single conversation turn using ADK LlmAgent and Runner.
+
+    ``principal`` is the authenticated caller resolved by the request
+    dependency. It is bound to the turn's execution context for the duration
+    of the invocation and removed again afterwards, so every wrapper the
+    agent calls authorizes against the real caller and no identity survives
+    the turn.
+    """
     clear_raw_json()
 
     user_text = request
@@ -213,6 +384,13 @@ def run_adk_agent(
         parts=[genai_types.Part(text=user_text)],
     )
 
+    # The caller's identity is taken from the explicit argument when the
+    # caller resolved one, and from the request context otherwise. It is
+    # never taken from the request text, the model output or a tool argument.
+    caller = principal if principal is not None else get_current_principal()
+    if caller is None:
+        logger.warning("Refusing an agent turn without an authenticated identity.")
+
     logger.info("ADK Runner start | session=%s | request=%r", session_id, user_text[:120])
 
     proposal_id: Optional[str] = None
@@ -223,40 +401,27 @@ def run_adk_agent(
     tool_response_at: Optional[float] = None
     final_response_at: Optional[float] = None
 
-    try:
-        for event in runner.run(
-            user_id=user_id,
-            session_id=session_id,
-            new_message=message,
-        ):
-            author = getattr(event, "author", "?")
-            for fc in event.get_function_calls():
-                if first_tool_call_at is None:
-                    first_tool_call_at = time.perf_counter()
-                logger.info("LLM tool call -> %s(%s)", fc.name, list((fc.args or {}).keys()))
-
-            for fr in event.get_function_responses():
-                logger.info("Tool response <- %s", fr.name)
-                if fr.name == "propose_dashboard" and isinstance(fr.response, dict):
-                    tool_response_at = time.perf_counter()
-                    tool_outcome = fr.response
-                    pid = fr.response.get("proposalId")
-                    if pid:
-                        logger.info("propose_dashboard returned proposalId=%s", pid)
-                        proposal_id = pid
-
-            if event.is_final_response() and event.content and event.content.parts:
-                for part in event.content.parts:
-                    if part.text:
-                        final_response_at = time.perf_counter()
-                        final_text = part.text
-                        logger.info("Agent final response (author=%s): %s", author, part.text[:200])
-
-            if proposal_id is not None:
-                break
-    except Exception as e:
-        logger.error("Error during ADK agent execution: %s", e, exc_info=True)
-        final_text = f"Encountered error while running agent: {str(e)}"
+    # The Principal is bound to the invocation's context for exactly as long
+    # as the turn runs, and unbound again when it ends.
+    with principal_scope(caller):
+        try:
+            outcome = _run_with_preserved_context(
+                lambda: _run_agent_turn(
+                    runner,
+                    user_id=user_id,
+                    session_id=session_id,
+                    message=message,
+                )
+            )
+            final_text = outcome["final_text"]
+            proposal_id = outcome["proposal_id"]
+            tool_outcome = outcome["tool_outcome"]
+            first_tool_call_at = outcome["first_tool_call_at"]
+            tool_response_at = outcome["tool_response_at"]
+            final_response_at = outcome["final_response_at"]
+        except Exception as e:
+            logger.error("Error during ADK agent execution: %s", e, exc_info=True)
+            final_text = f"Encountered error while running agent: {str(e)}"
 
     turn_finished = time.perf_counter()
     timings = {

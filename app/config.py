@@ -116,6 +116,23 @@ class Settings(BaseSettings):
     )
     grafana_timeout_seconds: float = Field(default=15.0)
 
+    # --- RBAC environment dimension ---
+    environments: list[str] = Field(
+        default_factory=list,
+        description="The environments this deployment recognises, as a JSON list "
+                    "(e.g. [\"staging\", \"production\"]). This is a server-side "
+                    "catalogue only: it says which environment names exist, never "
+                    "which ones a particular user may use. Per-user environment "
+                    "permissions live in the User & Role Store "
+                    "(allowed_environments) and are always the deciding factor.",
+    )
+    default_environment: str | None = Field(
+        default=None,
+        description="The environment used when a request does not name one. Must "
+                    "be one of the environments the calling user is permitted to "
+                    "use, otherwise the request is rejected.",
+    )
+
     # --- Response safety limits ---
     max_points_per_series: int = Field(default=11_000,
                                         description="Prometheus's own default sample cap; also applied "

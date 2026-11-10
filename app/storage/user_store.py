@@ -133,8 +133,17 @@ class UserStore:
         role: str | None = None,
         scopes: Mapping[str, Any] | None = None,
         status: str | None = None,
+        admin_role: str | None = None,
     ) -> UserModel:
-        """Update a user's role, status, or scopes with strict administrative guardrails."""
+        """Update a user's role, status, or scopes with strict administrative guardrails.
+
+        Every change is recorded in the append-only audit log inside the
+        caller's own transaction: if the audit records cannot be written the
+        transaction fails and the change does not happen. A role change, a
+        status change and each individual scope change are recorded as their
+        own events, in addition to the summary event, so the log shows
+        exactly what was changed.
+        """
         target = cls.get_user_by_id(session, target_user_id)
         if not target:
             raise KeyError(f"User {target_user_id} not found.")
@@ -166,29 +175,38 @@ class UserStore:
 
         # Apply updates
         modified = False
+        role_changed = False
+        status_changed = False
+        scope_changes: dict[str, tuple[Any, Any]] = {}
+
         if role is not None and role != target.role:
             target.role = role
             modified = True
+            role_changed = True
 
         if status is not None and status != target.status:
             target.status = status
             modified = True
+            status_changed = True
 
         if scopes is not None:
             if target.scopes is None:
                 target.scopes = UserScopeModel(user_id=target.user_id)
-            if "allowed_folder_uids" in scopes:
-                target.scopes.allowed_folder_uids = list(scopes["allowed_folder_uids"])
+            for scope_key in (
+                "allowed_folder_uids",
+                "allowed_dashboard_uids",
+                "denied_dashboard_uids",
+                "allowed_environments",
+            ):
+                if scope_key not in scopes:
+                    continue
+                before = list(getattr(target.scopes, scope_key) or [])
+                after = list(scopes[scope_key])
+                if before == after:
+                    continue
+                setattr(target.scopes, scope_key, after)
                 modified = True
-            if "allowed_dashboard_uids" in scopes:
-                target.scopes.allowed_dashboard_uids = list(scopes["allowed_dashboard_uids"])
-                modified = True
-            if "denied_dashboard_uids" in scopes:
-                target.scopes.denied_dashboard_uids = list(scopes["denied_dashboard_uids"])
-                modified = True
-            if "allowed_environments" in scopes:
-                target.scopes.allowed_environments = list(scopes["allowed_environments"])
-                modified = True
+                scope_changes[scope_key] = (before, after)
 
         if modified:
             target.authz_version += 1
@@ -207,6 +225,8 @@ class UserStore:
                 },
             }
 
+            actor_details = {"actor_role": (admin_role or "").lower() or None}
+
             AuditStore.log_event(
                 session,
                 event_type="user_access_modified",
@@ -217,7 +237,54 @@ class UserStore:
                 reason="admin_update",
                 previous_state=previous_state,
                 new_state=new_state,
+                details=actor_details,
             )
+
+            if role_changed:
+                AuditStore.log_event(
+                    session,
+                    event_type="user_role_changed",
+                    actor_id=admin_user_id,
+                    target_type="user",
+                    target_id=target_user_id,
+                    decision="ALLOW",
+                    reason="admin_role_change",
+                    previous_state={"role": previous_state["role"]},
+                    new_state={"role": target.role},
+                    details={**actor_details, "authzVersion": target.authz_version},
+                )
+
+            if status_changed:
+                AuditStore.log_event(
+                    session,
+                    event_type="user_status_changed",
+                    actor_id=admin_user_id,
+                    target_type="user",
+                    target_id=target_user_id,
+                    decision="ALLOW",
+                    reason="admin_status_change",
+                    previous_state={"status": previous_state["status"]},
+                    new_state={"status": target.status},
+                    details={**actor_details, "authzVersion": target.authz_version},
+                )
+
+            for scope_key, (before, after) in scope_changes.items():
+                AuditStore.log_event(
+                    session,
+                    event_type="user_scope_changed",
+                    actor_id=admin_user_id,
+                    target_type="user",
+                    target_id=target_user_id,
+                    decision="ALLOW",
+                    reason="admin_scope_change",
+                    previous_state={scope_key: before},
+                    new_state={scope_key: after},
+                    details={
+                        **actor_details,
+                        "scopeType": scope_key,
+                        "authzVersion": target.authz_version,
+                    },
+                )
 
         return target
 
@@ -226,4 +293,19 @@ class UserStore:
         """List all users with their scopes."""
         stmt = select(UserModel).options(joinedload(UserModel.scopes)).order_by(UserModel.created_at)
         return list(session.execute(stmt).scalars().unique().all())
+
+    @staticmethod
+    def list_known_environments(session: Session) -> list[str]:
+        """Distinct environment names used by any user's scope record.
+
+        This is the server-side catalogue of environments the deployment
+        recognises. It is derived from stored RBAC data only -- never from a
+        client-supplied environment name.
+        """
+        stmt = select(UserScopeModel.allowed_environments)
+        environments: set[str] = set()
+        for value in session.execute(stmt).scalars().all():
+            if isinstance(value, (list, tuple, set)):
+                environments.update(str(name).strip() for name in value if str(name).strip())
+        return sorted(environments)
 

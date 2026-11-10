@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app import executor
 from app.api.schemas import QueryRequest, QueryResponse
 from app.auth.dependencies import require_principal
+from app.auth.environment import EnvironmentDenied, EnvironmentRequired, resolve_environment
 from app.auth.policy import authorize_promql
 from app.auth.principal import Principal
 from app.config import get_settings
@@ -31,13 +32,28 @@ CLARIFICATION_STATUSES = {"ambiguous_metric"}
 CLARIFICATION_REASONS = {"parameter_requires_clarification"}
 
 
+def _resolve_request_environment(principal: Principal, requested: str | None) -> str | None:
+    """Resolve and validate the environment a request targets.
+
+    Raises HTTPException(403) for an unknown or unauthorized environment and
+    HTTPException(400) when no environment context can be established.
+    """
+    try:
+        return resolve_environment(principal, requested)
+    except EnvironmentDenied as exc:
+        raise HTTPException(status_code=403, detail=f"RBAC policy denied: {exc.reason}")
+    except EnvironmentRequired as exc:
+        raise HTTPException(status_code=400, detail=f"RBAC policy denied: {exc.reason}")
+
+
 @router.post("/api/v1/query", response_model=QueryResponse)
 async def query(
     request: Request,
     body: QueryRequest,
     principal: Principal = Depends(require_principal),
 ) -> QueryResponse:
-    prom_dec = authorize_promql(principal, is_custom=True, expr=body.question)
+    environment = _resolve_request_environment(principal, body.environment)
+    prom_dec = authorize_promql(principal, is_custom=True, expr=body.question, environment=environment)
     if not prom_dec.allowed:
         raise HTTPException(
             status_code=403,
@@ -237,7 +253,14 @@ async def get_labels(
     labelName: str,
     metric: str | None = None,
     source: str = "prometheus",
+    principal: Principal = Depends(require_principal),
 ) -> dict:
+    # Label discovery queries Prometheus, so it is an environment-scoped
+    # operation like any other query.
+    environment = _resolve_request_environment(principal, None)
+    prom_dec = authorize_promql(principal, is_custom=False, expr=labelName, environment=environment)
+    if not prom_dec.allowed:
+        raise HTTPException(status_code=403, detail=f"RBAC policy denied: {prom_dec.reason}")
     settings = get_settings()
     values = label_discovery.discover_label_values(settings.prometheus_url, labelName, metric=metric)
     return {"values": list(values)}
@@ -251,7 +274,8 @@ async def run_catalog_query(
 ) -> dict:
     source_id = body.get("sourceId", "prometheus")
     if source_id == "prometheus":
-        prom_dec = authorize_promql(principal, is_custom=False, expr=body.get("queryId", ""))
+        environment = _resolve_request_environment(principal, body.get("environment"))
+        prom_dec = authorize_promql(principal, is_custom=False, expr=body.get("queryId", ""), environment=environment)
         if not prom_dec.allowed:
             raise HTTPException(
                 status_code=403,
@@ -349,7 +373,16 @@ async def run_catalog_query(
 
 
 @router.post("/api/adk/glance/board")
-async def get_glance_board(request: Request) -> dict:
+async def get_glance_board(
+    request: Request,
+    principal: Principal = Depends(require_principal),
+) -> dict:
+    # The glance board runs Prometheus queries, so it is an environment-scoped
+    # operation like any other query.
+    environment = _resolve_request_environment(principal, None)
+    prom_dec = authorize_promql(principal, is_custom=False, expr="glance_board", environment=environment)
+    if not prom_dec.allowed:
+        raise HTTPException(status_code=403, detail=f"RBAC policy denied: {prom_dec.reason}")
     settings = get_settings()
     panels = []
     
