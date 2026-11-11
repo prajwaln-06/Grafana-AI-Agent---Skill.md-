@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.opensearch_catalog import guard
+from app.opensearch_catalog import correlation, guard
 from app.opensearch_catalog.context import OpenSearchContext
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,14 @@ def canonicalise_contract(contract: Any, ctx: OpenSearchContext | None) -> Any:
         return contract
     try:
         if isinstance(contract.get("results"), list):
+            if correlation.needs_tolerance(contract):
+                # "near" has no project-defined threshold: ask, never invent one.
+                msg = correlation.tolerance_clarification(ctx.limits.analysis_context_max_minutes * 60)
+                logger.info("Correlation request without a tolerance: asking the user")
+                return {"mode": "single", "status": "declined", "reason": "parameter_requires_clarification",
+                        "explanation": "Comparing events across two index families needs a stated time tolerance, "
+                                       "and none was given. " + msg,
+                        "clarification": msg, "data_source": "opensearch"}
             return {**contract, "results": [_canonicalise_entry(e, ctx) for e in contract["results"]]}
         return _canonicalise_entry(contract, ctx)
     except Exception:  # noqa: BLE001 -- a bug here must not turn into an unchecked query

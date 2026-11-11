@@ -332,7 +332,14 @@ class _Checker:
                 why = "is registered but is not present in the live mapping"
             else:
                 why = "is not a field this index family permits"
-            _fail(CODE_UNKNOWN_FIELD, f"{where}: field {path!r} {why}. Use only the listed fields.")
+            hint = ""
+            base = path[: -len(".keyword")] if path.endswith(".keyword") else None
+            base_info = self.view.allowed_fields.get(base) if base else None
+            if base_info is not None:
+                hint = (f" {base!r} ({base_info.type}) has no `.keyword` sub-field in the live mapping; "
+                        f"use {base!r} itself, with a value of its own type (for example a JSON boolean "
+                        f"for a boolean field).")
+            _fail(CODE_UNKNOWN_FIELD, f"{where}: field {path!r} {why}. Use only the listed fields.{hint}")
         if op not in info.ops:
             hint = ""
             if info.keyword_subfield and op in (OP_TERM, OP_GROUP_BY, OP_SORT):
@@ -882,7 +889,9 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
             if "aggregations" in body:
                 ck.applied.append("renamed `aggregations` to `aggs`")
             if isinstance(raw_aggs, dict) and len(raw_aggs) != 1:
-                _fail(CODE_AGGREGATION, "exactly ONE top-level aggregation is supported per query")
+                _fail(CODE_AGGREGATION, "exactly ONE top-level aggregation is supported per query; to break a "
+                                          "grouping down by a second field, NEST the second `terms` inside the "
+                                          "first one's `aggs` instead of placing two aggregations side by side")
             canon_aggs, est = ck.aggs(raw_aggs, "aggs", 1, window["seconds"])
             if est > limits.max_total_buckets:
                 _fail(CODE_LIMIT, f"the aggregation could produce about {est} buckets (maximum {limits.max_total_buckets})")

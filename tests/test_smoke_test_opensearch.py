@@ -378,7 +378,7 @@ def test_examples_are_checked_against_the_live_mapping(smoke, settings, os_regis
     matched = [{"reference_path": p.domain_reference, "data_source": "opensearch"} for p in os_registry.enabled_patterns]
     ctx = runtime.build_request_context(matched, settings)
     results = smoke.run_examples(os_registry, ctx, settings, execute_analyses=False)
-    assert len(results) == 8 and all(r["ok"] and r["stage"] == "guard" for r in results), results
+    assert len(results) == 12 and all(r["ok"] and r["stage"] == "guard" for r in results), results
     assert {r["analysis"] for r in results} >= {"absence", "recurrence", "context_window", "text_ratio_shortfall", "ingest_lag"}
 
 

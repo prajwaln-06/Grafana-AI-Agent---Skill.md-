@@ -1690,7 +1690,10 @@ def _merge_unresolved_topics(contract: dict, unresolved_topics: list[dict]) -> d
 
     if len(entries) == 1:
         return {"mode": "single", **entries[0]}
-    return {"mode": "multi", "results": entries, "synthesis": None}
+    merged = {"mode": "multi", "results": entries, "synthesis": None}
+    if contract.get("mode") == "multi" and "correlation" in contract:
+        merged["correlation"] = contract["correlation"]   # entry indices are unchanged: unmapped topics are appended
+    return merged
 
 
 def _unmapped_entry_for(topic: dict) -> dict:

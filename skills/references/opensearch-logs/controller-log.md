@@ -18,7 +18,9 @@ Route here for: controller errors or warnings, messages from a named service
 (for example `hmscd`, `hmpad`, `fabric-manager`), "LinkStatus Down", I²C
 failures, which hosts or services log the most errors, controller logs excluding
 routine noise, what a controller or service logged before and after a given
-event, fabric-manager messages with fewer switches available than expected.
+event, fabric-manager messages with fewer switches available than expected,
+errors that keep recurring on a controller, and whether link-down events
+occurred near fabric availability problems.
 
 Do not route here for: fabric health state or fault documents
 (`fabric-health.md`), BMC login or iLO events (`ilo-events.md`), numeric
@@ -59,6 +61,8 @@ manager reports switch availability, `hmscd` reports link status changes, and
 |---|---|
 | Hosts with errors | `size: 0`, time range, `{"named_condition": "abnormal_severity"}` for the error set (expanded by the system), `terms` on `entity_host` with a small nested `terms` on `service` |
 | Services producing most errors | same filter, `terms` on `service` |
+| "Are the same errors recurring on a controller?" | the SAME query as "Hosts with errors": `size: 0`, time range, `abnormal_severity`, ONE top-level `terms` on `entity_host` with the `terms` on `service` nested inside it. This is a **narrower question than asked** and the answer must say so: it shows which controllers keep logging errors, and from which service, with a document count per pair, i.e. *repeated error activity from the same controller and service*. It does NOT show that the same message text repeated: message text is never grouped, so identical-message recurrence is **not supported** (say so; do not infer it from a high count). The `recurrence` analysis is not configured for this family; do not request it |
+| Did link-down events occur near fabric availability problems? | cross-family time proximity: `mode: "multi"` with two row queries and a `correlation` object (see "Near another family's events" below). The tolerance must come from the user |
 | Error volume over time | same filter, `date_histogram` on `@timestamp` with an interval chosen from the window |
 | Messages mentioning a phrase | `match_phrase` on `text` inside `filter` with the time range |
 | Messages for a service on a host | two exact-term filters (`service`, `entity_host`) plus the time range |
@@ -101,6 +105,35 @@ the exact stored case.
     first, marking each row `before`, `anchor` or `after`. Without a
     `context_filter` the surrounding messages come from the same host as the
     event. A span longer than 60 minutes is rejected, not shortened.
+
+## Near another family's events
+
+"Did link-down events occur near fabric availability problems?" compares two
+index families, so it is a `mode: "multi"` response: result 0 is a rows query on
+`controller_log` for the link-down messages, result 1 is a rows query on
+`fabric_health` for abnormal fabric documents (`abnormal_severity`, heartbeat
+documents excluded), and a top-level `correlation` object names them. Each
+query is validated and run against its own family only. Python then compares
+the rows' `@timestamp` values; you do not judge proximity yourself.
+
+`tolerance` is the maximum time difference that counts as "near" (at most 60m).
+It is **never** defaulted: take it only from the user's words ("within 5
+minutes"). If the user did not say how close counts as near, leave `tolerance`
+out and the system asks them. Read "fabric availability problems" as non-healthy
+fabric health documents and say so; the answer reports pairs, not causation
+("coincided with", never "caused"). The result says whether a correlation was
+found, none was found, or could not be determined (a source failed or was only
+partly examined): never describe the last as "no correlation".
+
+```jsonc
+{
+  "mode": "multi",
+  "results": [ { "status": "ok", "data_source": "opensearch", "pattern_id": "controller_log", "...": "rows query for 'LinkStatus Down'" },
+               { "status": "ok", "data_source": "opensearch", "pattern_id": "fabric_health", "...": "rows query with abnormal_severity" } ],
+  "synthesis": null,
+  "correlation": { "type": "temporal_proximity", "left": 0, "right": 1, "tolerance": "5m" }
+}
+```
 
 ## Safe Projection
 
@@ -162,6 +195,7 @@ Fabric-manager messages with fewer switches available than expected
 
 ## Guardrails
 
+- "Recurring errors" means error activity per host and service, nested in ONE aggregation; never claim identical messages recur.
 - Never filter or bucket on `Timestamp`.
 - Never group on the message text.
 - Never assume a severity value or its case.

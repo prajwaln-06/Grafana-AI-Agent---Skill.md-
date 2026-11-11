@@ -133,6 +133,7 @@ lists it:
 |---|---|---|---|
 | `absence` | "Which switches stopped sending heartbeats?" | `fabric_health` | buckets: the entities that went quiet |
 | `recurrence` | "Which ports have recurring faults?" | `fabric_health` | buckets ranked by how many separate intervals they appear in |
+| `correlation` (multi-entry contract, not an `analysis`) | "Did link-down events occur near fabric availability problems?" | two families | pairs of events within a user-stated tolerance, computed by Python (`mode: "multi"` + `correlation`) |
 | `context_window` | "What was logged before and after the link-down event?" | `controller_log` | hits around each event, marked before / anchor / after |
 | `text_ratio_shortfall` | "Messages with fewer switches available than expected" | `controller_log` | hits whose `n/m` count has n below m |
 | `ingest_lag` | "How long after creation were events ingested?" | `ilo_events` | hits with a lag per row, plus min / median / p90 / max |
@@ -145,9 +146,11 @@ behind these analyses (heartbeat interval, the `n/m` message wording, what one
 in the registry and are **unverified** until confirmed on the real cluster; an
 answer that relies on them must say so.
 
-Still not supported: cross-family queries (one question that joins two
-families, or logs with metrics), and any analysis a family does not list. Treat
-those as `unmapped` rather than approximating them.
+The one supported cross-family question is **time proximity** between two
+families' events (`correlation`: two ordinary row queries plus a user-stated
+tolerance; see `controller-log.md`). Still not supported: any other join of two
+families (by entity or by value), logs with metrics, and any analysis a family
+does not list. Treat those as `unmapped` rather than approximating them.
 
 ## Result metadata and limits
 
@@ -198,7 +201,13 @@ URL, as it is for Prometheus.
 - Use only field paths the runtime field catalog confirms for the selected
   family; never invent a field, a `.keyword` sub-field, or an index.
 - Never assume a severity value; use the stored value for that family.
-- Every query needs a bounded time range on `@timestamp`.
+- Every query needs a bounded time range on `@timestamp`. When the user states
+  no window, use the last 24 hours (`now-24h` to `now`), the window every
+  question in this domain's catalogue uses, and say that you assumed it. The
+  one-hour default in the Prometheus rules does NOT apply to log questions: a
+  one-hour window silently misses most events.
+- Questions this domain cannot answer are `unmapped` with an explanation, never
+  `unsupported_metric` (that status is for Prometheus measurements).
 - Free-text search uses only `match` / `match_phrase` on the family's text role.
   Write the words the user used; do not guess the tense or plural the stored
   message uses. The system also matches the other forms of the words

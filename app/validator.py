@@ -270,6 +270,14 @@ def validate_contract(
                                      candidate_scope_violation=result.candidate_scope_violation)
         warnings.extend(result.warnings)
 
+    if "correlation" in contract:
+        from app.opensearch_catalog import correlation as os_correlation
+        from app.opensearch_catalog.context import Limits
+        limits = getattr(opensearch_context, "limits", None) or Limits()
+        problem = os_correlation.validate_spec(contract, limits.analysis_context_max_minutes * 60)
+        if problem:
+            return ValidationResult(False, f"correlation: {problem}")
+
     return ValidationResult(True, warnings=warnings)
 
 
@@ -314,9 +322,13 @@ def _extract_entries(contract: dict) -> list[dict] | ValidationResult:
             f"mode:'multi' must contain 2+ result objects (Section 6 Step 6); "
             f"found {len(entries)}. A single result must use mode:'single' instead.",
         )
-    for entry in entries:
+    for i, entry in enumerate(entries):
         if not isinstance(entry, dict) or "status" not in entry:
-            return ValidationResult(False, "One of 'results'' entries is not an object with a 'status' field.")
+            found = (f"an object with keys {sorted(entry)[:8]}" if isinstance(entry, dict)
+                     else f"a {type(entry).__name__}")
+            return ValidationResult(
+                False, f"One of 'results'' entries is not an object with a 'status' field "
+                       f"(results[{i}] is {found}).")
     return entries
 
 

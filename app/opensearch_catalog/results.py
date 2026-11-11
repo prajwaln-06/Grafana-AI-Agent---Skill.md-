@@ -195,7 +195,7 @@ def normalize_search_response(raw: dict, *, entry: PatternEntry, query: dict, po
     if not aggs:
         result = _hits(raw, entry, policy, stats, max_hits, total, relation, meta)
     else:
-        result = _aggregation(raw, aggs, query, policy, stats, max_series, total, relation, meta)
+        result = _aggregation(raw, aggs, query, policy, stats, max_series, total, relation, meta, entry)
 
     meta["redaction"] = stats.to_dict(policy)
     sem = entry.severity_semantics
@@ -240,7 +240,8 @@ def _hits(raw, entry: PatternEntry, policy, stats, max_hits, total, relation, me
                             original_count=len(raw_hits) if truncated else None)
 
 
-def _aggregation(raw, aggs, query, policy, stats, max_series, total, relation, meta) -> NormalizedResult:
+def _aggregation(raw, aggs, query, policy, stats, max_series, total, relation, meta,
+                 entry: PatternEntry | None = None) -> NormalizedResult:
     name, body = next(iter(aggs.items()))
     kinds = _query_agg_kinds((query or {}).get("aggs") or {})
     other = _sum_other(aggs)
@@ -287,11 +288,82 @@ def _aggregation(raw, aggs, query, policy, stats, max_series, total, relation, m
 
     meta["aggregation"]["type"] = "filters" if isinstance(buckets, dict) else "terms"
     out = [_bucket(k, b, policy, stats) for k, b in items]
+    if entry is not None and top_kind == "terms":
+        meta["aggregation"]["interpretation"] = interpret_terms(entry, query, out)
     truncated = len(out) > max_series
     meta["aggregation"]["buckets_returned"] = min(len(out), max_series)
     return NormalizedResult(result_type="buckets", buckets=out[:max_series],
                             truncated=truncated or other > 0,
                             original_count=len(out) if truncated else None)
+
+
+def _terms_levels(query: Any) -> list[str]:
+    """Field paths of the top-level `terms` aggregation and of the `terms`
+    aggregations nested directly inside it, outermost first."""
+    levels: list[str] = []
+    aggs = (query or {}).get("aggs") or (query or {}).get("aggregations") if isinstance(query, dict) else None
+    while isinstance(aggs, dict) and aggs:
+        spec = next((v for v in aggs.values() if isinstance(v, dict)), None)
+        if not isinstance(spec, dict):
+            break
+        terms = spec.get("terms")
+        if isinstance(terms, dict) and isinstance(terms.get("field"), str):
+            levels.append(terms["field"])
+        aggs = spec.get("aggs") or spec.get("aggregations")
+    return levels
+
+
+def _role_of(entry: PatternEntry, field_path: str) -> str | None:
+    """Registry role of a (possibly `.keyword`-suffixed) effective field path."""
+    for role, paths in entry.roles.items():
+        if any(field_path == p or field_path == f"{p}.keyword" for p in paths):
+            return role
+    return None
+
+
+def _bucket_keys_at(buckets: list[Bucket], level: int) -> set[str]:
+    if level == 0:
+        return {b.key for b in buckets}
+    out: set[str] = set()
+    for b in buckets:
+        out |= _bucket_keys_at(b.sub_buckets, level - 1)
+    return out
+
+
+def interpret_terms(entry: PatternEntry, query: Any, buckets: list[Bucket]) -> dict:
+    """Deterministic statement of what a `terms` result does and does not establish,
+    attached to every grouped result regardless of how the model worded its own
+    explanation. It never says anything the data cannot support: counts are
+    documents per structured-field group, free text is never grouped, and no
+    family has a baseline, so a ranking is never an anomaly finding."""
+    levels = _terms_levels(query)
+    grouped_by = [{"level": i + 1, "field": f, "role": _role_of(entry, f)} for i, f in enumerate(levels)]
+    text_fields = sorted(set(entry.never_group) | set(entry.role_paths("text")))
+    out: dict = {
+        "grouped_by": grouped_by,
+        "count_unit": "documents",
+        "establishes": "How many matching documents fall into each group; groups come from structured fields "
+                       "only (" + ", ".join(g["field"] for g in grouped_by) + ").",
+        "does_not_establish": [
+            "Message text (" + ", ".join(text_fields) + ") is never grouped, so these counts do not show that "
+            "the same message text occurred repeatedly: repeated activity from one group is not the same as one "
+            "identical message repeating.",
+            "Groups are ranked by volume only. No baseline or threshold is defined for this index family, so a "
+            "high count is not by itself unusual and no anomaly detection was performed.",
+        ],
+        "anomaly_detection": {"performed": False,
+                              "reason": "no baseline or threshold is defined for this index family"},
+    }
+    for i, f in enumerate(levels):
+        if _role_of(entry, f) == "event_code" and entry.event_codes:
+            keys = _bucket_keys_at(buckets, i)
+            known = {k: {"meaning": entry.event_codes[k]["meaning"], "kind": entry.event_codes[k]["kind"]}
+                     for k in sorted(keys) if k in entry.event_codes}
+            out["event_code_labels"] = known
+            unknown = sorted(k for k in keys if k not in entry.event_codes)
+            if unknown:
+                out["event_codes_without_verified_meaning"] = unknown
+    return out
 
 
 def _histogram(items, max_series, policy, stats, meta) -> NormalizedResult:

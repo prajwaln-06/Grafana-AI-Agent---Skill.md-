@@ -47,11 +47,11 @@ about.
 | Kind | Health state | Event kind | Notes |
 |---|---|---|---|
 | Heartbeat | `HEALTHY` | `runtime.heartbeat` | Emitted periodically per switch; carries an ASIC identifier and no port. The switch value includes an ASIC suffix |
-| Fault | `CRITICAL` | Fault-specific names such as `linkerrors.linkautorestartexhaustederror` | Carries a port and a location; the switch value has no ASIC suffix. More fault kinds exist than any short list |
+| Fault | `CRITICAL` or `DEGRADED` | Fault-specific names such as `linkerrors.linkautorestartexhaustederror` | Carries a port and a location. The switch value may or may not carry an ASIC suffix: non-healthy documents in the 2026-11-10 test did (`x1000c4r5b0`). More fault kinds exist than any short list |
 
 Heartbeats dominate document volume, so any question about problems must
 exclude them by filtering on the health state or event kind. In observed data,
-health state takes the values `HEALTHY` and `CRITICAL`; the full set is not
+health state takes the values `HEALTHY`, `CRITICAL` and `DEGRADED` (see the severity section); the full set is not
 confirmed, so a question about "other states" asks the data rather than
 assuming a list.
 
@@ -66,10 +66,11 @@ treat the two spellings as different switches.
 | Faults per switch | time range, term on `health_state`, `terms` on `entity_switch`, with a `cardinality` sub-aggregation on `entity_location` for distinct affected ports |
 | Which event kinds exist | `terms` on `event_kind` (and on `health_state` for the state list) |
 | Ports disabled for flapping | `match_phrase` on `text`, `terms` on `entity_location` |
-| Recommendations for a port | term on `entity_port`, return `text` in rows |
+| Recommendations for a port | term on `entity_port` (a bare port name such as `j104p1` belongs in `entity_port`, NOT in `entity_location`, which holds the composite switch-plus-port value and would not match a bare port), return `text` in rows |
+| Critical / degraded / unhealthy events for ONE switch | time range, `{"named_condition": "abnormal_severity"}` (or an explicit stored state), and a `prefix` on `entity_switch` with the switch name the user gave: the stored switch value usually carries an ASIC suffix (`x1000c3r1` is stored as `x1000c3r1b0`), so an exact term on the bare name finds nothing. `prefix` is the only partial match allowed; never `wildcard` |
 | Most unhealthy racks/chassis | `terms` on `group_rack` with a nested `terms` on `group_chassis` |
 | Switches that stopped sending heartbeats | analysis `absence`: `size: 0`, time range = the baseline (for example the last 24 hours), term on `event_kind` = `runtime.heartbeat`, ONE `terms` on `entity_switch` with no sub-aggregation; `"analysis": {"type": "absence"}` (optional `recent_window`) |
-| Ports with recurring faults | analysis `recurrence`: `size: 0`, time range, term on `health_state` = `CRITICAL`, `terms` on `entity_location` with ONE `date_histogram` sub-aggregation on `@timestamp` using the registry interval (`1h`); `"analysis": {"type": "recurrence"}` |
+| Ports with recurring faults | analysis `recurrence`: `size: 0`, time range, `{"named_condition": "abnormal_severity"}` (every non-HEALTHY state; do not hard-code `CRITICAL`), `terms` on `entity_location` with ONE `date_histogram` sub-aggregation on `@timestamp` using the registry interval (`1h`); `"analysis": {"type": "recurrence"}` |
 
 Grouping uses only exact-value fields the catalog confirms are groupable; the
 `text` role is never grouped. Disallowed everywhere: scripts, `query_string`,
@@ -80,7 +81,13 @@ regular expressions, wildcard queries, deep paging.
 "Unhealthy", "non-healthy" and "critical" are defined by the `health_state`
 role: unhealthy means the stored state is not `HEALTHY`. This is the same
 definition the source team's own queries use. An explicit "critical" request
-filters on the stored value `CRITICAL`.
+filters on the stored value `CRITICAL`. **Observed states differ:** the 2026-11-10 manual test found
+`HEALTHY` and `DEGRADED` (and no `CRITICAL` document in 7 days), while an earlier
+sample showed `HEALTHY` and `CRITICAL`. A `CRITICAL` filter can therefore be
+correctly empty while `DEGRADED` documents exist. When a user says "critical" or
+"problem" without naming a state, use `abnormal_severity` (all non-`HEALTHY`
+states) and say which states came back; use the literal `CRITICAL` only when the
+user insists on that state, and then mention that other unhealthy states exist.
 
 ## Known Data Caveats
 
@@ -162,7 +169,7 @@ Ports with recurring faults (`recurrence`), over the last 7 days:
     "size": 0,
     "query": { "bool": { "filter": [
       { "range": { "@timestamp": { "gte": "now-7d", "lte": "now" } } },
-      { "term":  { "fields.PhysicalSubContext.keyword": "CRITICAL" } } ] } },
+      { "named_condition": "abnormal_severity" } ] } },
     "aggs": { "by_location": { "terms": { "field": "fields.Location.keyword", "size": 20 },
               "aggs": { "per_hour": { "date_histogram": { "field": "@timestamp", "fixed_interval": "1h" } } } } }
   },
@@ -170,8 +177,27 @@ Ports with recurring faults (`recurrence`), over the last 7 days:
 }
 ```
 
+Unhealthy events for one switch, named without its ASIC suffix (`prefix`, not an exact term):
+
+```json
+{
+  "pattern_id": "fabric_health",
+  "intent": "rows",
+  "query": {
+    "size": 20,
+    "sort": [ { "@timestamp": "desc" } ],
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "named_condition": "abnormal_severity" },
+      { "prefix": { "fields.Switch": "x1000c3r1" } } ] } }
+  }
+}
+```
+
 ## Guardrails
 
+- A bare port name goes in `entity_port`; the composite `entity_location` is never matched with a bare port.
+- A switch named without an ASIC suffix is matched with `prefix`, never an exact term and never `wildcard`.
 - Every question about faults excludes heartbeat documents.
 - Never filter or bucket on a device-time field.
 - Never group on the text role.

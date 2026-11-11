@@ -100,10 +100,11 @@
               "HEALTHY"
             ],
             "abnormal": [
-              "CRITICAL"
+              "CRITICAL",
+              "DEGRADED"
             ],
             "other_known": [],
-            "source": "Observed HEALTHY/CRITICAL in the sampled data; 'unhealthy = not HEALTHY' is the source team's own query definition.",
+            "source": "Observed HEALTHY/CRITICAL in an earlier sample, and HEALTHY/DEGRADED in the 2026-11-10 manual test (48 documents in 24 h were DEGRADED; no CRITICAL document in 7 days). 'unhealthy = not HEALTHY' is the source team's own query definition, so any other state is also unhealthy.",
             "verification": "observed"
           }
         }
@@ -340,7 +341,7 @@
               "Warning",
               "Critical"
             ],
-            "source": "Only OK observed in the sampled iLO export (120,645 documents). Warning/Critical come from the DMTF Redfish LogEntry EventSeverity enumeration (OK, Warning, Critical); not observed in this deployment's data.",
+            "source": "OK and Warning observed (earlier 120,645-document sample: only OK; 2026-11-10 manual test: Warning on 'Correctable memory error threshold exceeded' events). Critical comes from the DMTF Redfish LogEntry EventSeverity enumeration (OK, Warning, Critical) and has not been observed here.",
             "verification": "documented"
           },
           "Oem.Hpe.Severity": {
@@ -353,9 +354,21 @@
               "Warning",
               "Critical"
             ],
-            "source": "Only Informational observed (120,645 documents). HPE's iLO log-services documentation names Caution and Critical (as severities of events that can be marked repaired); Warning is NOT documented there and is an assumption. The full vocabulary is unverified.",
+            "source": "Informational and Caution observed (2026-11-10 manual test: Caution alongside Severity Warning). HPE's iLO log-services documentation names Caution and Critical (as severities of events that can be marked repaired); Warning is NOT documented there and is an assumption. The full vocabulary is unverified.",
             "verification": "provisional"
           }
+        }
+      },
+      "event_codes": {
+        "1017": {
+          "meaning": "Browser login",
+          "kind": "login",
+          "evidence": "2026-11-10 manual test: every Oem.Hpe.Code 1017 row had a Message beginning 'Browser login:'. Covers browser sessions only; IPMI/RMCP and failed-login events are NOT identified by this code."
+        },
+        "1018": {
+          "meaning": "Browser logout",
+          "kind": "logout",
+          "evidence": "2026-11-10 manual test: every Oem.Hpe.Code 1018 row had a Message beginning 'Browser logout:'. Covers browser sessions only."
         }
       },
       "analyses": {

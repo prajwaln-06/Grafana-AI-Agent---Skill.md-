@@ -468,7 +468,14 @@ one would be plausible for the metric in question.
 Every response begins with a top-level `"mode"` field: `"single"` or `"multi"`.
 For `single`, the status and its fields appear directly at the top level. For
 `multi`, `"results"` holds an array of the same per-status shapes below, plus
-`"synthesis"`.
+`"synthesis"`. A `multi` response may also carry an optional top-level
+`"correlation"` object, used only for OpenSearch time-proximity questions across
+two index families: `{"type": "temporal_proximity", "left": <index>, "right":
+<index>, "tolerance": "<duration>"}`, where `left`/`right` are the positions in
+`results` of two ordinary OpenSearch rows entries with different `pattern_id`s,
+and `tolerance` (for example `"5m"`) comes only from the user's words — never
+defaulted. If the user gave none, omit it and the system asks. See
+`references/opensearch-logs/controller-log.md`.
 
 **`status: "ok"`**
 

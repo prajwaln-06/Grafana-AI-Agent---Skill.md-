@@ -159,7 +159,10 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "`\"pattern_id\": \"<id>\"`. Do NOT write an `index` value; the system sets it. One pattern_id per result "
         "(use mode \"multi\" for several families).",
         "- Use ONLY the field paths listed under each pattern, and each only for the operations shown. For a text "
-        "field the exact-match path is its confirmed keyword sub-field, shown as `exact=`; never assume `.keyword`. "
+        "field the exact-match path is its confirmed keyword sub-field, shown as `exact=`; never assume `.keyword`. A field that is not "
+        "text (boolean, number, keyword, date) has NO `.keyword` sub-field: write its path exactly as listed, with a "
+        "value of its own type (a boolean field takes a JSON `true`/`false`, not a string); a path ending in "
+        "`.keyword` that is not listed is rejected. "
         "term/terms/prefix and sort written on such a text field are applied to its `exact=` path (the system "
         "substitutes it and records that); group-by and cardinality must name the `exact=` path itself. A text field "
         "with no `exact=` cannot be sorted or grouped.",
@@ -176,7 +179,9 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "(overheated/overheating/overheats/overheat) and records it.",
         "- Row queries: omit `aggs`; `size` <= %d (default %d); rows come back newest first. To only COUNT matching documents, use `size` 0 with no `aggs` (and `track_total_hits`: true); the count is in the result metadata." % (lim.max_hits_size, lim.default_hits_size),
         "- Aggregation queries: `size` 0 and exactly ONE top-level aggregation (terms, date_histogram, filters, "
-        "cardinality, min, max, avg, sum, value_count), at most %d levels deep. `terms` size <= %d (default %d); group "
+        "cardinality, min, max, avg, sum, value_count), at most %d levels deep. To group by TWO fields (for example "
+        "host, then event code), NEST the second `terms` inside the first one's `aggs`; two aggregations side by "
+        "side at the top level are rejected. `terms` size <= %d (default %d); group "
         "only by the group-by paths listed. `date_histogram` must use the time field with `fixed_interval`, at most %d "
         "buckets across the window." % (lim.max_agg_depth, lim.max_terms_size, lim.default_terms_size, lim.max_histogram_buckets),
         "- For counts, set `\"track_total_hits\": true` so the total is exact.",
@@ -191,7 +196,17 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "RECURRING) use an `analysis` object, ONLY where the pattern lists it under `analyses` below: write the ordinary "
         "query exactly as described there plus `\"analysis\": {\"type\": \"<name>\", ...parameters}`. Python runs the "
         "follow-up queries itself. Parameters outside the stated limits are rejected, never adjusted. If the pattern "
-        "does not list the analysis, return \"unmapped\" instead of approximating it.",
+        "does not list the analysis, do NOT approximate it with an analysis: if the family's reference documents a plain "
+        "grouped query that answers a clearly labelled, narrower question (for example error activity per host and "
+        "service), use that and say what it counts; otherwise return \"unmapped\".",
+        "- Statuses for log questions this system cannot answer: use \"unmapped\" with an explanation (what is "
+        "unsupported and why). Never use \"unsupported_metric\" for OpenSearch: it is for Prometheus measurements. "
+        "Never invent message wording, event codes or categories that the reference does not document as verified.",
+        "- Time proximity across two index families (\"near\", \"around the same time as\") is answered with "
+        "mode \"multi\": exactly two ordinary row queries (one per pattern_id, each with its own fields) plus a "
+        "top-level `correlation` object {\"type\": \"temporal_proximity\", \"left\": 0, \"right\": 1, "
+        "\"tolerance\": \"<duration>\"}. Take `tolerance` ONLY from the user's own words; if the user did not say how "
+        "close counts as near, omit it and the user is asked. Python does the comparison; never estimate it yourself.",
     ]
     for pid in sorted(ctx.patterns):
         pc = ctx.patterns[pid]
@@ -264,7 +279,8 @@ def _analysis_lines(e: PatternEntry, v: PatternFieldView, lim: Limits) -> list[s
     the model must invent: every name comes from the registry and the catalog."""
     if not e.analyses:
         return ["  analyses: none (questions about missing entities, before/after context, ingest lag, n/m "
-                "shortfalls or recurrence for this family are \"unmapped\")"]
+                "shortfalls or recurrence for this family are \"unmapped\", except where the reference documents a narrower "
+                "plain query, such as error activity per host and service)"]
     out = ["  analyses (add `analysis`; parameters not listed are rejected):"]
     for atype in sorted(e.analyses):
         cfg = e.analyses[atype]

@@ -130,6 +130,10 @@ class PatternEntry:
     # Multi-step analyses this family supports (see analysis.py), keyed by analysis
     # type, with their validated, registry-owned parameters. Empty = none.
     analyses: dict[str, dict] = field(default_factory=dict)
+    # Event codes whose meaning has been verified against real documents, keyed by the
+    # code as a string: {"meaning", "kind" ("login"/"logout"), "evidence"}. Used only to
+    # LABEL result buckets; never to widen what may be queried. Empty = none verified.
+    event_codes: dict[str, dict] = field(default_factory=dict)
 
     @property
     def max_window_seconds(self) -> int:
@@ -402,6 +406,32 @@ def _build_analyses(raw, where: str, roles: dict[str, tuple[str, ...]], groupabl
     return out
 
 
+_EVENT_CODE_KINDS = frozenset({"login", "logout"})
+
+
+def _build_event_codes(raw, where: str, roles: dict[str, tuple[str, ...]]) -> dict[str, dict]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        _fail(where, "'event_codes' must be an object keyed by event code")
+    if raw and "event_code" not in roles:
+        _fail(where, "'event_codes' needs an 'event_code' role binding the field that holds the code")
+    out: dict[str, dict] = {}
+    for code, body in raw.items():
+        w = f"{where}: event_codes.{code}"
+        if not isinstance(code, str) or not code.isdigit():
+            _fail(w, "the key must be the numeric event code as a string")
+        if not isinstance(body, dict) or set(body) != {"meaning", "kind", "evidence"}:
+            _fail(w, "must be an object with exactly 'meaning', 'kind' and 'evidence'")
+        for key in ("meaning", "evidence"):
+            if not isinstance(body[key], str) or not body[key].strip():
+                _fail(w, f"'{key}' must be a non-empty string (no code is listed without evidence)")
+        if body["kind"] not in _EVENT_CODE_KINDS:
+            _fail(w, f"'kind' must be one of {sorted(_EVENT_CODE_KINDS)}")
+        out[code] = dict(body)
+    return out
+
+
 def _build_entry(raw: dict, index: int, skills_root: Path | None) -> PatternEntry:
     if not isinstance(raw, dict):
         _fail(f"patterns[{index}]", "must be an object")
@@ -498,6 +528,7 @@ def _build_entry(raw: dict, index: int, skills_root: Path | None) -> PatternEntr
         severity_semantics=_build_severity(raw.get("severity_semantics"), where, roles),
         analyses=_build_analyses(raw.get("analyses"), where, roles, set(groupable) - set(never_group),
                                  set(projection), set(display_time)),
+        event_codes=_build_event_codes(raw.get("event_codes"), where, roles),
     )
 
 

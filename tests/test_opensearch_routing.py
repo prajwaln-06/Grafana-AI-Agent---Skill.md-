@@ -110,7 +110,7 @@ def test_the_old_unmapped_statements_for_the_new_analyses_are_gone(skills_root):
         return " ".join((skills_root / path).read_text(encoding="utf-8").split())
     overview = flat(OVERVIEW)
     assert 'absence or "no recent heartbeat" detection' not in overview
-    assert "Still not supported: cross-family queries" in overview                 # still unmapped
+    assert "The one supported cross-family question is **time proximity**" in overview and "any other join of two" in overview   # other joins stay unmapped
     ctl = flat(FAMILY_REFERENCES["controller_log"])
     assert "Treat these as `unmapped`; do not approximate" not in ctl
     assert "Use `text_ratio_shortfall`" in ctl and "Use `context_window`" in ctl

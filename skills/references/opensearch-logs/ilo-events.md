@@ -48,12 +48,39 @@ names and source addresses appear only inside the message text, not as fields.
 | Intent | Approved shape |
 |---|---|
 | Login/logout events for a BMC | time range, term on `entity_host`, `match_phrase` on `text` or term on `event_code` |
+| Root (or any named user) login/logout events | time range, `terms` on `event_code` = `[1017, 1018]` (verified: 1017 = Browser login, 1018 = Browser logout) AND `match_phrase` on `text` with the user name (for example `root`). Never search the literal phrase "root login/logout". The user name is stored in the message text; result rows show it masked, but the filter still works |
 | Hardware events named in the message (e.g. overheating) | time range, term on `entity_host` if a BMC is named, `match_phrase` on `text` with the user's own words (other tenses and plurals are matched by the system) |
-| Most frequent event codes per BMC | `size: 0`, `terms` on `entity_host` with nested `terms` on `event_code` |
+| Most frequent event codes per BMC | `size: 0`, ONE top-level `terms` on `entity_host` with the `terms` on `event_code` NESTED inside its `aggs` (never two aggregations side by side; see the example below) |
+| Which BMCs log in / out most (frequency) | same shape, plus `terms` on `event_code` = `[1017, 1018]` in the filter: counts per BMC and per code, so logins (1017) and logouts (1018) are never mixed. This is a FREQUENCY ranking only (see "Frequency is not anomaly" below) |
+| Security and administration events | term on `category` with the value the data actually uses. The category values are NOT yet verified: first group by `category` (`size: 0`, `terms` on `category`) to see them, or return rows with a category; never search the phrase "Security administration" in `text` |
 | Browser versus IPMI counts | `filters` aggregation with two `match_phrase` clauses on `text` |
 | Abnormal events with actions | time range, `{"named_condition": "abnormal_severity"}` (expanded by the system), rows with `recommended_action` |
-| Unrepaired events | term on `repaired` set to false |
+| Unrepaired events | term on `repaired` set to the JSON boolean `false`, together with `{"named_condition": "abnormal_severity"}`. `repaired` is a boolean field: write the path exactly as listed in the field list, NEVER `Oem.Hpe.Repaired.keyword` (it does not exist and is rejected) and never the string "false". Project `recommended_action` so the action comes back |
 | How long after creation events were ingested | analysis `ingest_lag`: a rows query (time range, any filters), `size` up to 100; if `_source` is given it must include `@timestamp` and `Created`; `"analysis": {"type": "ingest_lag"}` |
+
+## Frequency is not anomaly
+
+"Which BMCs have unusually frequent login/logout?" can be answered only as a
+**frequency ranking**: login/logout counts per BMC over the window. No baseline,
+normal rate or threshold is defined for this family, so nothing can be called
+*unusual* and the highest count is not an anomaly. Run the frequency query,
+and say in the explanation that it ranks BMCs by volume and that no BMC is
+flagged unusual because no baseline exists. The result carries
+`metadata.aggregation.interpretation.anomaly_detection.performed = false`; never
+contradict it. Do not invent a baseline, a threshold or a statistic. Codes
+1017 and 1018 are browser sessions only: IPMI/RMCP access and failed logins are
+not covered by them.
+
+## Failed logins are not supported
+
+The failure event has never been seen in real data: no event code, category or
+message wording for a failed login is verified, so none may be invented
+(do not guess "login failed", "authentication failure" or similar). A
+question such as "Any failed login attempts?" therefore gets
+`{"mode": "single", "status": "unmapped", "explanation": "..."}`: the status is
+**`unmapped`** (never `unsupported_metric`, which is for Prometheus
+measurements), and the explanation says the failed-login representation has not
+yet been verified. Say that, and send no query.
 
 ## Severity and "Abnormal" Definition
 
@@ -140,8 +167,65 @@ How long after creation the last day's events were ingested (`ingest_lag`):
 }
 ```
 
+Event codes per BMC: the host breakdown with the event code nested inside it
+(one top-level aggregation; the second `terms` goes in the first one's `aggs`):
+
+```json
+{
+  "pattern_id": "ilo_events",
+  "intent": "top_n",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } } ] } },
+    "aggs": { "by_host": {
+      "terms": { "field": "host.keyword", "size": 20 },
+      "aggs": { "by_event_code": { "terms": { "field": "Oem.Hpe.Code", "size": 10 } } } } }
+  }
+}
+```
+
+Login and logout frequency per BMC (browser sessions; codes 1017 and 1018 are
+counted separately):
+
+```json
+{
+  "pattern_id": "ilo_events",
+  "intent": "top_n",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "terms": { "Oem.Hpe.Code": [1017, 1018] } } ] } },
+    "aggs": { "by_host": {
+      "terms": { "field": "host.keyword", "size": 20 },
+      "aggs": { "by_event_code": { "terms": { "field": "Oem.Hpe.Code", "size": 2 } } } } }
+  }
+}
+```
+
+Root login and logout events (event code AND the user name in the message):
+
+```json
+{
+  "pattern_id": "ilo_events",
+  "intent": "rows",
+  "query": {
+    "size": 20,
+    "sort": [ { "@timestamp": "desc" } ],
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "terms": { "Oem.Hpe.Code": [1017, 1018] } },
+      { "match_phrase": { "Message": "root" } } ] } }
+  }
+}
+```
+
 ## Guardrails
 
+- Group by TWO fields with ONE top-level aggregation and the second `terms` nested inside it.
+- `Oem.Hpe.Repaired` is a boolean: no `.keyword`, a JSON `false`.
+- Failed logins and "unusual" frequency: see the two sections above; answer `unmapped` / a frequency ranking, never a guess.
 - Never treat the BMC hostname as an xname.
 - Never infer a user name or address as a field; they exist only in message text.
 - Never write a `must_not` on a severity field; use `abnormal_severity`.

@@ -61,10 +61,35 @@ def execute_contract(contract: dict, settings: Settings) -> dict:
     if mode == "multi":
         results = contract.get("results", [])
         executed_results = [_execute_one_entry_isolated(r, settings) for r in results]
-        return {**contract, "results": executed_results}
+        out = {**contract, "results": executed_results}
+        if isinstance(contract.get("correlation"), dict):
+            out["correlation"] = _run_correlation(contract["correlation"], executed_results, settings)
+        return out
 
     # mode == "single": the contract's own top level IS the one result.
     return _execute_one_entry_isolated(contract, settings)
+
+
+def _run_correlation(spec: dict, executed_results: list[dict], settings: Settings) -> dict:
+    """Deterministic time-proximity over the two already-executed entries the spec
+    names (app/opensearch_catalog/correlation.py). Reads results only; it never
+    queries anything, so each source stayed behind its own guard and executor
+    path. A problem here is reported inside the block, never raised."""
+    from app.opensearch_catalog import correlation as os_correlation
+    from app.opensearch_catalog.context import Limits
+
+    limits = Limits.from_settings(settings)
+    try:
+        problem = os_correlation.validate_spec({"mode": "multi", "results": executed_results, "correlation": spec},
+                                               limits.analysis_context_max_minutes * 60)
+        if problem:
+            raise ValueError(problem)
+        result = os_correlation.run(spec, executed_results, max_pairs=limits.max_hits_size)
+    except Exception as exc:  # noqa: BLE001 -- reported in the block; the entries' own results stay intact
+        logger.exception("Correlation could not be computed")
+        result = {"type": spec.get("type"), "outcome": "not_determinable", "complete": False,
+                  "reason": f"The correlation could not be computed: {exc}", "pairs": []}
+    return {**spec, "execution": result}
 
 
 def _execute_one_entry_isolated(entry: dict, settings: Settings) -> dict:
