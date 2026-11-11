@@ -145,7 +145,8 @@ def test_round_trip_is_deterministic_and_sorted(tmp_path, skills):
     assert [r.name for r in loaded.records] == ["aa_metric", "zz_metric"]
     rv.save_reviews(loaded, path)
     assert path.read_bytes() == first
-    assert oct(path.stat().st_mode & 0o777) == "0o644"
+    if os.name != "nt":
+        assert oct(path.stat().st_mode & 0o777) == "0o644"
 
 
 def test_interrupted_write_leaves_the_old_file_intact_and_no_temp_files(tmp_path, skills):
