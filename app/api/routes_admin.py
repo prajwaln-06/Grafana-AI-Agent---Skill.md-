@@ -183,6 +183,55 @@ async def list_users(
         }
 
 
+def _folders_from_mcp_response(raw: Any) -> list[dict[str, str]]:
+    """Extract the folder list from a Grafana MCP ``grafana_api_request`` answer.
+
+    The tool wraps the Grafana response in an envelope::
+
+        {"status": 200, "headers": {...}, "data": [{"uid": ..., "title": ...}]}
+
+    so the folders live in ``data``, not at the top level of the answer. A
+    build that answers with the payload directly is accepted as well.
+
+    Anything else -- an empty answer, a malformed envelope, a Grafana error
+    body -- yields an empty list. The caller then reports the folders it
+    already knows instead of failing the request, because a Grafana that
+    cannot be reached must not take the administrative endpoint down with it.
+    """
+    import json
+
+    payload: Any = raw
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return []
+
+    if isinstance(payload, dict) and "status" in payload:
+        status = payload.get("status")
+        if isinstance(status, int) and status >= 400:
+            logger.warning("Grafana folder listing failed with status %s", status)
+            return []
+        payload = payload.get("data")
+
+    if not isinstance(payload, list):
+        return []
+
+    folders: list[dict[str, str]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        uid = entry.get("uid")
+        if not isinstance(uid, str) or not uid:
+            continue
+        title = entry.get("title")
+        folders.append({
+            "uid": uid,
+            "title": title if isinstance(title, str) and title else uid,
+        })
+    return folders
+
+
 @router.get("/api/v1/admin/folders")
 async def list_grafana_folders(
     request: Request,
@@ -193,7 +242,6 @@ async def list_grafana_folders(
     Administrators only: the folder inventory is used to assign scopes, so
     it is not exposed to ordinary users.
     """
-    import json
     from app.mcp.session import mcp_call
     settings = get_settings()
     results = [
@@ -212,12 +260,12 @@ async def list_grafana_folders(
             raw=True,
             timeout=5.0,
         )
-        folders = json.loads(raw) if raw else []
-        if isinstance(folders, list):
-            for f in folders:
-                if isinstance(f, dict) and f.get("uid") and f.get("uid") != "*":
-                    if not any(r["uid"] == f["uid"] for r in results):
-                        results.append({"uid": f["uid"], "title": f.get("title", f["uid"])})
+        for folder in _folders_from_mcp_response(raw):
+            uid = folder["uid"]
+            if uid == "*":
+                continue
+            if not any(r["uid"] == uid for r in results):
+                results.append({"uid": uid, "title": folder["title"]})
     except Exception as exc:
         logger.debug("Could not query Grafana folders: %s", exc)
 
