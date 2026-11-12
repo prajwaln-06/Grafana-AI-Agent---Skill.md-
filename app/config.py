@@ -197,7 +197,7 @@ class Settings(BaseSettings):
                     "reused. Failures are never cached. 0 disables caching.")
     label_discovery_max_workers: int = Field(
         default=8, ge=1, description="Parallel /api/v1/series calls during label discovery.")
-    pipeline_timeout_seconds: float = Field(default=45.0,
+    pipeline_timeout_seconds: float = Field(default=120.0,
                                              description="Overall budget across all LLM phases for one "
                                                           "request, independent of each call's own retry/"
                                                           "backoff.")

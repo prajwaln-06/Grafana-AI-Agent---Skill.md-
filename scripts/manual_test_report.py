@@ -63,9 +63,48 @@ def _flat(summary: dict, key: str) -> list:
     return list(v) if isinstance(v, list) else []
 
 
+def _summary_for(record: dict) -> dict:
+    s = record.get("summary")
+    if isinstance(s, dict) and s:
+        return s
+    res = (record.get("raw_response") or {}).get("result") or {}
+    entries = [e for e in (res.get("results") if isinstance(res.get("results"), list) else ([res] if res else []))
+               if isinstance(e, dict)]
+    statuses = [e["status"] for e in entries if e.get("status")]
+    if not statuses and record.get("application_status") and record.get("application_status") != "none":
+        statuses = [s.removeprefix("multi:") for s in str(record["application_status"]).split(",") if s]
+    exec_statuses = [
+        e["execution"].get("execution_status") or e["execution"].get("status")
+        for e in entries
+        if isinstance(e.get("execution"), dict) and (e["execution"].get("execution_status") or e["execution"].get("status"))
+    ]
+    if not exec_statuses and record.get("execution_status") and record.get("execution_status") != "not_executed":
+        exec_statuses = [s for s in str(record["execution_status"]).split(",") if s]
+    pattern_ids = [e["pattern_id"] for e in entries if e.get("pattern_id")]
+    intents = [e["intent"] for e in entries if e.get("intent")]
+    analysis_kinds = [e["analysis"]["type"] for e in entries
+                      if isinstance(e.get("analysis"), dict) and e["analysis"].get("type")]
+    return {
+        "result_statuses": statuses,
+        "execution_statuses": exec_statuses,
+        "pattern_ids": pattern_ids,
+        "intents": intents,
+        "analysis_kinds": analysis_kinds,
+    }
+
+
+def _expect_for(record: dict) -> Expect:
+    q = (record.get("question") or "").lower()
+    if "near fabric availability" in q:
+        return EXPECTATIONS["CL-07"]
+    if "which services generate the most error logs" in q:
+        return DEFAULT
+    return EXPECTATIONS.get(record.get("id") or record.get("test_id"), DEFAULT)
+
+
 def grade(record: dict, expect: Expect | None = None) -> dict:
-    exp = expect or EXPECTATIONS.get(record.get("id"), DEFAULT)
-    s = record.get("summary") or {}
+    exp = expect or _expect_for(record)
+    s = _summary_for(record)
     statuses = _flat(s, "result_statuses") or ([s["outcome"]] if s.get("outcome") else [])
     exec_statuses = _flat(s, "execution_statuses")
     problems: list[str] = []

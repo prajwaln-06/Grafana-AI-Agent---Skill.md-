@@ -47,16 +47,17 @@ names and source addresses appear only inside the message text, not as fields.
 
 | Intent | Approved shape |
 |---|---|
-| Login/logout events for a BMC | time range, term on `entity_host`, `match_phrase` on `text` or term on `event_code` |
-| Root (or any named user) login/logout events | time range, `terms` on `event_code` = `[1017, 1018]` (verified: 1017 = Browser login, 1018 = Browser logout) AND `match_phrase` on `text` with the user name (for example `root`). Never search the literal phrase "root login/logout". The user name is stored in the message text; result rows show it masked, but the filter still works |
+| Who logged into a BMC ("Who logged into leif-login03-bmc in last 24 h?") | `intent: "rows"`, `size: 20`, time range, `term` on `entity_host` (`{"term": {"host.keyword": "leif-login03-bmc"}}`) AND `match_phrase` on `text` = `"login"` (`{"match_phrase": {"Message": "login"}}`). Do NOT use `terms` on `Oem.Hpe.Code: [1017, 1018]` here, because code 1018 is logout and IPMI logins use code 1024 |
+| Which BMCs were accessed from an IP ("Which BMCs were accessed from `<ip_address>`?") | `status: "ok"` (NEVER `unmapped`!), `intent: "top_n"`, `size: 0`, time range, `match_phrase` on `text` (`{"match_phrase": {"Message": "<ip_address>"}}` using the exact IP string from the user's question), and `terms` aggregation on `entity_host` (`{"by_host": {"terms": {"field": "host.keyword", "size": 20}}}`). Although the IP address lives inside `Message` text rather than a dedicated IP field, searching `Message` with `match_phrase` and grouping by `host.keyword` directly answers which BMCs were accessed from that IP |
+| Root (or any named user) login/logout events ("Show all root login/logout events.") | `intent: "rows"`, `size: 20`, time range, `terms` on `event_code` = `[1017, 1018]` (verified: 1017 = Browser login, 1018 = Browser logout) AND `match_phrase` on `text` with the user name (for example `root`). Never search the literal phrase "root login/logout". The user name is stored in the message text; result rows show it masked, but the filter still works |
 | Hardware events named in the message (e.g. overheating) | time range, term on `entity_host` if a BMC is named, `match_phrase` on `text` with the user's own words (other tenses and plurals are matched by the system) |
-| Most frequent event codes per BMC | `size: 0`, ONE top-level `terms` on `entity_host` with the `terms` on `event_code` NESTED inside its `aggs` (never two aggregations side by side; see the example below) |
-| Which BMCs log in / out most (frequency) | same shape, plus `terms` on `event_code` = `[1017, 1018]` in the filter: counts per BMC and per code, so logins (1017) and logouts (1018) are never mixed. This is a FREQUENCY ranking only (see "Frequency is not anomaly" below) |
-| Security and administration events | term on `category` with the value the data actually uses. The category values are NOT yet verified: first group by `category` (`size: 0`, `terms` on `category`) to see them, or return rows with a category; never search the phrase "Security administration" in `text` |
-| Browser versus IPMI counts | `filters` aggregation with two `match_phrase` clauses on `text` |
-| Abnormal events with actions | time range, `{"named_condition": "abnormal_severity"}` (expanded by the system), rows with `recommended_action` |
-| Unrepaired events | term on `repaired` set to the JSON boolean `false`, together with `{"named_condition": "abnormal_severity"}`. `repaired` is a boolean field: write the path exactly as listed in the field list, NEVER `Oem.Hpe.Repaired.keyword` (it does not exist and is rejected) and never the string "false". Project `recommended_action` so the action comes back |
-| How long after creation events were ingested | analysis `ingest_lag`: a rows query (time range, any filters), `size` up to 100; if `_source` is given it must include `@timestamp` and `Created`; `"analysis": {"type": "ingest_lag"}` |
+| Most frequent event codes per BMC ("Event codes recurring most per host.") | `intent: "top_n"`, `size: 0`, ONE top-level `terms` on `entity_host` (`host.keyword`) with the `terms` on `event_code` (`Oem.Hpe.Code`) NESTED inside its `aggs` (never two aggregations side by side; see the example below) |
+| Which BMCs log in / out most / unusually frequent login/logout ("Which BMCs have unusually frequent login/logout?") | `status: "ok"` (NEVER `unmapped`!), `intent: "top_n"`, `size: 0`, same nested shape (`host.keyword` -> `Oem.Hpe.Code`), plus `terms` on `event_code` = `[1017, 1018]` in the filter: counts per BMC and per code, so logins (1017) and logouts (1018) are never mixed. This is a FREQUENCY ranking only (see "Frequency is not anomaly" below) |
+| Security and administration events ("Security & administration events for a BMC.") | `intent: "rows"`, `size: 20`, time range, filter on `category` (`Oem.Hpe.Categories.keyword`) using `{"terms": {"Oem.Hpe.Categories.keyword": ["Security", "Administration"]}}` (add `term` on `host.keyword` if a specific BMC is named); never search the phrase "Security administration" in `text` |
+| Browser versus IPMI/RMCP login counts ("Browser vs IPMI/RMCP login counts.") | `intent: "top_n"`, `size: 0`, time range, `filters` aggregation with two `match_phrase` clauses on `Message`: `"browser": {"match_phrase": {"Message": "Browser login"}}` and `"ipmi_rmcp": {"match_phrase": {"Message": "RMCP"}}` (always include `"RMCP"` in the second filter clause) |
+| Severity other than OK or Informational ("Severity other than OK or Informational.") | `intent: "rows"`, `size: 20`, time range, `{"named_condition": "abnormal_severity"}` (expanded by the system to include `Caution`, `Warning`, `Critical`), rows with `_source` |
+| Warning/critical events marked unrepaired + recommended actions ("Warning/critical events marked unrepaired + recommended actions.") | `intent: "rows"`, `size: 20`, time range, `term` on `repaired` set to JSON boolean `false` (`{"term": {"Oem.Hpe.Repaired": false}}`), together with explicit Warning/Critical filter `{"bool": {"should": [{"terms": {"Severity.keyword": ["Warning", "Critical"]}}, {"terms": {"Oem.Hpe.Severity.keyword": ["Warning", "Critical"]}}], "minimum_should_match": 1}}` (do NOT include `"Caution"` when the question specifically asks for **warning/critical** events). `repaired` is a boolean field: write `Oem.Hpe.Repaired`, NEVER `Oem.Hpe.Repaired.keyword` and never the string `"false"`. Always include `Oem.Hpe.RecommendedAction` in `_source` |
+| How long after creation events were ingested ("How long after creation were events ingested?") | analysis `ingest_lag`: a rows query (time range, any filters), `size` up to 100; `_source` MUST include `@timestamp` and `Created`; `"analysis": {"type": "ingest_lag"}` |
 
 ## Frequency is not anomaly
 
@@ -122,9 +123,11 @@ case.
   sample of the returned rows (newest first), not every event, and `Created` is
   display-only and **unverified** as an event clock; say both in the answer. A
   negative lag (ingested "before" it was created) is counted and reported.
-- **Still not supported by a plain query:** detecting "unusually frequent"
-  access (no baseline is defined) and failed login detection (the failure
-  wording has not been confirmed). Treat these as `unmapped`.
+- **Still not supported by a plain anomaly query:** detecting "unusually frequent"
+  access as an anomaly (no baseline is defined; answer with the `top_n` login/logout
+  frequency ranking query above and `status: "ok"`, never `unmapped`) and failed
+  login detection (the failure wording has not been confirmed; treat failed logins
+  as `unmapped`).
 
 ## Safe Projection
 
@@ -138,16 +141,87 @@ fields.
 No verified query example is currently available for this family; the examples
 are fixture-checked shape illustrations, not run against the live cluster.
 
+Warning/critical events marked unrepaired with recommended actions (`Oem.Hpe.Repaired: false` and explicit `Warning`/`Critical` severities):
+
 ```json
 {
-  "size": 20,
-  "sort": [ { "@timestamp": "desc" } ],
-  "query": { "bool": {
-    "filter": [ { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
-                { "named_condition": "abnormal_severity" },
-                { "term": { "Oem.Hpe.Repaired": false } } ] } },
-  "_source": [ "@timestamp", "Created", "host", "Severity", "Message", "Oem.Hpe.Severity",
-               "Oem.Hpe.Code", "Oem.Hpe.RecommendedAction" ]
+  "pattern_id": "ilo_events",
+  "intent": "rows",
+  "query": {
+    "size": 20,
+    "sort": [ { "@timestamp": "desc" } ],
+    "query": { "bool": {
+      "filter": [
+        { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+        { "term": { "Oem.Hpe.Repaired": false } },
+        { "bool": {
+          "should": [
+            { "terms": { "Severity.keyword": [ "Warning", "Critical" ] } },
+            { "terms": { "Oem.Hpe.Severity.keyword": [ "Warning", "Critical" ] } }
+          ],
+          "minimum_should_match": 1
+        } }
+      ] } },
+    "_source": [ "@timestamp", "Created", "host", "Severity", "Message", "Oem.Hpe.Severity",
+                 "Oem.Hpe.Code", "Oem.Hpe.RecommendedAction" ]
+  }
+}
+```
+
+Who logged into `leif-login03-bmc` in the last 24 hours (`term` on `host.keyword` + `match_phrase` `"login"` on `Message`):
+
+```jsonc
+{
+  "pattern_id": "ilo_events",
+  "intent": "rows",
+  "query": {
+    "size": 20,
+    "sort": [ { "@timestamp": "desc" } ],
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "term": { "host.keyword": "leif-login03-bmc" } },
+      { "match_phrase": { "Message": "login" } } ] } }
+  }
+}
+```
+
+Which BMCs were accessed from a source IP (`top_n` on `host.keyword` with `match_phrase` `"<ip_address>"` on `Message`):
+
+```jsonc
+{
+  "pattern_id": "ilo_events",
+  "intent": "top_n",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "match_phrase": { "Message": "<ip_address>" } } ] } },
+    "aggs": { "by_host": { "terms": { "field": "host.keyword", "size": 20 } } }
+  }
+}
+```
+
+Browser vs IPMI/RMCP login counts (`filters` aggregation with `"Browser login"` and `"RMCP"`):
+
+```jsonc
+{
+  "pattern_id": "ilo_events",
+  "intent": "top_n",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } } ] } },
+    "aggs": {
+      "login_channels": {
+        "filters": {
+          "filters": {
+            "browser": { "match_phrase": { "Message": "Browser login" } },
+            "ipmi_rmcp": { "match_phrase": { "Message": "RMCP" } }
+          }
+        }
+      }
+    }
+  }
 }
 ```
 

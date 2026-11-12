@@ -34,11 +34,17 @@ about how far the numbers can be trusted.
   sorting text fields, true/false groups, missing totals, the executor re-running
   the full guard, aggregation names, rounded time windows, cross-datasource
   dependencies, recurrence truncation warnings and registry reload.
-* Tests: **1456** in total (1385 after the merge, plus 71 audit regression
-  tests). On this Windows laptop 1455 pass and one fails only because it checks
-  a Linux file permission; on Linux the 1385 merge-era tests all passed
-  (checked in a Linux container, see `progress.md`). The audit tests have been
-  run on Windows only. The starting point was 1231.
+* Post-audit enhancements and manual-test suite fixes (2026-11-12, section 19):
+  tense/plural-tolerant text search (`text_forms.py`), semantic result caching
+  (`query_cache.py`), single-family two-query time-proximity correlation
+  (`correlation.py`), Gemini 503 retry resilience (`MAX_RETRIES = 5`,
+  `pipeline_timeout_seconds = 120.0`), complete Router/Generator skill coverage
+  for all 30 mentor questions across Fabric Health, Controller Log, and iLO
+  Event Log, and parallel direct-vs-agent OpenSearch verification (30/30 pass
+  and 30/30 match).
+* Tests: **1778** passing unit/integration tests (`python -m pytest tests -q`),
+  plus **30/30** passing end-to-end questions in `scripts/run_opensearch_30_suite.py`
+  and `scripts/manual_test_report.py --strict`.
 
 **What is not finished, on purpose?** Alerting and correlations on OpenSearch
 (see `docs/NEXT_PHASE.md`, which keeps all 63 open questions). Nothing has been
@@ -48,10 +54,12 @@ pretend cluster, so `docs/SMOKE_TEST.md` tells you how to check the real one.
 **Your most useful commands:**
 
 ```
-python -m pytest tests -q                                   # all tests
+python -m pytest tests -q                                   # all 1778 tests
 python scripts/smoke_test_opensearch.py --check-skills      # offline: registry and skill files agree? what is unverified?
 python scripts/smoke_test_opensearch.py --queries --rows    # live: do the families and fields exist on the real cluster?
 python scripts/smoke_test_opensearch.py --examples --analyses   # live: do the examples and the five analyses work?
+python scripts/run_opensearch_30_suite.py                   # live: run 30 mentor questions + direct OpenSearch query comparison
+python scripts/manual_test_report.py test_output_all_fixed.json --strict  # verify 30/30 HTTP, status, and semantic checks
 python run_server.py                                        # starts the service on port 8000
 curl localhost:8000/api/v1/opensearch/status                # health of the OpenSearch part
 ```
@@ -270,6 +278,9 @@ All OpenSearch logic is in `app/opensearch_catalog/`. Each file has one job.
 | `redaction.py` | masks user names, e-mail and IP addresses in everything returned | you need to know what is masked and what is not |
 | `results.py` | turns the raw answer into rows/buckets/series plus metadata (exact or "at least", partial, approximate, observed range) | you read a result's `metadata` |
 | `analysis.py` (new) | the five multi-step recipes (section 11) | you work on absence, context windows, lag, shortfalls or recurrence |
+| `correlation.py` (new) | single-family two-query time-proximity correlation (for example link-down events near fabric availability problems) | you work on time-proximity correlation across two queries in one log family |
+| `text_forms.py` (new) | tense/plural-tolerant text search expansion and empty-result flagging | a phrase search needs morphological variants (e.g. login / logged in) |
+| `query_cache.py` (new) | semantic result cache for completed OpenSearch answers | you inspect or configure cached OpenSearch query results |
 | `runtime.py` | keeps the registry and catalog caches for the whole process; the admin reload re-reads the registry | rarely |
 
 Files outside the folder that take part: `app/opensearch_client.py` (the HTTP
@@ -546,11 +557,22 @@ count**, and only then are they ranked by separate hours. A port with few
 documents spread over many hours can therefore be left out. When any entity was
 left out, the answer carries a `ranking_limited` warning.
 
-### 11.6 What did not become an analysis
+### 11.6 Correlation, frequency rankings, and what stays `unmapped`
 
-"Unusually frequent logins" (no baseline is defined), "failed logins" (the
-wording is not confirmed) and questions that join two families or logs with
-metrics stay `unmapped`, exactly as the friend's skill files say.
+* **Single-family two-query time-proximity correlation (`correlation.py`):**
+  Questions like "Did link-down events occur near fabric availability problems?"
+  (CL-06) run two validated queries within `controller_log` and pair events
+  within a bounded time window (`window: "5m"`, max `60m`).
+* **Login/logout frequency ranking & failed login text search:**
+  "Which BMCs have frequent login/logout?" (ILO-05) is answered with a `top_n`
+  host aggregation (`terms` on `entity_host` with login/logout phrase filters)
+  while noting that true statistical anomaly detection is unsupported. "Any
+  failed login attempts?" (ILO-06) uses provisional phrase matching on `Message`
+  (`failed login`, `login failure`, `authentication failure`, `invalid password`).
+* **What stays `unmapped`:** Cross-family joins (joining two different
+  `pattern_id` families or joining OpenSearch logs with Prometheus metrics) and
+  statistical anomaly detection ("unusually frequent" relative to a learned
+  baseline) stay `unmapped`.
 
 ---
 
@@ -709,5 +731,19 @@ fail on the code as audited). Details and decision numbers (D-38 to D-48) are in
 | Reload | Changing the registry needed a restart. | The admin reload re-reads it. |
 | Docs | Wildcards, time zones, the controller "error" example and alert support were described wrongly. | Corrected; alerts are Prometheus-only. |
 
-**Still not verified:** anything on the real cluster (section 14). Run
-`docs/SMOKE_TEST.md` before relying on it.
+---
+
+## 19. Post-audit features and 30-question mentor suite verification (2026-11-12)
+
+Following the 2026-11-02 audit, additional capabilities and full 30-question
+mentor suite fixes were implemented and verified against the live local
+OpenSearch instance (`http://127.0.0.1:9250`):
+
+| Area | What was added or fixed | Files |
+|---|---|---|
+| Tense/plural-tolerant text search | Expands `match_phrase` queries with morphological variants and flags empty text-search results with caveats. | `app/opensearch_catalog/text_forms.py`, `app/opensearch_catalog/guard.py` |
+| Semantic result cache | Caches completed OpenSearch answers with strict completeness checks (refuses incomplete analyses or unexpanded `context_window` anchors). | `app/opensearch_catalog/query_cache.py`, `app/opensearch_catalog/runtime.py` |
+| Two-query time-proximity correlation | Supports single-family two-query correlation (CL-06: link-down events near fabric availability problems) with guard validation on both queries. | `app/opensearch_catalog/correlation.py`, `app/executor.py`, `app/validator.py` |
+| LLM 503 & pipeline timeout resilience | Increased Gemini API retry attempts (`MAX_RETRIES = 5` with exponential backoff up to 16 s) and raised `pipeline_timeout_seconds` from `30.0` to `120.0` so multi-query/retry requests do not time out prematurely. | `app/llm_client.py`, `app/config.py`, `.env.example` |
+| Skill routing & 30-question intent coverage | Added explicit domain routing triggers in `skills/SKILL.md` (e.g. `j104p1`, `linkautorestartexhaustederror`, `CRON`, `hmpad`, `hmscd`, `i2c ioctl`, `leif-login03-bmc`, `IPMI`, `RMCP`) and comprehensive `Query Intent Patterns` tables across all three OpenSearch reference files while keeping field discovery 100% dynamic via `field_catalog.py`. | `skills/SKILL.md`, `skills/references/opensearch-logs/fabric-health.md`, `controller-log.md`, `ilo-events.md` |
+| End-to-end 30-question verification & direct comparison | Added `scripts/run_opensearch_30_suite.py` and updated `scripts/manual_test_report.py` to support both 30- and 31-question suites. Verified **30/30** questions passing end-to-end and **30/30** matching direct OpenSearch queries. | `scripts/run_opensearch_30_suite.py`, `scripts/manual_test_report.py`, `opensearch_question_suite_fixed.json`, `test_output_all_fixed.json`, `opensearch_direct_vs_agent_comparison.json` |

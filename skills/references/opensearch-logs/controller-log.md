@@ -59,16 +59,18 @@ manager reports switch availability, `hmscd` reports link status changes, and
 
 | Intent | Approved shape |
 |---|---|
-| Hosts with errors | `size: 0`, time range, `{"named_condition": "abnormal_severity"}` for the error set (expanded by the system), `terms` on `entity_host` with a small nested `terms` on `service` |
-| Services producing most errors | same filter, `terms` on `service` |
-| "Are the same errors recurring on a controller?" | the SAME query as "Hosts with errors": `size: 0`, time range, `abnormal_severity`, ONE top-level `terms` on `entity_host` with the `terms` on `service` nested inside it. This is a **narrower question than asked** and the answer must say so: it shows which controllers keep logging errors, and from which service, with a document count per pair, i.e. *repeated error activity from the same controller and service*. It does NOT show that the same message text repeated: message text is never grouped, so identical-message recurrence is **not supported** (say so; do not infer it from a high count). The `recurrence` analysis is not configured for this family; do not request it |
+| Hosts with errors | `intent: "top_n"`, `size: 0`, time range, `{"named_condition": "abnormal_severity"}` for the error set (expanded by the system), `terms` on `entity_host` with a small nested `terms` on `service` |
+| Services producing most errors | `intent: "top_n"`, `size: 0`, same filter, `terms` on `service` |
+| I²C failures and bus numbers ("Which controllers reported I²C failures, and which bus numbers?") | `intent: "rows"`, `size: 20`, time range, `match_phrase` on `text` = `"i2c ioctl failed"` (`{"match_phrase": {"Body": "i2c ioctl failed"}}`, NEVER `"I2C failures"`). In `hmpad` logs, I²C failures are recorded as `"dil_query_bus_pmbus: i2c ioctl failed (rc = -1) for bus number: <n>"`, and the bus number lives only inside `Body` text, so return rows with `_source` including `Body` and `Resource.host.name` |
+| "Are the same errors recurring on a controller?" | the SAME query as "Hosts with errors": `intent: "top_n"`, `size: 0`, time range, `abnormal_severity`, ONE top-level `terms` on `entity_host` with the `terms` on `service` nested inside it. This is a **narrower question than asked** and the answer must say so: it shows which controllers keep logging errors, and from which service, with a document count per pair, i.e. *repeated error activity from the same controller and service*. It does NOT show that the same message text repeated: message text is never grouped, so identical-message recurrence is **not supported** (say so; do not infer it from a high count). The `recurrence` analysis is not configured for this family; do not request it |
+| "LinkStatus Down" hosts or ports down on a controller host (`'Which hosts reported "LinkStatus Down"? / ports down on x1000c2r3b0?'`) | This belongs ENTIRELY to `controller_log` (`hmscd` logs `"update_redis_network_adapters_link_down: Setting LinkStatus Down for <port>"` in `Body` on controller hosts such as `x1000c2r3b0`) and is NEVER `ambiguous_metric`. When a host (`x1000c2r3b0`) or port-down details are asked for, return a single `intent: "rows"` query (`size: 20`) with `{"match_phrase": {"Body": "LinkStatus Down"}}` (and `{"term": {"Resource.host.name.keyword": "x1000c2r3b0"}}` when `x1000c2r3b0` is named) and project `Body` in `_source` (`["@timestamp", "Resource.host.name", "Resource.service.name", "Severity", "Body"]`) because the port token lives only in `Body` |
 | Did link-down events occur near fabric availability problems? | cross-family time proximity: `mode: "multi"` with two row queries and a `correlation` object (see "Near another family's events" below). The tolerance must come from the user |
 | Error volume over time | same filter, `date_histogram` on `@timestamp` with an interval chosen from the window |
 | Messages mentioning a phrase | `match_phrase` on `text` inside `filter` with the time range |
-| Messages for a service on a host | two exact-term filters (`service`, `entity_host`) plus the time range |
-| Exclude routine noise | `must_not` term on `service` for the noisy service |
-| What was logged before and after an event | analysis `context_window`: a rows query that finds the event (`match_phrase` on `text`, time range), `size` 1 to 3; `"analysis": {"type": "context_window"}` with optional `before` / `after` (default 5 minutes each, at most 60) and an optional `context_filter` (one clause, no time range) that selects the surrounding messages, for example a term on `service` |
-| Fewer switches available than expected | analysis `text_ratio_shortfall`: a rows query with `match_phrase` on `text` for the availability message, `size` up to 100; `"analysis": {"type": "text_ratio_shortfall"}` |
+| Messages / errors for a service on a host ("Show all hmpad errors for x1000c6s7b1.") | `intent: "rows"`, `size: 20`, time range, `{"named_condition": "abnormal_severity"}` (when errors are requested), and two exact-term filters (`{"term": {"Resource.service.name.keyword": "hmpad"}}`, `{"term": {"Resource.host.name.keyword": "x1000c6s7b1"}}`) |
+| Exclude routine CRON noise ("Show controller logs excluding routine CRON.") | `intent: "rows"`, `size: 20`, time range, `must_not` term on `service` with exact uppercase `"CRON"` (`"must_not": [{"term": {"Resource.service.name.keyword": "CRON"}}]`, NEVER lowercase `"cron"`) |
+| What was logged before and after an event ("What did hmscd report before and after a link-down event?") | analysis `context_window`: a rows query that finds the event (`match_phrase` on `text`, time range), `size` 1 to 3; `"analysis": {"type": "context_window"}` with optional `before` / `after` (default 5 minutes each, at most 60) and an optional `context_filter` (one clause, no time range) that selects the surrounding messages, for example a term on `service` (`{"term": {"Resource.service.name.keyword": "hmscd"}}`) |
+| Fewer switches available than expected ("Fabric-manager messages with fewer switches available than expected?") | analysis `text_ratio_shortfall`: a rows query with `match_phrase` on `text` for `"switches available"` (and `terms` on `Resource.service.name.keyword` = `["fabric-manager.sh", "fabric-manager"]`), `size` up to 100; `"analysis": {"type": "text_ratio_shortfall"}` |
 
 The text role is search-only. Values that live only inside the message text
 (a bus number, a port token) can be returned in rows but not grouped.
@@ -190,6 +192,57 @@ Fabric-manager messages with fewer switches available than expected
       { "match_phrase": { "Body": "switches available" } } ] } }
   },
   "analysis": { "type": "text_ratio_shortfall" }
+}
+```
+
+Controllers reporting I²C failures and bus numbers (`rows` with `match_phrase` `"i2c ioctl failed"` on `Body`):
+
+```jsonc
+{
+  "pattern_id": "controller_log",
+  "intent": "rows",
+  "query": {
+    "size": 20,
+    "sort": [ { "@timestamp": "desc" } ],
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "match_phrase": { "Body": "i2c ioctl failed" } } ] } },
+    "_source": [ "@timestamp", "Resource.host.name", "Resource.service.name", "Severity", "Body" ]
+  }
+}
+```
+
+Hosts reporting `"LinkStatus Down"` / ports down on `x1000c2r3b0` (`rows` on `controller_log`, never `ambiguous_metric`):
+
+```jsonc
+{
+  "pattern_id": "controller_log",
+  "intent": "rows",
+  "query": {
+    "size": 20,
+    "sort": [ { "@timestamp": "desc" } ],
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "match_phrase": { "Body": "LinkStatus Down" } },
+      { "term": { "Resource.host.name.keyword": "x1000c2r3b0" } } ] } },
+    "_source": [ "@timestamp", "Resource.host.name", "Resource.service.name", "Severity", "Body" ]
+  }
+}
+```
+
+Controller logs excluding routine CRON (`must_not` exact uppercase `"CRON"` on `Resource.service.name.keyword`):
+
+```jsonc
+{
+  "pattern_id": "controller_log",
+  "intent": "rows",
+  "query": {
+    "size": 20,
+    "sort": [ { "@timestamp": "desc" } ],
+    "query": { "bool": {
+      "filter": [ { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } } ],
+      "must_not": [ { "term": { "Resource.service.name.keyword": "CRON" } } ] } }
+  }
 }
 ```
 

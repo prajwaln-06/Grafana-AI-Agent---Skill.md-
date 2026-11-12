@@ -62,13 +62,14 @@ treat the two spellings as different switches.
 
 | Intent | Approved shape |
 |---|---|
-| Non-healthy components | `size: 0`, time range on `@timestamp`, `exists` on `health_state`, `must_not` term `HEALTHY`, `terms` on `entity_switch` |
-| Faults per switch | time range, term on `health_state`, `terms` on `entity_switch`, with a `cardinality` sub-aggregation on `entity_location` for distinct affected ports |
-| Which event kinds exist | `terms` on `event_kind` (and on `health_state` for the state list) |
-| Ports disabled for flapping | `match_phrase` on `text`, `terms` on `entity_location` |
-| Recommendations for a port | term on `entity_port` (a bare port name such as `j104p1` belongs in `entity_port`, NOT in `entity_location`, which holds the composite switch-plus-port value and would not match a bare port), return `text` in rows |
-| Critical / degraded / unhealthy events for ONE switch | time range, `{"named_condition": "abnormal_severity"}` (or an explicit stored state), and a `prefix` on `entity_switch` with the switch name the user gave: the stored switch value usually carries an ASIC suffix (`x1000c3r1` is stored as `x1000c3r1b0`), so an exact term on the bare name finds nothing. `prefix` is the only partial match allowed; never `wildcard` |
-| Most unhealthy racks/chassis | `terms` on `group_rack` with a nested `terms` on `group_chassis` |
+| Non-healthy components | `intent: "top_n"`, `size: 0`, time range on `@timestamp`, `exists` on `health_state`, `must_not` term `HEALTHY`, `terms` on `entity_switch` |
+| Faults / CRITICAL events per switch ("How many CRITICAL events occurred per switch?") | `intent: "top_n"`, `size: 0`, time range, `term` on `health_state` = `"CRITICAL"`, `terms` on `entity_switch` (`size: 20`), with BOTH a `cardinality` sub-aggregation (`distinct_ports`) AND a `terms` sub-aggregation (`by_location`, `size: 10`) on `entity_location` (`fields.Location.keyword`) inside `by_switch.aggs` so distinct locations and per-location counts are always shown alongside switch counts |
+| Which health states or event kinds exist ("What health states exist besides HEALTHY?") | `intent: "top_n"`, `size: 0`, `terms` on `health_state` (`fields.PhysicalSubContext.keyword`) with only the time range filter (or `terms` on `event_kind` for event kinds) |
+| Ports disabled due to excessive flapping ("Which ports were disabled due to excessive flapping?") | `intent: "top_n"`, `size: 0` (NEVER `intent: "rows"`), time range, `match_phrase` on `text` (`{"match_phrase": {"fields.Value": "excessive flapping"}}`), and `terms` aggregation on `entity_location` (`fields.Location.keyword`) |
+| Recommendations for a port ("What recommendations were reported for port j104p1?") | `intent: "rows"`, `size: 20`, time range, `term` on `entity_port` (`{"term": {"fields.Port.keyword": "j104p1"}}` — a bare port name such as `j104p1` belongs in `entity_port`, NOT in `entity_location`, which holds the composite switch-plus-port value and would not match a bare port), return `text` (`fields.Value`) in `_source` |
+| Which switches reported a specific fault/event kind ("Which switches reported linkerrors.linkautorestartexhaustederror?") | `intent: "top_n"`, `size: 0` (NEVER `intent: "rows"`), time range, `term` on `event_kind` (`{"term": {"fields.PhysicalContext.keyword": "linkerrors.linkautorestartexhaustederror"}}`), and `terms` aggregation on `entity_switch` (`fields.Switch.keyword`) |
+| Critical events for ONE switch ("Show critical events for switch x1000c3r1.") | `intent: "rows"`, `size: 20`, time range, `term` on `health_state` = `"CRITICAL"` (`{"term": {"fields.PhysicalSubContext.keyword": "CRITICAL"}}`), and `term` on `entity_switch` = `"x1000c3r1"` (`{"term": {"fields.Switch.keyword": "x1000c3r1"}}`). Note: fault/CRITICAL documents store the bare switch xname (`x1000c3r1`), whereas heartbeat documents carry an ASIC suffix (`x1000c3r1b0`), where `prefix` is the only partial match allowed (never `wildcard`) |
+| Most unhealthy racks/chassis | `intent: "top_n"`, `size: 0`, time range, `{"named_condition": "abnormal_severity"}`, `terms` on `group_rack` (`fields.Rack.keyword`) with a nested `terms` on `group_chassis` (`fields.Chassis.keyword`) |
 | Switches that stopped sending heartbeats | analysis `absence`: `size: 0`, time range = the baseline (for example the last 24 hours), term on `event_kind` = `runtime.heartbeat`, ONE `terms` on `entity_switch` with no sub-aggregation; `"analysis": {"type": "absence"}` (optional `recent_window`) |
 | Ports with recurring faults | analysis `recurrence`: `size: 0`, time range, `{"named_condition": "abnormal_severity"}` (every non-HEALTHY state; do not hard-code `CRITICAL`), `terms` on `entity_location` with ONE `date_histogram` sub-aggregation on `@timestamp` using the registry interval (`1h`); `"analysis": {"type": "recurrence"}` |
 
@@ -177,9 +178,47 @@ Ports with recurring faults (`recurrence`), over the last 7 days:
 }
 ```
 
-Unhealthy events for one switch, named without its ASIC suffix (`prefix`, not an exact term):
+CRITICAL events per switch, showing both distinct locations and location breakdown inside `by_switch`:
 
 ```json
+{
+  "pattern_id": "fabric_health",
+  "intent": "top_n",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "term": { "fields.PhysicalSubContext.keyword": "CRITICAL" } } ] } },
+    "aggs": { "by_switch": {
+      "terms": { "field": "fields.Switch.keyword", "size": 20 },
+      "aggs": {
+        "distinct_ports": { "cardinality": { "field": "fields.Location.keyword" } },
+        "by_location": { "terms": { "field": "fields.Location.keyword", "size": 10 } }
+      }
+    } }
+  }
+}
+```
+
+Ports disabled due to excessive flapping (`top_n` on `fields.Location.keyword` with `match_phrase` `"excessive flapping"`):
+
+```jsonc
+{
+  "pattern_id": "fabric_health",
+  "intent": "top_n",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "match_phrase": { "fields.Value": "excessive flapping" } } ] } },
+    "aggs": { "by_location": { "terms": { "field": "fields.Location.keyword", "size": 50 } } }
+  }
+}
+```
+
+Recommendations reported for port `j104p1` (`rows` with `term` on `fields.Port.keyword`):
+
+```jsonc
 {
   "pattern_id": "fabric_health",
   "intent": "rows",
@@ -188,8 +227,41 @@ Unhealthy events for one switch, named without its ASIC suffix (`prefix`, not an
     "sort": [ { "@timestamp": "desc" } ],
     "query": { "bool": { "filter": [
       { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
-      { "named_condition": "abnormal_severity" },
-      { "prefix": { "fields.Switch": "x1000c3r1" } } ] } }
+      { "term": { "fields.Port.keyword": "j104p1" } } ] } },
+    "_source": [ "@timestamp", "fields.Switch", "fields.Port", "fields.Location", "fields.PhysicalContext", "fields.PhysicalSubContext", "fields.Value" ]
+  }
+}
+```
+
+Switches that reported `linkerrors.linkautorestartexhaustederror` (`top_n` on `fields.Switch.keyword`):
+
+```jsonc
+{
+  "pattern_id": "fabric_health",
+  "intent": "top_n",
+  "query": {
+    "size": 0,
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "term": { "fields.PhysicalContext.keyword": "linkerrors.linkautorestartexhaustederror" } } ] } },
+    "aggs": { "by_switch": { "terms": { "field": "fields.Switch.keyword", "size": 50 } } }
+  }
+}
+```
+
+Critical events for switch `x1000c3r1` (`rows` with exact `term` on `fields.PhysicalSubContext.keyword: "CRITICAL"` and `fields.Switch.keyword: "x1000c3r1"`):
+
+```jsonc
+{
+  "pattern_id": "fabric_health",
+  "intent": "rows",
+  "query": {
+    "size": 20,
+    "sort": [ { "@timestamp": "desc" } ],
+    "query": { "bool": { "filter": [
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+      { "term": { "fields.PhysicalSubContext.keyword": "CRITICAL" } },
+      { "term": { "fields.Switch.keyword": "x1000c3r1" } } ] } }
   }
 }
 ```
@@ -197,7 +269,7 @@ Unhealthy events for one switch, named without its ASIC suffix (`prefix`, not an
 ## Guardrails
 
 - A bare port name goes in `entity_port`; the composite `entity_location` is never matched with a bare port.
-- A switch named without an ASIC suffix is matched with `prefix`, never an exact term and never `wildcard`.
+- For general unhealthy events across ASIC-suffixed switch spellings, `prefix` is used (never `wildcard`); for explicit critical fault documents on a bare switch xname such as `x1000c3r1`, use `term` on `fields.Switch.keyword`.
 - Every question about faults excludes heartbeat documents.
 - Never filter or bucket on a device-time field.
 - Never group on the text role.

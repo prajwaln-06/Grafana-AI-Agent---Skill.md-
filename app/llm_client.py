@@ -38,7 +38,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 BASE_BACKOFF_SECONDS = 2
 
 
