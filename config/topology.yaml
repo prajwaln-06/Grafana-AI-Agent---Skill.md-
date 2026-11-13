@@ -1,0 +1,74 @@
+# Maps each simulated Prometheus node (the NODE_ID of an exporter) to the identity
+# it has in the three OpenSearch indices. This is what makes
+#   "node-00 has a CPU spike in Prometheus"  <=>  "leif-login01-bmc logs it in log_iml"
+#   "node-00 loses its fabric link"          <=>  "x1000c4r1b0 logs it in controllerlog"
+#
+# All hostnames below are taken from your exported samples. Rename freely.
+# A node that is missing here still works: identities are auto-generated.
+
+nodes:
+  node-00:
+    bmc_host: leif-login01-bmc        # -> log_iml        (iLO / IML)
+    ilo_generation: 6
+    switch: x1000c4r1b0               # -> controllerlog + slingshot_crayfabrichealth
+    port: {name: x1000c4r1j24p1, number: 36}
+  node-01:
+    bmc_host: leif-login02-bmc
+    ilo_generation: 6
+    switch: x1000c6r3b0
+    port: {name: x1000c6r3j104p1, number: 16}
+  node-02:
+    bmc_host: leif-login03-bmc
+    ilo_generation: 5
+    switch: x1000c4r5b0
+    port: {name: x1000c4r5j24p1, number: 36}
+  node-03:
+    bmc_host: fmn01-bmc
+    ilo_generation: 6
+    switch: x1000c2r7b0
+    port: {name: x1000c2r7j104p1, number: 16}
+
+# Starting counters so new iLO entries continue from the numbers seen in your export.
+# (Id = per-log entry id, EventNumber = per-BMC event counter.) They advance with time
+# from this date, so backfilled history and live data stay in order.
+ilo_counters_as_of: "2026-10-26T00:00:00Z"
+ilo_counters:
+  leif-login01-bmc: {id: 274, event_number: 448899}
+  leif-login02-bmc: {id: 271, event_number: 1319220}
+  leif-login03-bmc: {id: 272, event_number: 446494}
+  fmn01-bmc:        {id: 274, event_number: 1185378}
+
+# The full switch roster seen in slingshot_crayfabrichealth (heartbeats + ambient
+# controllerlog chatter come from these).
+switches:
+  - x1000c0r1b0
+  - x1000c0r3b0
+  - x1000c0r5b0
+  - x1000c0r7b0
+  - x1000c1r1b0
+  - x1000c1r7b0
+  - x1000c2r1b0
+  - x1000c2r3b0
+  - x1000c2r5b0
+  - x1000c2r7b0
+  - x1000c3r1b0
+  - x1000c3r3b0
+  - x1000c3r7b0
+  - x1000c4r1b0
+  - x1000c4r3b0
+  - x1000c4r5b0
+  - x1000c4r7b0
+  - x1000c5r1b0
+  - x1000c5r3b0
+  - x1000c5r5b0
+  - x1000c5r7b0
+  - x1000c6r1b0
+  - x1000c6r3b0
+  - x1000c6r5b0
+  - x1000c6r7b0
+  - x1000c7r1b0
+  - x1000c7r3b0
+  - x1000c7r5b0
+  - x1000c7r7b0
+  - x3000c0r21b0
+  - x3001c0r42b0

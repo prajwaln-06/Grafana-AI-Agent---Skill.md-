@@ -1,0 +1,203 @@
+# How each controller event renders into OpenSearch documents.
+#
+#   <event_type>:
+#     onset:   logged when the event starts
+#     ongoing: logged every LOG_INTERVAL_S while it lasts (default 30s)
+#     clear:   logged when it ends
+#
+# Each entry targets one index:
+#   index: log_iml        -> HPE iLO log entry (Redfish LogEntry shape from your export)
+#   index: controllerlog  -> Slingshot switch-controller syslog line
+#
+# Variables usable in message/body:
+#   {node} {gpu} {slot} {bmc_host} {switch} {port_name} {port_number} {port_j}
+#   {cpu_temp} {gpu_temp} {sensor} {count} {total} {uptime} {event_id}
+#
+# CONFIDENCE LEGEND (so nobody mistakes an approximation for real data):
+#   [SAMPLE]  text/shape copied from your exported logs
+#   [HPE-DOC] structure verified against HPE's published Redfish IML examples
+#   [APPROX]  plausible but invented -- replace with wording from your real logs.
+#             Class/Code numbers marked [APPROX] are placeholders, not real HPE codes.
+
+# ---------------------------------------------------------------------------
+# CPU spike -> iLO IML thermal entries.
+# iLO has no "CPU utilisation" event; the closest real hardware-log consequence of
+# sustained 95% CPU is a thermal entry, so that is what is emitted.
+# ---------------------------------------------------------------------------
+cpu_spike:
+  onset:
+    - &cpu_hot
+      index: log_iml
+      log: IML                                  # [HPE-DOC] Name "Integrated Management Log", Hpe-IML
+      severity: Warning                         # [HPE-DOC] top-level Severity: OK | Warning | Critical
+      hpe_severity: Caution                     # [HPE-DOC] Oem.Hpe.Severity
+      categories: [Hardware]
+      class: 4                                  # [APPROX]
+      class_description: Temperature            # [APPROX]
+      code: 1                                   # [APPROX]
+      message: "System Overheating (Temperature Sensor 5, Location CPU, Temperature {cpu_temp})"  # [HPE-DOC format, APPROX location]
+      recommended_action: "Verify that the fans are operating and airflow is not obstructed."
+  ongoing:
+    - *cpu_hot
+  clear:
+    - index: log_iml
+      log: IML
+      severity: OK
+      hpe_severity: Informational
+      categories: [Hardware]
+      class: 4
+      class_description: Temperature
+      code: 2                                   # [APPROX]
+      message: "System Overheating condition cleared (Temperature Sensor 5, Location CPU, Temperature {cpu_temp})"  # [APPROX]
+      recommended_action: ""
+
+# ---------------------------------------------------------------------------
+# GPU thermal throttle -> iLO IML thermal entry per GPU.
+# ---------------------------------------------------------------------------
+gpu_thermal_throttle:
+  onset:
+    - &gpu_hot
+      index: log_iml
+      log: IML
+      severity: Warning
+      hpe_severity: Caution
+      categories: [Hardware]
+      class: 4
+      class_description: Temperature
+      code: 1
+      message: "System Overheating (Temperature Sensor {sensor}, Location Accelerator {gpu}, Temperature {gpu_temp})"  # [APPROX location]
+      recommended_action: "Verify that the fans are operating and airflow is not obstructed."
+  ongoing:
+    - *gpu_hot
+  clear:
+    - index: log_iml
+      log: IML
+      severity: OK
+      hpe_severity: Informational
+      categories: [Hardware]
+      class: 4
+      class_description: Temperature
+      code: 2
+      message: "System Overheating condition cleared (Temperature Sensor {sensor}, Location Accelerator {gpu}, Temperature {gpu_temp})"  # [APPROX]
+      recommended_action: ""
+
+# ---------------------------------------------------------------------------
+# GPU ECC errors -> iLO IML memory entries. `when` filters on the event's kind.
+# `count` = number of errors in this batch, so IML "Count" matches the Prometheus
+# counter increase.
+# ---------------------------------------------------------------------------
+gpu_ecc_error:
+  onset: &ecc
+    - when: {kind: sbe}
+      index: log_iml
+      log: IML
+      severity: Warning
+      hpe_severity: Caution
+      categories: [Hardware]
+      class: 5                                  # [APPROX]
+      class_description: Memory                 # [APPROX]
+      code: 1                                   # [APPROX]
+      message: "Correctable memory error threshold exceeded (Accelerator {gpu}, PCIe Slot {slot}, {count} errors)"  # [APPROX]
+      recommended_action: "Monitor the device; replace if errors persist."
+    - when: {kind: dbe}
+      index: log_iml
+      log: IML
+      severity: Critical
+      hpe_severity: Critical
+      categories: [Hardware]
+      class: 5
+      class_description: Memory
+      code: 2                                   # [APPROX]
+      message: "Uncorrectable memory error detected (Accelerator {gpu}, PCIe Slot {slot}); page retirement pending"  # [APPROX]
+      recommended_action: "Reset the accelerator or reboot the node to retire the affected page; replace if it recurs."
+  ongoing: *ecc
+
+# ---------------------------------------------------------------------------
+# Fabric link down -> Slingshot switch-controller syslog + fabric health.
+# The message bodies below are taken from your controllerlog sample.
+# ---------------------------------------------------------------------------
+fabric_link_down:
+  onset:
+    - index: controllerlog                      # [SAMPLE] hmscd link-down line
+      host: "{switch}"
+      service: hmscd
+      severity: info
+      priority: 46
+      facility: 5
+      pid_range: [1600, 1800]
+      body: "update_redis_network_adapters_link_down: Setting LinkStatus Down for {port_j} (p{port_number})"
+    - index: controllerlog                      # [SAMPLE] kernel sbl fault
+      host: "{switch}"
+      service: kernel
+      severity: error
+      priority: 3
+      facility: 0
+      pid: ""
+      body: "[{uptime}] sbl sbl: {port_number}: pcs_wait fault clear timeout (lk 0/ff, a0 f1 lf1 hs0)"
+    - index: controllerlog                      # [SAMPLE] kernel sbl warning
+      host: "{switch}"
+      service: kernel
+      severity: warning
+      priority: 4
+      facility: 0
+      pid: ""
+      body: "[{uptime}] sbl sbl: {port_number}: no media info - assuming link mode OK"
+    - kind: rosetta                             # [SAMPLE] RosettaAsicErrorFlagReporter, isFirst=true
+      index: controllerlog
+      is_first: true
+  ongoing:
+    - kind: rosetta                             # repeated ASIC error, count climbing
+      index: controllerlog
+      is_first: false
+  clear:
+    - index: controllerlog                      # [APPROX] mirror of the sample's link_down line
+      host: "{switch}"
+      service: hmscd
+      severity: info
+      priority: 46
+      facility: 5
+      pid_range: [1600, 1800]
+      body: "update_redis_network_adapters_link_up: Setting LinkStatus Up for {port_j} (p{port_number})"
+
+# slingshot_crayfabrichealth: the healthy text is [SAMPLE]; the degraded state/text is [APPROX].
+# While a link-down event is active, the affected switch's heartbeat reports DEGRADED.
+fabric_health:
+  healthy: "Recommend: None; Cause: Switch Fabric Agent Telemetry subsystem is healthy"
+  degraded_state: DEGRADED
+  degraded: "Recommend: Inspect cable and optics on port {port_j}; Cause: Link down on port {port_j} (p{port_number}) reported by Switch Fabric Agent"
+
+# The big Rosetta ASIC error body from your sample. [SAMPLE]
+rosetta_body: >-
+  [{seq}][S][{iso_ms}][1519][RosettaAsicErrorFlagReporter][reportAsicErrors][Detected Rosetta ASIC Error: category=EC_UNCOR_NS portName={port_name} portNumber={port_number} block=frf flag=empty_route_edge isFirst={is_first} timeSet={time_set} throttled=false count={count} errorInformation: err_info_empty_route_dfa_format=0 err_info_empty_route_dfa_global_id=1 err_info_empty_route_dfa_switch_id=18 err_info_empty_route_dfa_endpoint_id=16 err_info_empty_route_link_type=2 err_info_empty_route_set_b_dst_grp=0 err_info_empty_route_in_src_grp=1 err_info_empty_route_group_match=1 err_info_empty_route_switch_match=1 err_info_empty_route_rcv_vc=0 err_info_empty_route_gfault_enabled=1 err_info_empty_route_global_preferred=0 err_info_empty_route_enable_excptn=0 err_info_empty_route_enable_min=1 err_info_empty_route_enable_nm=0 err_info_empty_route_restrict_gm=0 err_info_empty_route_restrict_gnm=0 err_info_empty_route_vc_a=0 err_info_empty_route_vc_b=0 err_info_empty_route_nm_oprnl_exist=0 err_info_empty_route_nm_exist=0 err_info_empty_route_ep_oprnl_exist=0 err_info_empty_route_ep_exist=0 err_info_empty_route_min_oprnl_exist=0 err_info_empty_route_min_exist=1 err_info_empty_route_el_match_exclude=0 err_info_empty_route_el_match_prefrd=0 err_info_empty_route_gfault_mem_ucor=0 err_info_empty_route_ep_mem_ucor=0 err_info_empty_route_min_mem_ucor=0 err_info_empty_route_ra_mem_ucor=0 err_info_empty_route_empty_route_edge=1 err_info_empty_route_empty_route=0 err_info_empty_route_empty_route_uf=0 associatedCounters: frf_empty_route_edge_cntr={cntr}]
+
+# ---------------------------------------------------------------------------
+# AMBIENT noise: realistic background logs that do NOT correspond to any
+# Prometheus metric (cron, systemd, iLO logins...). Deliberately benign: nothing
+# here should ever imply a CPU/GPU/fabric problem, otherwise OpenSearch would
+# show trouble that Prometheus can't.
+# ---------------------------------------------------------------------------
+ambient_controllerlog:                          # all [SAMPLE] unless noted
+  - {weight: 30, service: CRON, severity: info, priority: 86, facility: 10, pid_range: [129000, 131000],
+     body: "pam_unix(cron:session): session opened for user root(uid=0) by (uid=0)"}
+  - {weight: 30, service: CRON, severity: info, priority: 86, facility: 10, pid_range: [129000, 131000],
+     body: "pam_unix(cron:session): session closed for user root"}                    # [APPROX] pair of the line above
+  - {weight: 40, service: fabric-manager.sh, severity: info, priority: 30, facility: 3, pid_range: [3500, 3700],
+     kind: available_agents}
+  - {weight: 3, service: port-initialization-watchdog, severity: notice, priority: 13, facility: 1, pid: "",
+     body: "Start port initialization watchdog"}
+  - {weight: 2, service: systemd, severity: info, priority: 30, facility: 3, pid: "1",
+     body: "Stopping System Logging Service..."}
+  - {weight: 2, service: systemd, severity: info, priority: 30, facility: 3, pid: "1",
+     body: "Started System Logging Service."}                                          # [APPROX] pair of the line above
+  - {weight: 2, service: rsyslogd, severity: info, priority: 46, facility: 5, pid: "",
+     body: "imuxsock: Acquired UNIX socket '/run/systemd/journal/syslog' (fd 3) from systemd.  [v8.2102.0]"}
+  - {weight: 1, service: logrotate, severity: info, priority: 30, facility: 3, pid_range: [130000, 131000],
+     body: "error: state file /var/lib/logrotate/status is already locked"}
+  - {weight: 4, service: hmpad, severity: error, priority: 11, facility: 1, pid: "1650",
+     body: "dil_query_bus_pmbus: i2c ioctl failed (rc = -1) for bus number: 14"}
+
+ambient_ilo:                                    # [SAMPLE] codes/classes from your log_iml export
+  browser_login:  {code: 1017, message: "Browser login: root - {ip}(DNS name not found)."}
+  browser_logout: {code: 1018, message: "Browser logout: root - {ip}(DNS name not found)."}
+  ssh_login:      {code: 1021, message: "SSH login: root - {ip}(DNS name not found)."}
+  ssh_logout:     {code: 1022, message: "SSH logout: root - {ip}(DNS name not found)."}

@@ -1,0 +1,65 @@
+# Add-on for the existing docker-compose.yml. Run BOTH files together:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.opensearch.yml up -d --build
+#
+# It adds: sim-controller (shared event timeline), OpenSearch, OpenSearch Dashboards,
+# and the log generator. It also points your existing node-00..node-03 exporters at
+# the controller. Your prometheus.docker.yml (and its remote_write credentials) are
+# not touched.
+
+services:
+  # ---- the shared "ground truth" timeline both sides read from ----------------
+  sim-controller:
+    build: ./sim_controller
+    environment:
+      CHAOS_ENABLED: "${CHAOS_ENABLED:-true}"                  # random events so it's never idle
+      CHAOS_MEAN_INTERVAL_S: "${CHAOS_MEAN_INTERVAL_S:-600}"   # about one event per 10 min
+      LOG_INTERVAL_S: "${LOG_INTERVAL_S:-30}"                  # how often an active event logs again
+      SIM_API_KEY: "${SIM_API_KEY:-}"                          # set it -> POST/DELETE need X-API-Key
+    ports: ["8000:8000"]                                       # Swagger UI at http://localhost:8000/docs
+
+  # ---- existing exporters: just point them at the controller -------------------
+  node-00:
+    environment: {CONTROLLER_URL: "http://sim-controller:8000"}
+  node-01:
+    environment: {CONTROLLER_URL: "http://sim-controller:8000"}
+  node-02:
+    environment: {CONTROLLER_URL: "http://sim-controller:8000"}
+  node-03:
+    environment: {CONTROLLER_URL: "http://sim-controller:8000"}
+
+  # ---- OpenSearch (single node, security off: dev/sim only) --------------------
+  opensearch:
+    image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-2.19.4}
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+    ports: ["9250:9200"]        # 9250 on the host: 9200-9203 are taken by your node exporters
+    volumes: ["opensearch-data:/usr/share/opensearch/data"]
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:${OPENSEARCH_VERSION:-2.19.4}
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports: ["5601:5601"]
+    depends_on: [opensearch]
+
+  # ---- renders controller events + ambient noise into the 3 indices -------------
+  log-generator:
+    build: ./log_generator
+    environment:
+      OPENSEARCH_URL: "http://opensearch:9200"
+      DASHBOARDS_URL: "http://opensearch-dashboards:5601"      # auto-creates the index patterns
+      CONTROLLER_URL: "http://sim-controller:8000"
+      ADD_SIM_FIELD: "${ADD_SIM_FIELD:-true}"                  # false = exact production schema
+      RETENTION_DAYS: "${RETENTION_DAYS:-7}"                   # logs older than this are deleted (0 = keep forever)
+    volumes: ["./config:/config:ro"]
+    depends_on: [sim-controller, opensearch]
+
+volumes:
+  opensearch-data:

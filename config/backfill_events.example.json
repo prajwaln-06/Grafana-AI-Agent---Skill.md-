@@ -1,0 +1,8 @@
+[
+  {"type": "cpu_spike",            "node": "node-00", "start": "-30h",  "duration_s": 600, "intensity": 0.95},
+  {"type": "fabric_link_down",     "node": "node-01", "start": "-52h30m", "duration_s": 300},
+  {"type": "gpu_thermal_throttle", "node": "node-02", "gpu": 1, "start": "-4d2h", "duration_s": 420},
+  {"type": "gpu_ecc_error",        "node": "node-00", "gpu": 3, "kind": "sbe", "count": 40, "start": "-20h", "duration_s": 120},
+  {"type": "gpu_ecc_error",        "node": "node-02", "gpu": 0, "kind": "dbe", "start": "-9h15m"},
+  {"type": "cpu_spike",            "node": "node-01", "start": "2026-11-02T14:30:00Z", "duration_s": 240}
+]
