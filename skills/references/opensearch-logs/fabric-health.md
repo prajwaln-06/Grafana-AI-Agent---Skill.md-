@@ -66,7 +66,7 @@ treat the two spellings as different switches.
 | Faults / CRITICAL events per switch ("How many CRITICAL events occurred per switch?") | `intent: "top_n"`, `size: 0`, time range, `term` on `health_state` = `"CRITICAL"`, `terms` on `entity_switch` (`size: 20`), with BOTH a `cardinality` sub-aggregation (`distinct_ports`) AND a `terms` sub-aggregation (`by_location`, `size: 10`) on `entity_location` (`fields.Location.keyword`) inside `by_switch.aggs` so distinct locations and per-location counts are always shown alongside switch counts |
 | Which health states or event kinds exist ("What health states exist besides HEALTHY?") | `intent: "top_n"`, `size: 0`, `terms` on `health_state` (`fields.PhysicalSubContext.keyword`) with only the time range filter (or `terms` on `event_kind` for event kinds) |
 | Ports disabled due to excessive flapping ("Which ports were disabled due to excessive flapping?") | `intent: "top_n"`, `size: 0` (NEVER `intent: "rows"`), time range, `match_phrase` on `text` (`{"match_phrase": {"fields.Value": "excessive flapping"}}`), and `terms` aggregation on `entity_location` (`fields.Location.keyword`) |
-| Recommendations for a port ("What recommendations were reported for port j104p1?") | `intent: "rows"`, `size: 20`, time range, `term` on `entity_port` (`{"term": {"fields.Port.keyword": "j104p1"}}` — a bare port name such as `j104p1` belongs in `entity_port`, NOT in `entity_location`, which holds the composite switch-plus-port value and would not match a bare port), return `text` (`fields.Value`) in `_source` |
+| Recommendations for a port ("What recommendations were reported for port j104p1?") | `intent: "rows"`, `size: 20`, time range, check the runtime query context first: if `entity_port` (`fields.Port`) is confirmed in the live mapping, use `term` on `entity_port` (`{"term": {"fields.Port.keyword": "j104p1"}}` — a bare port name such as `j104p1` belongs in `entity_port`, NOT in `entity_location`, which holds the composite switch-plus-port value and would not match a bare port); if `fields.Port` is **absent from the live mapping** (listed as absent/dropped in the runtime query context), NEVER reference `fields.Port` or `fields.Port.keyword` — instead search `text` (`fields.Value`) with `{"match_phrase": {"fields.Value": "j104p1"}}` and return the confirmed fields (including `fields.Value`) in `_source` |
 | Which switches reported a specific fault/event kind ("Which switches reported linkerrors.linkautorestartexhaustederror?") | `intent: "top_n"`, `size: 0` (NEVER `intent: "rows"`), time range, `term` on `event_kind` (`{"term": {"fields.PhysicalContext.keyword": "linkerrors.linkautorestartexhaustederror"}}`), and `terms` aggregation on `entity_switch` (`fields.Switch.keyword`) |
 | Critical events for ONE switch ("Show critical events for switch x1000c3r1.") | `intent: "rows"`, `size: 20`, time range, `term` on `health_state` = `"CRITICAL"` (`{"term": {"fields.PhysicalSubContext.keyword": "CRITICAL"}}`), and `term` on `entity_switch` = `"x1000c3r1"` (`{"term": {"fields.Switch.keyword": "x1000c3r1"}}`). Note: fault/CRITICAL documents store the bare switch xname (`x1000c3r1`), whereas heartbeat documents carry an ASIC suffix (`x1000c3r1b0`), where `prefix` is the only partial match allowed (never `wildcard`) |
 | Most unhealthy racks/chassis | `intent: "top_n"`, `size: 0`, time range, `{"named_condition": "abnormal_severity"}`, `terms` on `group_rack` (`fields.Rack.keyword`) with a nested `terms` on `group_chassis` (`fields.Chassis.keyword`) |
@@ -160,7 +160,7 @@ itself and returns the switches missing from it.
 }
 ```
 
-Ports with recurring faults (`recurrence`), over the last 7 days:
+Ports with recurring faults (`recurrence`), over the default last 24 hours (`now-24h` to `now` when no window is stated):
 
 ```json
 {
@@ -169,7 +169,7 @@ Ports with recurring faults (`recurrence`), over the last 7 days:
   "query": {
     "size": 0,
     "query": { "bool": { "filter": [
-      { "range": { "@timestamp": { "gte": "now-7d", "lte": "now" } } },
+      { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
       { "named_condition": "abnormal_severity" } ] } },
     "aggs": { "by_location": { "terms": { "field": "fields.Location.keyword", "size": 20 },
               "aggs": { "per_hour": { "date_histogram": { "field": "@timestamp", "fixed_interval": "1h" } } } } }
@@ -216,7 +216,7 @@ Ports disabled due to excessive flapping (`top_n` on `fields.Location.keyword` w
 }
 ```
 
-Recommendations reported for port `j104p1` (`rows` with `term` on `fields.Port.keyword`):
+Recommendations reported for port `j104p1` (`rows`: use `{"term": {"fields.Port.keyword": "j104p1"}}` when `fields.Port` is in the live mapping, or `{"match_phrase": {"fields.Value": "j104p1"}}` when `fields.Port` is absent from the live mapping):
 
 ```jsonc
 {
@@ -227,8 +227,8 @@ Recommendations reported for port `j104p1` (`rows` with `term` on `fields.Port.k
     "sort": [ { "@timestamp": "desc" } ],
     "query": { "bool": { "filter": [
       { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
-      { "term": { "fields.Port.keyword": "j104p1" } } ] } },
-    "_source": [ "@timestamp", "fields.Switch", "fields.Port", "fields.Location", "fields.PhysicalContext", "fields.PhysicalSubContext", "fields.Value" ]
+      { "match_phrase": { "fields.Value": "j104p1" } } ] } },
+    "_source": [ "@timestamp", "fields.Switch", "fields.Location", "fields.PhysicalContext", "fields.PhysicalSubContext", "fields.Value" ]
   }
 }
 ```

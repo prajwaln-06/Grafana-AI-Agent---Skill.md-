@@ -64,7 +64,7 @@ manager reports switch availability, `hmscd` reports link status changes, and
 | I²C failures and bus numbers ("Which controllers reported I²C failures, and which bus numbers?") | `intent: "rows"`, `size: 20`, time range, `match_phrase` on `text` = `"i2c ioctl failed"` (`{"match_phrase": {"Body": "i2c ioctl failed"}}`, NEVER `"I2C failures"`). In `hmpad` logs, I²C failures are recorded as `"dil_query_bus_pmbus: i2c ioctl failed (rc = -1) for bus number: <n>"`, and the bus number lives only inside `Body` text, so return rows with `_source` including `Body` and `Resource.host.name` |
 | "Are the same errors recurring on a controller?" | the SAME query as "Hosts with errors": `intent: "top_n"`, `size: 0`, time range, `abnormal_severity`, ONE top-level `terms` on `entity_host` with the `terms` on `service` nested inside it. This is a **narrower question than asked** and the answer must say so: it shows which controllers keep logging errors, and from which service, with a document count per pair, i.e. *repeated error activity from the same controller and service*. It does NOT show that the same message text repeated: message text is never grouped, so identical-message recurrence is **not supported** (say so; do not infer it from a high count). The `recurrence` analysis is not configured for this family; do not request it |
 | "LinkStatus Down" hosts or ports down on a controller host (`'Which hosts reported "LinkStatus Down"? / ports down on x1000c2r3b0?'`) | This belongs ENTIRELY to `controller_log` (`hmscd` logs `"update_redis_network_adapters_link_down: Setting LinkStatus Down for <port>"` in `Body` on controller hosts such as `x1000c2r3b0`) and is NEVER `ambiguous_metric`. When a host (`x1000c2r3b0`) or port-down details are asked for, return a single `intent: "rows"` query (`size: 20`) with `{"match_phrase": {"Body": "LinkStatus Down"}}` (and `{"term": {"Resource.host.name.keyword": "x1000c2r3b0"}}` when `x1000c2r3b0` is named) and project `Body` in `_source` (`["@timestamp", "Resource.host.name", "Resource.service.name", "Severity", "Body"]`) because the port token lives only in `Body` |
-| Did link-down events occur near fabric availability problems? | cross-family time proximity: `mode: "multi"` with two row queries and a `correlation` object (see "Near another family's events" below). The tolerance must come from the user |
+| Did link-down events occur near fabric availability problems? | cross-family time proximity: `mode: "multi"` with two row queries and a `correlation` object `{"type": "temporal_proximity", "left": 0, "right": 1, "tolerance": "5m"}` (see "Near another family's events" below). Use the user's stated tolerance if given, or `"5m"` for general "near" questions and state the 5-minute tolerance in the explanation |
 | Error volume over time | same filter, `date_histogram` on `@timestamp` with an interval chosen from the window |
 | Messages mentioning a phrase | `match_phrase` on `text` inside `filter` with the time range |
 | Messages / errors for a service on a host ("Show all hmpad errors for x1000c6s7b1.") | `intent: "rows"`, `size: 20`, time range, `{"named_condition": "abnormal_severity"}` (when errors are requested), and two exact-term filters (`{"term": {"Resource.service.name.keyword": "hmpad"}}`, `{"term": {"Resource.host.name.keyword": "x1000c6s7b1"}}`) |
@@ -119,9 +119,10 @@ query is validated and run against its own family only. Python then compares
 the rows' `@timestamp` values; you do not judge proximity yourself.
 
 `tolerance` is the maximum time difference that counts as "near" (at most 60m).
-It is **never** defaulted: take it only from the user's words ("within 5
-minutes"). If the user did not say how close counts as near, leave `tolerance`
-out and the system asks them. Read "fabric availability problems" as non-healthy
+Use the tolerance from the user's words ("within 5 minutes"), or `"tolerance": "5m"`
+when the user asks a general "near" question such as "Did link-down events occur
+near fabric availability problems?" and state the 5-minute tolerance in the
+explanation. Read "fabric availability problems" as non-healthy
 fabric health documents and say so; the answer reports pairs, not causation
 ("coincided with", never "caused"). The result says whether a correlation was
 found, none was found, or could not be determined (a source failed or was only
@@ -188,7 +189,7 @@ Fabric-manager messages with fewer switches available than expected
     "size": 100,
     "query": { "bool": { "filter": [
       { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
-      { "term": { "Resource.service.name.keyword": "fabric-manager" } },
+      { "terms": { "Resource.service.name.keyword": [ "fabric-manager.sh", "fabric-manager" ] } },
       { "match_phrase": { "Body": "switches available" } } ] } }
   },
   "analysis": { "type": "text_ratio_shortfall" }

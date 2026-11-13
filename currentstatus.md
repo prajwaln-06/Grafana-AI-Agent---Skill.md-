@@ -42,7 +42,7 @@ about how far the numbers can be trusted.
   for all 30 mentor questions across Fabric Health, Controller Log, and iLO
   Event Log, and parallel direct-vs-agent OpenSearch verification (30/30 pass
   and 30/30 match).
-* Tests: **1778** passing unit/integration tests (`python -m pytest tests -q`),
+* Tests: **1780** passing unit/integration tests (`python -m pytest tests -q`),
   plus **30/30** passing end-to-end questions in `scripts/run_opensearch_30_suite.py`
   and `scripts/manual_test_report.py --strict`.
 
@@ -54,7 +54,7 @@ pretend cluster, so `docs/SMOKE_TEST.md` tells you how to check the real one.
 **Your most useful commands:**
 
 ```
-python -m pytest tests -q                                   # all 1778 tests
+python -m pytest tests -q                                   # all 1780 tests
 python scripts/smoke_test_opensearch.py --check-skills      # offline: registry and skill files agree? what is unverified?
 python scripts/smoke_test_opensearch.py --queries --rows    # live: do the families and fields exist on the real cluster?
 python scripts/smoke_test_opensearch.py --examples --analyses   # live: do the examples and the five analyses work?
@@ -746,4 +746,5 @@ OpenSearch instance (`http://127.0.0.1:9250`):
 | Two-query time-proximity correlation | Supports single-family two-query correlation (CL-06: link-down events near fabric availability problems) with guard validation on both queries. | `app/opensearch_catalog/correlation.py`, `app/executor.py`, `app/validator.py` |
 | LLM 503 & pipeline timeout resilience | Increased Gemini API retry attempts (`MAX_RETRIES = 5` with exponential backoff up to 16 s) and raised `pipeline_timeout_seconds` from `30.0` to `120.0` so multi-query/retry requests do not time out prematurely. | `app/llm_client.py`, `app/config.py`, `.env.example` |
 | Skill routing & 30-question intent coverage | Added explicit domain routing triggers in `skills/SKILL.md` (e.g. `j104p1`, `linkautorestartexhaustederror`, `CRON`, `hmpad`, `hmscd`, `i2c ioctl`, `leif-login03-bmc`, `IPMI`, `RMCP`) and comprehensive `Query Intent Patterns` tables across all three OpenSearch reference files while keeping field discovery 100% dynamic via `field_catalog.py`. | `skills/SKILL.md`, `skills/references/opensearch-logs/fabric-health.md`, `controller-log.md`, `ilo-events.md` |
+| Live-mapping missing-field guard & empty-result normalization (2026-11-14) | Updated `guard.py` (`_Checker.info`) to detect `.keyword` sub-fields of `missing_fields` and return a dynamic free-text fallback hint; updated `context.py` (`format_prompt_block`) to surface `missing_fields` in the runtime prompt block; updated `executor.py` so `empty_result` on `rows` queries normalizes through `normalize_search_response` (`result_type: "hits", hits: [], total_hits: 0`). | `app/opensearch_catalog/guard.py`, `app/opensearch_catalog/context.py`, `app/executor.py`, `tests/test_opensearch_manual_test_fixes.py` |
 | End-to-end 30-question verification & direct comparison | Added `scripts/run_opensearch_30_suite.py` and updated `scripts/manual_test_report.py` to support both 30- and 31-question suites. Verified **30/30** questions passing end-to-end and **30/30** matching direct OpenSearch queries. | `scripts/run_opensearch_30_suite.py`, `scripts/manual_test_report.py`, `opensearch_question_suite_fixed.json`, `test_output_all_fixed.json`, `opensearch_direct_vs_agent_comparison.json` |

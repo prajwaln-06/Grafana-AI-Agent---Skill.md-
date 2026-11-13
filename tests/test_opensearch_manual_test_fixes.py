@@ -700,3 +700,24 @@ def test_references_state_the_default_log_window_and_the_corrected_guidance():
     assert "DEGRADED" in fabric and "`prefix`" in fabric and "NOT in `entity_location`" in fabric
     ctl = (REFS / "controller-log.md").read_text(encoding="utf-8")
     assert "identical-message recurrence is **not supported**" in ctl and "`tolerance` is the maximum time difference" in ctl
+
+
+def test_missing_port_field_in_live_mapping_gives_text_fallback_hint_and_prompt_warning(os_registry):
+    from app.opensearch_catalog.context import format_prompt_block as render_prompt_block
+    ctx = custom_ctx(os_registry, "fabric_health", lambda p: p["fields"]["properties"].pop("Port", None))
+    r = check(ctx, "fabric_health", rows_query({"term": {"fields.Port.keyword": "j104p1"}}))
+    assert not r.ok and r.code == guard.CODE_UNKNOWN_FIELD
+    assert "not present in the live mapping" in r.reason and "fields.Value" in r.reason
+    ok = check(ctx, "fabric_health", rows_query({"match_phrase": {"fields.Value": "j104p1"}}))
+    assert ok.ok, ok.reason
+    block = render_prompt_block(ctx)
+    assert "ABSENT from the live mapping" in block and "fields.Port" in block
+
+
+def test_empty_rows_result_is_normalised_with_hits_result_type(skill_index, settings, monkeypatch):
+    contract = {"mode": "single", **os_entry("controller_log", rows_query({"term": {"Resource.service.name.keyword": "hmpad"}}))}
+    _, executed, _ = ask(skill_index, settings, monkeypatch, "Show hmpad logs", CTL, contract,
+                         lambda i, d: hits_body([], total=0))
+    ex = executed["execution"]
+    assert ex["execution_status"] == "empty_result"
+    assert ex["result_type"] == "hits" and ex["hits"] == [] and ex["total_hits"] == 0

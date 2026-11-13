@@ -328,17 +328,22 @@ class _Checker:
             _fail(CODE_BAD_CLAUSE, f"{where}: a field name is required")
         info = self.view.allowed_fields.get(path)
         if info is None:
-            if path in self.view.missing_fields:
+            base = path[: -len(".keyword")] if path.endswith(".keyword") else None
+            base_info = self.view.allowed_fields.get(base) if base else None
+            if path in self.view.missing_fields or (base and base in self.view.missing_fields):
                 why = "is registered but is not present in the live mapping"
             else:
                 why = "is not a field this index family permits"
             hint = ""
-            base = path[: -len(".keyword")] if path.endswith(".keyword") else None
-            base_info = self.view.allowed_fields.get(base) if base else None
             if base_info is not None:
                 hint = (f" {base!r} ({base_info.type}) has no `.keyword` sub-field in the live mapping; "
                         f"use {base!r} itself, with a value of its own type (for example a JSON boolean "
                         f"for a boolean field).")
+            elif path in self.view.missing_fields or (base and base in self.view.missing_fields):
+                text_fields = list(self.entry.role_paths("text"))
+                hint = (f" Base field {(base or path)!r} is absent from the live cluster mapping; do not reference "
+                        f"{(base or path)!r} or {path!r} in filters or aggregations — search the confirmed free-text "
+                        f"field {text_fields} with match_phrase instead.")
             _fail(CODE_UNKNOWN_FIELD, f"{where}: field {path!r} {why}. Use only the listed fields.{hint}")
         if op not in info.ops:
             hint = ""

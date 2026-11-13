@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-11-11T21:55:14Z",
+  "generated_at_utc": "2026-11-13T18:09:05Z",
   "opensearch_url": "http://127.0.0.1:9250",
   "total_questions": 30,
   "all_matched": true,
@@ -11,24 +11,24 @@
       "question": "Which fabric components reported a non-healthy status in the last 24 h?",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 71,
-      "direct_total_hits": 71,
+      "agent_total_hits": 134,
+      "direct_total_hits": 134,
       "agent_buckets": [
         {
           "key": "x1000c2r7b0",
-          "doc_count": 22
-        },
-        {
-          "key": "x1000c4r1b0",
-          "doc_count": 19
+          "doc_count": 45
         },
         {
           "key": "x1000c4r5b0",
-          "doc_count": 16
+          "doc_count": 44
+        },
+        {
+          "key": "x1000c4r1b0",
+          "doc_count": 24
         },
         {
           "key": "x1000c6r3b0",
-          "doc_count": 11
+          "doc_count": 18
         },
         {
           "key": "x1000c3r1",
@@ -42,19 +42,19 @@
       "direct_buckets": [
         {
           "key": "x1000c2r7b0",
-          "doc_count": 22
-        },
-        {
-          "key": "x1000c4r1b0",
-          "doc_count": 19
+          "doc_count": 45
         },
         {
           "key": "x1000c4r5b0",
-          "doc_count": 16
+          "doc_count": 44
+        },
+        {
+          "key": "x1000c4r1b0",
+          "doc_count": 24
         },
         {
           "key": "x1000c6r3b0",
-          "doc_count": 11
+          "doc_count": 18
         },
         {
           "key": "x1000c3r1",
@@ -112,7 +112,7 @@
             }
           ],
           "metrics": {
-            "distinct_ports": 1
+            "distinct_ports": 1.0
           }
         },
         {
@@ -125,7 +125,7 @@
             }
           ],
           "metrics": {
-            "distinct_ports": 1
+            "distinct_ports": 1.0
           }
         }
       ]
@@ -135,16 +135,16 @@
       "question": "What health states exist besides HEALTHY?",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 16472,
-      "direct_total_hits": 16472,
+      "agent_total_hits": 16748,
+      "direct_total_hits": 16748,
       "agent_buckets": [
         {
           "key": "HEALTHY",
-          "doc_count": 16401
+          "doc_count": 16614
         },
         {
           "key": "DEGRADED",
-          "doc_count": 68
+          "doc_count": 131
         },
         {
           "key": "CRITICAL",
@@ -154,11 +154,11 @@
       "direct_buckets": [
         {
           "key": "HEALTHY",
-          "doc_count": 16401
+          "doc_count": 16614
         },
         {
           "key": "DEGRADED",
-          "doc_count": 68
+          "doc_count": 131
         },
         {
           "key": "CRITICAL",
@@ -237,24 +237,24 @@
       "question": "Which racks/chassis have the most unhealthy events?",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 71,
-      "direct_total_hits": 71,
+      "agent_total_hits": 134,
+      "direct_total_hits": 134,
       "agent_buckets": [
         {
           "key": "x1000",
-          "doc_count": 71,
+          "doc_count": 134,
           "sub_buckets": [
             {
               "key": "c4",
-              "doc_count": 35
+              "doc_count": 68
             },
             {
               "key": "c2",
-              "doc_count": 22
+              "doc_count": 45
             },
             {
               "key": "c6",
-              "doc_count": 11
+              "doc_count": 18
             },
             {
               "key": "c3",
@@ -270,19 +270,19 @@
       "direct_buckets": [
         {
           "key": "x1000",
-          "doc_count": 71,
+          "doc_count": 134,
           "sub_buckets": [
             {
               "key": "c4",
-              "doc_count": 35
+              "doc_count": 68
             },
             {
               "key": "c2",
-              "doc_count": 22
+              "doc_count": 45
             },
             {
               "key": "c6",
-              "doc_count": 11
+              "doc_count": 18
             },
             {
               "key": "c3",
@@ -311,632 +311,116 @@
       "question": "Which ports have recurring faults?",
       "match": true,
       "comparison_type": "analysis_recurrence",
-      "agent_total_hits": 177,
-      "direct_total_hits": 177,
+      "agent_total_hits": 134,
+      "direct_total_hits": 134,
       "agent_bucket_count": 6,
       "direct_bucket_count": 6,
       "agent_top_bucket": {
-        "key": "x1000c4r5b0",
-        "doc_count": 54,
+        "key": "x1000c2r7b0",
+        "doc_count": 45,
         "metrics": {
-          "active_intervals": 13.0
+          "active_intervals": 7.0
         }
       },
       "direct_top_bucket": {
-        "key": "x1000c4r5b0",
-        "doc_count": 54,
+        "key": "x1000c2r7b0",
+        "doc_count": 45,
         "sub_buckets": [
           {
-            "key": "2026-11-05T13:00:00.000Z",
-            "doc_count": 8
+            "key": "2026-11-12T18:00:00.000Z",
+            "doc_count": 7
           },
           {
-            "key": "2026-11-05T14:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T15:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T16:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T17:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T18:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T19:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T20:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T21:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T22:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-05T23:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T00:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T01:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T02:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T03:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T04:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T05:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T06:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T07:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T08:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T09:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T10:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T11:00:00.000Z",
-            "doc_count": 8
-          },
-          {
-            "key": "2026-11-06T12:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T13:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T14:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T15:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T16:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T17:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T18:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T19:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T20:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T21:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T22:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-06T23:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T00:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T01:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T02:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T03:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T04:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T05:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T06:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T07:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T08:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T09:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T10:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T11:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T12:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T13:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T14:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T15:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T16:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T17:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T18:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T19:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T20:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T21:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T22:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-07T23:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T00:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T01:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T02:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T03:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T04:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T05:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T06:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T07:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T08:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T09:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T10:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T11:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T12:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T13:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T14:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T15:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T16:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T17:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T18:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T19:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T20:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T21:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T22:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-08T23:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T00:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T01:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T02:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T03:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T04:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T05:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T06:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T07:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T08:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T09:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T10:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T11:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T12:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T13:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T14:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T15:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T16:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T17:00:00.000Z",
-            "doc_count": 4
-          },
-          {
-            "key": "2026-11-09T18:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T19:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T20:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T21:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T22:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-09T23:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T00:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T01:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T02:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T03:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T04:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T05:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T06:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T07:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T08:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T09:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-10T10:00:00.000Z",
-            "doc_count": 4
-          },
-          {
-            "key": "2026-11-10T11:00:00.000Z",
-            "doc_count": 4
-          },
-          {
-            "key": "2026-11-10T12:00:00.000Z",
+            "key": "2026-11-12T19:00:00.000Z",
             "doc_count": 3
           },
           {
-            "key": "2026-11-10T13:00:00.000Z",
-            "doc_count": 4
-          },
-          {
-            "key": "2026-11-10T14:00:00.000Z",
+            "key": "2026-11-12T20:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-10T15:00:00.000Z",
+            "key": "2026-11-12T21:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-10T16:00:00.000Z",
+            "key": "2026-11-12T22:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-10T17:00:00.000Z",
+            "key": "2026-11-12T23:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-10T18:00:00.000Z",
+            "key": "2026-11-13T00:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-10T19:00:00.000Z",
-            "doc_count": 3
-          },
-          {
-            "key": "2026-11-10T20:00:00.000Z",
+            "key": "2026-11-13T01:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-10T21:00:00.000Z",
+            "key": "2026-11-13T02:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-10T22:00:00.000Z",
+            "key": "2026-11-13T03:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-10T23:00:00.000Z",
+            "key": "2026-11-13T04:00:00.000Z",
+            "doc_count": 5
+          },
+          {
+            "key": "2026-11-13T05:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-11T00:00:00.000Z",
+            "key": "2026-11-13T06:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-11T01:00:00.000Z",
+            "key": "2026-11-13T07:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-11T02:00:00.000Z",
+            "key": "2026-11-13T08:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-11T03:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T04:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T05:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T06:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T07:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T08:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T09:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T10:00:00.000Z",
-            "doc_count": 6
-          },
-          {
-            "key": "2026-11-11T11:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T12:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T13:00:00.000Z",
-            "doc_count": 0
-          },
-          {
-            "key": "2026-11-11T14:00:00.000Z",
-            "doc_count": 1
-          },
-          {
-            "key": "2026-11-11T15:00:00.000Z",
+            "key": "2026-11-13T09:00:00.000Z",
             "doc_count": 2
           },
           {
-            "key": "2026-11-11T16:00:00.000Z",
+            "key": "2026-11-13T10:00:00.000Z",
+            "doc_count": 8
+          },
+          {
+            "key": "2026-11-13T11:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-11T17:00:00.000Z",
+            "key": "2026-11-13T12:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-11T18:00:00.000Z",
-            "doc_count": 4
-          },
-          {
-            "key": "2026-11-11T19:00:00.000Z",
+            "key": "2026-11-13T13:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-11T20:00:00.000Z",
+            "key": "2026-11-13T14:00:00.000Z",
             "doc_count": 0
           },
           {
-            "key": "2026-11-11T21:00:00.000Z",
-            "doc_count": 3
+            "key": "2026-11-13T15:00:00.000Z",
+            "doc_count": 0
+          },
+          {
+            "key": "2026-11-13T16:00:00.000Z",
+            "doc_count": 9
+          },
+          {
+            "key": "2026-11-13T17:00:00.000Z",
+            "doc_count": 11
           }
         ]
       }
@@ -946,12 +430,74 @@
       "question": "Which controllers reported errors in last 24 h / which hosts have most errors?",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 491,
-      "direct_total_hits": 491,
+      "agent_total_hits": 558,
+      "direct_total_hits": 558,
       "agent_buckets": [
         {
           "key": "x1000c2r7b0",
+          "doc_count": 27,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 19
+            },
+            {
+              "key": "kernel",
+              "doc_count": 8
+            }
+          ]
+        },
+        {
+          "key": "x1000c4r5b0",
+          "doc_count": 27,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 21
+            },
+            {
+              "key": "kernel",
+              "doc_count": 6
+            }
+          ]
+        },
+        {
+          "key": "x1000c7r7b0",
+          "doc_count": 25,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 25
+            }
+          ]
+        },
+        {
+          "key": "x1000c6r3b0",
           "doc_count": 24,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 20
+            },
+            {
+              "key": "kernel",
+              "doc_count": 4
+            }
+          ]
+        },
+        {
+          "key": "x1000c0r7b0",
+          "doc_count": 22,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 22
+            }
+          ]
+        },
+        {
+          "key": "x1000c4r1b0",
+          "doc_count": 21,
           "sub_buckets": [
             {
               "key": "hmpad",
@@ -959,40 +505,22 @@
             },
             {
               "key": "kernel",
-              "doc_count": 7
+              "doc_count": 4
             }
           ]
         },
         {
-          "key": "x1000c4r5b0",
+          "key": "x1000c5r1b0",
           "doc_count": 21,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
-            },
-            {
-              "key": "kernel",
-              "doc_count": 5
+              "doc_count": 21
             }
           ]
         },
         {
-          "key": "x1000c4r1b0",
-          "doc_count": 20,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 15
-            },
-            {
-              "key": "kernel",
-              "doc_count": 5
-            }
-          ]
-        },
-        {
-          "key": "x1000c5r5b0",
+          "key": "x1000c4r7b0",
           "doc_count": 20,
           "sub_buckets": [
             {
@@ -1002,45 +530,37 @@
           ]
         },
         {
-          "key": "x1000c5r7b0",
-          "doc_count": 20,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 20
-            }
-          ]
-        },
-        {
-          "key": "x1000c2r3b0",
+          "key": "x1000c0r1b0",
           "doc_count": 19,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 18
-            },
-            {
-              "key": "hmscd",
-              "doc_count": 1
+              "doc_count": 19
             }
           ]
         },
         {
-          "key": "x1000c6r3b0",
+          "key": "x1000c5r3b0",
           "doc_count": 19,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
-            },
-            {
-              "key": "kernel",
-              "doc_count": 3
+              "doc_count": 19
             }
           ]
         },
         {
-          "key": "x1000c6r1b0",
+          "key": "x3001c0r42b0",
+          "doc_count": 19,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 19
+            }
+          ]
+        },
+        {
+          "key": "x1000c0r5b0",
           "doc_count": 18,
           "sub_buckets": [
             {
@@ -1050,27 +570,7 @@
           ]
         },
         {
-          "key": "x1000c7r3b0",
-          "doc_count": 18,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 18
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r5b0",
-          "doc_count": 18,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 18
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r7b0",
+          "key": "x1000c6r7b0",
           "doc_count": 18,
           "sub_buckets": [
             {
@@ -1090,57 +590,51 @@
           ]
         },
         {
-          "key": "x1000c3r3b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c4r7b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c6r5b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c1r7b0",
-          "doc_count": 16,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 16
-            }
-          ]
-        },
-        {
           "key": "x1000c3r1b0",
-          "doc_count": 16,
+          "doc_count": 17,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
+              "doc_count": 17
             }
           ]
         },
         {
           "key": "x1000c4r3b0",
+          "doc_count": 17,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 17
+            }
+          ]
+        },
+        {
+          "key": "x1000c7r5b0",
+          "doc_count": 17,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 17
+            }
+          ]
+        },
+        {
+          "key": "x1000c2r3b0",
+          "doc_count": 16,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 15
+            },
+            {
+              "key": "hmscd",
+              "doc_count": 1
+            }
+          ]
+        },
+        {
+          "key": "x1000c2r5b0",
           "doc_count": 16,
           "sub_buckets": [
             {
@@ -1150,22 +644,12 @@
           ]
         },
         {
-          "key": "x1000c5r3b0",
-          "doc_count": 15,
+          "key": "x1000c3r7b0",
+          "doc_count": 16,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 15
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r1b0",
-          "doc_count": 14,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 14
+              "doc_count": 16
             }
           ]
         }
@@ -1173,7 +657,69 @@
       "direct_buckets": [
         {
           "key": "x1000c2r7b0",
+          "doc_count": 27,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 19
+            },
+            {
+              "key": "kernel",
+              "doc_count": 8
+            }
+          ]
+        },
+        {
+          "key": "x1000c4r5b0",
+          "doc_count": 27,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 21
+            },
+            {
+              "key": "kernel",
+              "doc_count": 6
+            }
+          ]
+        },
+        {
+          "key": "x1000c7r7b0",
+          "doc_count": 25,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 25
+            }
+          ]
+        },
+        {
+          "key": "x1000c6r3b0",
           "doc_count": 24,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 20
+            },
+            {
+              "key": "kernel",
+              "doc_count": 4
+            }
+          ]
+        },
+        {
+          "key": "x1000c0r7b0",
+          "doc_count": 22,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 22
+            }
+          ]
+        },
+        {
+          "key": "x1000c4r1b0",
+          "doc_count": 21,
           "sub_buckets": [
             {
               "key": "hmpad",
@@ -1181,40 +727,22 @@
             },
             {
               "key": "kernel",
-              "doc_count": 7
+              "doc_count": 4
             }
           ]
         },
         {
-          "key": "x1000c4r5b0",
+          "key": "x1000c5r1b0",
           "doc_count": 21,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
-            },
-            {
-              "key": "kernel",
-              "doc_count": 5
+              "doc_count": 21
             }
           ]
         },
         {
-          "key": "x1000c4r1b0",
-          "doc_count": 20,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 15
-            },
-            {
-              "key": "kernel",
-              "doc_count": 5
-            }
-          ]
-        },
-        {
-          "key": "x1000c5r5b0",
+          "key": "x1000c4r7b0",
           "doc_count": 20,
           "sub_buckets": [
             {
@@ -1224,45 +752,37 @@
           ]
         },
         {
-          "key": "x1000c5r7b0",
-          "doc_count": 20,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 20
-            }
-          ]
-        },
-        {
-          "key": "x1000c2r3b0",
+          "key": "x1000c0r1b0",
           "doc_count": 19,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 18
-            },
-            {
-              "key": "hmscd",
-              "doc_count": 1
+              "doc_count": 19
             }
           ]
         },
         {
-          "key": "x1000c6r3b0",
+          "key": "x1000c5r3b0",
           "doc_count": 19,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
-            },
-            {
-              "key": "kernel",
-              "doc_count": 3
+              "doc_count": 19
             }
           ]
         },
         {
-          "key": "x1000c6r1b0",
+          "key": "x3001c0r42b0",
+          "doc_count": 19,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 19
+            }
+          ]
+        },
+        {
+          "key": "x1000c0r5b0",
           "doc_count": 18,
           "sub_buckets": [
             {
@@ -1272,27 +792,7 @@
           ]
         },
         {
-          "key": "x1000c7r3b0",
-          "doc_count": 18,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 18
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r5b0",
-          "doc_count": 18,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 18
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r7b0",
+          "key": "x1000c6r7b0",
           "doc_count": 18,
           "sub_buckets": [
             {
@@ -1312,57 +812,51 @@
           ]
         },
         {
-          "key": "x1000c3r3b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c4r7b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c6r5b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c1r7b0",
-          "doc_count": 16,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 16
-            }
-          ]
-        },
-        {
           "key": "x1000c3r1b0",
-          "doc_count": 16,
+          "doc_count": 17,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
+              "doc_count": 17
             }
           ]
         },
         {
           "key": "x1000c4r3b0",
+          "doc_count": 17,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 17
+            }
+          ]
+        },
+        {
+          "key": "x1000c7r5b0",
+          "doc_count": 17,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 17
+            }
+          ]
+        },
+        {
+          "key": "x1000c2r3b0",
+          "doc_count": 16,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 15
+            },
+            {
+              "key": "hmscd",
+              "doc_count": 1
+            }
+          ]
+        },
+        {
+          "key": "x1000c2r5b0",
           "doc_count": 16,
           "sub_buckets": [
             {
@@ -1372,22 +866,12 @@
           ]
         },
         {
-          "key": "x1000c5r3b0",
-          "doc_count": 15,
+          "key": "x1000c3r7b0",
+          "doc_count": 16,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 15
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r1b0",
-          "doc_count": 14,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 14
+              "doc_count": 16
             }
           ]
         }
@@ -1398,8 +882,8 @@
       "question": "Which controllers reported I\u00b2C failures, and which bus numbers?",
       "match": true,
       "comparison_type": "rows",
-      "agent_total_hits": 470,
-      "direct_total_hits": 470,
+      "agent_total_hits": 535,
+      "direct_total_hits": 535,
       "agent_rows_returned": 20,
       "direct_rows_returned": 20
     },
@@ -1408,12 +892,74 @@
       "question": "Are the same errors recurring on a controller?",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 491,
-      "direct_total_hits": 491,
+      "agent_total_hits": 558,
+      "direct_total_hits": 558,
       "agent_buckets": [
         {
           "key": "x1000c2r7b0",
+          "doc_count": 27,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 19
+            },
+            {
+              "key": "kernel",
+              "doc_count": 8
+            }
+          ]
+        },
+        {
+          "key": "x1000c4r5b0",
+          "doc_count": 27,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 21
+            },
+            {
+              "key": "kernel",
+              "doc_count": 6
+            }
+          ]
+        },
+        {
+          "key": "x1000c7r7b0",
+          "doc_count": 25,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 25
+            }
+          ]
+        },
+        {
+          "key": "x1000c6r3b0",
           "doc_count": 24,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 20
+            },
+            {
+              "key": "kernel",
+              "doc_count": 4
+            }
+          ]
+        },
+        {
+          "key": "x1000c0r7b0",
+          "doc_count": 22,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 22
+            }
+          ]
+        },
+        {
+          "key": "x1000c4r1b0",
+          "doc_count": 21,
           "sub_buckets": [
             {
               "key": "hmpad",
@@ -1421,40 +967,22 @@
             },
             {
               "key": "kernel",
-              "doc_count": 7
+              "doc_count": 4
             }
           ]
         },
         {
-          "key": "x1000c4r5b0",
+          "key": "x1000c5r1b0",
           "doc_count": 21,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
-            },
-            {
-              "key": "kernel",
-              "doc_count": 5
+              "doc_count": 21
             }
           ]
         },
         {
-          "key": "x1000c4r1b0",
-          "doc_count": 20,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 15
-            },
-            {
-              "key": "kernel",
-              "doc_count": 5
-            }
-          ]
-        },
-        {
-          "key": "x1000c5r5b0",
+          "key": "x1000c4r7b0",
           "doc_count": 20,
           "sub_buckets": [
             {
@@ -1464,45 +992,37 @@
           ]
         },
         {
-          "key": "x1000c5r7b0",
-          "doc_count": 20,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 20
-            }
-          ]
-        },
-        {
-          "key": "x1000c2r3b0",
+          "key": "x1000c0r1b0",
           "doc_count": 19,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 18
-            },
-            {
-              "key": "hmscd",
-              "doc_count": 1
+              "doc_count": 19
             }
           ]
         },
         {
-          "key": "x1000c6r3b0",
+          "key": "x1000c5r3b0",
           "doc_count": 19,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
-            },
-            {
-              "key": "kernel",
-              "doc_count": 3
+              "doc_count": 19
             }
           ]
         },
         {
-          "key": "x1000c6r1b0",
+          "key": "x3001c0r42b0",
+          "doc_count": 19,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 19
+            }
+          ]
+        },
+        {
+          "key": "x1000c0r5b0",
           "doc_count": 18,
           "sub_buckets": [
             {
@@ -1512,27 +1032,7 @@
           ]
         },
         {
-          "key": "x1000c7r3b0",
-          "doc_count": 18,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 18
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r5b0",
-          "doc_count": 18,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 18
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r7b0",
+          "key": "x1000c6r7b0",
           "doc_count": 18,
           "sub_buckets": [
             {
@@ -1552,57 +1052,51 @@
           ]
         },
         {
-          "key": "x1000c3r3b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c4r7b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c6r5b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c1r7b0",
-          "doc_count": 16,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 16
-            }
-          ]
-        },
-        {
           "key": "x1000c3r1b0",
-          "doc_count": 16,
+          "doc_count": 17,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
+              "doc_count": 17
             }
           ]
         },
         {
           "key": "x1000c4r3b0",
+          "doc_count": 17,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 17
+            }
+          ]
+        },
+        {
+          "key": "x1000c7r5b0",
+          "doc_count": 17,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 17
+            }
+          ]
+        },
+        {
+          "key": "x1000c2r3b0",
+          "doc_count": 16,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 15
+            },
+            {
+              "key": "hmscd",
+              "doc_count": 1
+            }
+          ]
+        },
+        {
+          "key": "x1000c2r5b0",
           "doc_count": 16,
           "sub_buckets": [
             {
@@ -1612,22 +1106,12 @@
           ]
         },
         {
-          "key": "x1000c5r3b0",
-          "doc_count": 15,
+          "key": "x1000c3r7b0",
+          "doc_count": 16,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 15
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r1b0",
-          "doc_count": 14,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 14
+              "doc_count": 16
             }
           ]
         }
@@ -1635,7 +1119,69 @@
       "direct_buckets": [
         {
           "key": "x1000c2r7b0",
+          "doc_count": 27,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 19
+            },
+            {
+              "key": "kernel",
+              "doc_count": 8
+            }
+          ]
+        },
+        {
+          "key": "x1000c4r5b0",
+          "doc_count": 27,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 21
+            },
+            {
+              "key": "kernel",
+              "doc_count": 6
+            }
+          ]
+        },
+        {
+          "key": "x1000c7r7b0",
+          "doc_count": 25,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 25
+            }
+          ]
+        },
+        {
+          "key": "x1000c6r3b0",
           "doc_count": 24,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 20
+            },
+            {
+              "key": "kernel",
+              "doc_count": 4
+            }
+          ]
+        },
+        {
+          "key": "x1000c0r7b0",
+          "doc_count": 22,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 22
+            }
+          ]
+        },
+        {
+          "key": "x1000c4r1b0",
+          "doc_count": 21,
           "sub_buckets": [
             {
               "key": "hmpad",
@@ -1643,40 +1189,22 @@
             },
             {
               "key": "kernel",
-              "doc_count": 7
+              "doc_count": 4
             }
           ]
         },
         {
-          "key": "x1000c4r5b0",
+          "key": "x1000c5r1b0",
           "doc_count": 21,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
-            },
-            {
-              "key": "kernel",
-              "doc_count": 5
+              "doc_count": 21
             }
           ]
         },
         {
-          "key": "x1000c4r1b0",
-          "doc_count": 20,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 15
-            },
-            {
-              "key": "kernel",
-              "doc_count": 5
-            }
-          ]
-        },
-        {
-          "key": "x1000c5r5b0",
+          "key": "x1000c4r7b0",
           "doc_count": 20,
           "sub_buckets": [
             {
@@ -1686,45 +1214,37 @@
           ]
         },
         {
-          "key": "x1000c5r7b0",
-          "doc_count": 20,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 20
-            }
-          ]
-        },
-        {
-          "key": "x1000c2r3b0",
+          "key": "x1000c0r1b0",
           "doc_count": 19,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 18
-            },
-            {
-              "key": "hmscd",
-              "doc_count": 1
+              "doc_count": 19
             }
           ]
         },
         {
-          "key": "x1000c6r3b0",
+          "key": "x1000c5r3b0",
           "doc_count": 19,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
-            },
-            {
-              "key": "kernel",
-              "doc_count": 3
+              "doc_count": 19
             }
           ]
         },
         {
-          "key": "x1000c6r1b0",
+          "key": "x3001c0r42b0",
+          "doc_count": 19,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 19
+            }
+          ]
+        },
+        {
+          "key": "x1000c0r5b0",
           "doc_count": 18,
           "sub_buckets": [
             {
@@ -1734,27 +1254,7 @@
           ]
         },
         {
-          "key": "x1000c7r3b0",
-          "doc_count": 18,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 18
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r5b0",
-          "doc_count": 18,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 18
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r7b0",
+          "key": "x1000c6r7b0",
           "doc_count": 18,
           "sub_buckets": [
             {
@@ -1774,57 +1274,51 @@
           ]
         },
         {
-          "key": "x1000c3r3b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c4r7b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c6r5b0",
-          "doc_count": 17,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 17
-            }
-          ]
-        },
-        {
-          "key": "x1000c1r7b0",
-          "doc_count": 16,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 16
-            }
-          ]
-        },
-        {
           "key": "x1000c3r1b0",
-          "doc_count": 16,
+          "doc_count": 17,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 16
+              "doc_count": 17
             }
           ]
         },
         {
           "key": "x1000c4r3b0",
+          "doc_count": 17,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 17
+            }
+          ]
+        },
+        {
+          "key": "x1000c7r5b0",
+          "doc_count": 17,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 17
+            }
+          ]
+        },
+        {
+          "key": "x1000c2r3b0",
+          "doc_count": 16,
+          "sub_buckets": [
+            {
+              "key": "hmpad",
+              "doc_count": 15
+            },
+            {
+              "key": "hmscd",
+              "doc_count": 1
+            }
+          ]
+        },
+        {
+          "key": "x1000c2r5b0",
           "doc_count": 16,
           "sub_buckets": [
             {
@@ -1834,22 +1328,12 @@
           ]
         },
         {
-          "key": "x1000c5r3b0",
-          "doc_count": 15,
+          "key": "x1000c3r7b0",
+          "doc_count": 16,
           "sub_buckets": [
             {
               "key": "hmpad",
-              "doc_count": 15
-            }
-          ]
-        },
-        {
-          "key": "x1000c7r1b0",
-          "doc_count": 14,
-          "sub_buckets": [
-            {
-              "key": "hmpad",
-              "doc_count": 14
+              "doc_count": 16
             }
           ]
         }
@@ -1870,10 +1354,10 @@
       "question": "Fabric-manager messages with fewer switches available than expected?",
       "match": true,
       "comparison_type": "analysis_text_ratio_shortfall",
-      "rows_scanned_direct": 1,
-      "rows_scanned_agent": 1,
-      "shortfall_rows_direct": 1,
-      "shortfall_rows_agent": 1
+      "rows_scanned_direct": 100,
+      "rows_scanned_agent": 100,
+      "shortfall_rows_direct": 0,
+      "shortfall_rows_agent": 0
     },
     {
       "test_id": "CL-06",
@@ -1885,41 +1369,41 @@
           "leg": 0,
           "pattern_id": "controller_log",
           "index": "controllerlog-*",
-          "agent_total_hits": 21,
-          "direct_total_hits": 21,
-          "agent_returned_rows": 21,
-          "direct_returned_rows": 21,
+          "agent_total_hits": 46,
+          "direct_total_hits": 46,
+          "agent_returned_rows": 46,
+          "direct_returned_rows": 46,
           "match": true
         },
         {
           "leg": 1,
           "pattern_id": "fabric_health",
           "index": "slingshot_crayfabrichealth-*",
-          "agent_total_hits": 71,
-          "direct_total_hits": 71,
+          "agent_total_hits": 134,
+          "direct_total_hits": 134,
           "agent_returned_rows": 50,
           "direct_returned_rows": 50,
           "match": true
         }
       ],
       "correlation_status": "correlated",
-      "correlation_pairs_found": 15
+      "correlation_pairs_found": 10
     },
     {
       "test_id": "CL-07",
       "question": "Which services generate the most error logs?",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 491,
-      "direct_total_hits": 491,
+      "agent_total_hits": 558,
+      "direct_total_hits": 558,
       "agent_buckets": [
         {
           "key": "hmpad",
-          "doc_count": 470
+          "doc_count": 535
         },
         {
           "key": "kernel",
-          "doc_count": 20
+          "doc_count": 22
         },
         {
           "key": "hmscd",
@@ -1929,11 +1413,11 @@
       "direct_buckets": [
         {
           "key": "hmpad",
-          "doc_count": 470
+          "doc_count": 535
         },
         {
           "key": "kernel",
-          "doc_count": 20
+          "doc_count": 22
         },
         {
           "key": "hmscd",
@@ -1958,15 +1442,15 @@
       "comparison_type": "analysis_context_window",
       "direct_anchor_count": 1,
       "agent_anchor_count": 1,
-      "agent_context_rows_total": 2
+      "agent_context_rows_total": 4
     },
     {
       "test_id": "CL-10",
       "question": "Show controller logs excluding routine CRON.",
       "match": true,
       "comparison_type": "rows",
-      "agent_total_hits": 7000,
-      "direct_total_hits": 7000,
+      "agent_total_hits": 7440,
+      "direct_total_hits": 7440,
       "agent_rows_returned": 20,
       "direct_rows_returned": 20
     },
@@ -1975,8 +1459,8 @@
       "question": "Who logged into leif-login03-bmc in last 24 h?",
       "match": true,
       "comparison_type": "rows",
-      "agent_total_hits": 522,
-      "direct_total_hits": 522,
+      "agent_total_hits": 541,
+      "direct_total_hits": 541,
       "agent_rows_returned": 20,
       "direct_rows_returned": 20
     },
@@ -1985,42 +1469,42 @@
       "question": "Which BMCs were accessed from 172.24.0.1?",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 3434,
-      "direct_total_hits": 3434,
+      "agent_total_hits": 3410,
+      "direct_total_hits": 3410,
       "agent_buckets": [
         {
+          "key": "leif-login03-bmc",
+          "doc_count": 894
+        },
+        {
           "key": "leif-login02-bmc",
-          "doc_count": 875
+          "doc_count": 850
         },
         {
           "key": "fmn01-bmc",
-          "doc_count": 864
+          "doc_count": 848
         },
         {
           "key": "leif-login01-bmc",
-          "doc_count": 863
-        },
-        {
-          "key": "leif-login03-bmc",
-          "doc_count": 832
+          "doc_count": 818
         }
       ],
       "direct_buckets": [
         {
+          "key": "leif-login03-bmc",
+          "doc_count": 894
+        },
+        {
           "key": "leif-login02-bmc",
-          "doc_count": 875
+          "doc_count": 850
         },
         {
           "key": "fmn01-bmc",
-          "doc_count": 864
+          "doc_count": 848
         },
         {
           "key": "leif-login01-bmc",
-          "doc_count": 863
-        },
-        {
-          "key": "leif-login03-bmc",
-          "doc_count": 832
+          "doc_count": 818
         }
       ]
     },
@@ -2029,8 +1513,8 @@
       "question": "Show all root login/logout events.",
       "match": true,
       "comparison_type": "rows",
-      "agent_total_hits": 3761,
-      "direct_total_hits": 3761,
+      "agent_total_hits": 3780,
+      "direct_total_hits": 3780,
       "agent_rows_returned": 20,
       "direct_rows_returned": 20
     },
@@ -2039,26 +1523,26 @@
       "question": "Browser vs IPMI/RMCP login counts.",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 4461,
-      "direct_total_hits": 4461,
+      "agent_total_hits": 4403,
+      "direct_total_hits": 4403,
       "agent_buckets": [
         {
           "key": "browser",
-          "doc_count": 1879
+          "doc_count": 1890
         },
         {
           "key": "ipmi_rmcp",
-          "doc_count": 1
+          "doc_count": 0
         }
       ],
       "direct_buckets": [
         {
           "key": "browser",
-          "doc_count": 1879
+          "doc_count": 1890
         },
         {
           "key": "ipmi_rmcp",
-          "doc_count": 1
+          "doc_count": 0
         }
       ]
     },
@@ -2067,62 +1551,62 @@
       "question": "Which BMCs have unusually frequent login/logout?",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 3761,
-      "direct_total_hits": 3761,
+      "agent_total_hits": 3780,
+      "direct_total_hits": 3780,
       "agent_buckets": [
         {
           "key": "leif-login03-bmc",
-          "doc_count": 1043,
-          "sub_buckets": [
-            {
-              "key": "1018",
-              "doc_count": 522
-            },
-            {
-              "key": "1017",
-              "doc_count": 521
-            }
-          ]
-        },
-        {
-          "key": "leif-login02-bmc",
-          "doc_count": 922,
+          "doc_count": 1082,
           "sub_buckets": [
             {
               "key": "1017",
-              "doc_count": 461
+              "doc_count": 541
             },
             {
               "key": "1018",
-              "doc_count": 461
-            }
-          ]
-        },
-        {
-          "key": "leif-login01-bmc",
-          "doc_count": 911,
-          "sub_buckets": [
-            {
-              "key": "1018",
-              "doc_count": 456
-            },
-            {
-              "key": "1017",
-              "doc_count": 455
+              "doc_count": 541
             }
           ]
         },
         {
           "key": "fmn01-bmc",
-          "doc_count": 885,
+          "doc_count": 916,
           "sub_buckets": [
             {
-              "key": "1018",
-              "doc_count": 443
+              "key": "1017",
+              "doc_count": 458
             },
             {
+              "key": "1018",
+              "doc_count": 458
+            }
+          ]
+        },
+        {
+          "key": "leif-login02-bmc",
+          "doc_count": 908,
+          "sub_buckets": [
+            {
               "key": "1017",
-              "doc_count": 442
+              "doc_count": 454
+            },
+            {
+              "key": "1018",
+              "doc_count": 454
+            }
+          ]
+        },
+        {
+          "key": "leif-login01-bmc",
+          "doc_count": 874,
+          "sub_buckets": [
+            {
+              "key": "1017",
+              "doc_count": 437
+            },
+            {
+              "key": "1018",
+              "doc_count": 437
             }
           ]
         }
@@ -2130,57 +1614,57 @@
       "direct_buckets": [
         {
           "key": "leif-login03-bmc",
-          "doc_count": 1043,
+          "doc_count": 1082,
           "sub_buckets": [
             {
-              "key": 1018,
-              "doc_count": 522
+              "key": "1017",
+              "doc_count": 541
             },
             {
-              "key": 1017,
-              "doc_count": 521
-            }
-          ]
-        },
-        {
-          "key": "leif-login02-bmc",
-          "doc_count": 922,
-          "sub_buckets": [
-            {
-              "key": 1017,
-              "doc_count": 461
-            },
-            {
-              "key": 1018,
-              "doc_count": 461
-            }
-          ]
-        },
-        {
-          "key": "leif-login01-bmc",
-          "doc_count": 911,
-          "sub_buckets": [
-            {
-              "key": 1018,
-              "doc_count": 456
-            },
-            {
-              "key": 1017,
-              "doc_count": 455
+              "key": "1018",
+              "doc_count": 541
             }
           ]
         },
         {
           "key": "fmn01-bmc",
-          "doc_count": 885,
+          "doc_count": 916,
           "sub_buckets": [
             {
-              "key": 1018,
-              "doc_count": 443
+              "key": "1017",
+              "doc_count": 458
             },
             {
-              "key": 1017,
-              "doc_count": 442
+              "key": "1018",
+              "doc_count": 458
+            }
+          ]
+        },
+        {
+          "key": "leif-login02-bmc",
+          "doc_count": 908,
+          "sub_buckets": [
+            {
+              "key": "1017",
+              "doc_count": 454
+            },
+            {
+              "key": "1018",
+              "doc_count": 454
+            }
+          ]
+        },
+        {
+          "key": "leif-login01-bmc",
+          "doc_count": 874,
+          "sub_buckets": [
+            {
+              "key": "1017",
+              "doc_count": 437
+            },
+            {
+              "key": "1018",
+              "doc_count": 437
             }
           ]
         }
@@ -2200,8 +1684,8 @@
       "question": "Security & administration events for a BMC.",
       "match": true,
       "comparison_type": "rows",
-      "agent_total_hits": 4229,
-      "direct_total_hits": 4229,
+      "agent_total_hits": 4288,
+      "direct_total_hits": 4288,
       "agent_rows_returned": 20,
       "direct_rows_returned": 20
     },
@@ -2210,8 +1694,8 @@
       "question": "Severity other than OK or Informational.",
       "match": true,
       "comparison_type": "rows",
-      "agent_total_hits": 208,
-      "direct_total_hits": 208,
+      "agent_total_hits": 103,
+      "direct_total_hits": 103,
       "agent_rows_returned": 20,
       "direct_rows_returned": 20
     },
@@ -2220,8 +1704,8 @@
       "question": "Warning/critical events marked unrepaired + recommended actions.",
       "match": true,
       "comparison_type": "rows",
-      "agent_total_hits": 208,
-      "direct_total_hits": 208,
+      "agent_total_hits": 103,
+      "direct_total_hits": 103,
       "agent_rows_returned": 20,
       "direct_rows_returned": 20
     },
@@ -2230,118 +1714,58 @@
       "question": "Event codes recurring most per host.",
       "match": true,
       "comparison_type": "buckets",
-      "agent_total_hits": 4461,
-      "direct_total_hits": 4461,
+      "agent_total_hits": 4403,
+      "direct_total_hits": 4403,
       "agent_buckets": [
         {
-          "key": "leif-login02-bmc",
-          "doc_count": 1167,
-          "sub_buckets": [
-            {
-              "key": "1017",
-              "doc_count": 461
-            },
-            {
-              "key": "1018",
-              "doc_count": 461
-            },
-            {
-              "key": "1",
-              "doc_count": 81
-            },
-            {
-              "key": "1022",
-              "doc_count": 77
-            },
-            {
-              "key": "1021",
-              "doc_count": 76
-            },
-            {
-              "key": "2",
-              "doc_count": 10
-            },
-            {
-              "key": "3033",
-              "doc_count": 1
-            }
-          ]
-        },
-        {
           "key": "fmn01-bmc",
-          "doc_count": 1118,
+          "doc_count": 1104,
           "sub_buckets": [
             {
-              "key": "1018",
-              "doc_count": 443
+              "key": "1017",
+              "doc_count": 458
             },
             {
-              "key": "1017",
-              "doc_count": 442
+              "key": "1018",
+              "doc_count": 458
             },
             {
               "key": "1021",
-              "doc_count": 87
+              "doc_count": 79
             },
             {
               "key": "1022",
-              "doc_count": 87
+              "doc_count": 79
             },
             {
               "key": "1",
-              "doc_count": 52
+              "doc_count": 27
             },
             {
               "key": "2",
-              "doc_count": 7
+              "doc_count": 3
             }
           ]
         },
         {
-          "key": "leif-login01-bmc",
-          "doc_count": 1108,
+          "key": "leif-login02-bmc",
+          "doc_count": 1104,
           "sub_buckets": [
             {
-              "key": "1018",
-              "doc_count": 456
+              "key": "1017",
+              "doc_count": 454
             },
             {
-              "key": "1017",
-              "doc_count": 455
+              "key": "1018",
+              "doc_count": 454
             },
             {
               "key": "1021",
-              "doc_count": 70
+              "doc_count": 85
             },
             {
               "key": "1022",
-              "doc_count": 70
-            },
-            {
-              "key": "1",
-              "doc_count": 51
-            },
-            {
-              "key": "2",
-              "doc_count": 5
-            },
-            {
-              "key": "3040",
-              "doc_count": 1
-            }
-          ]
-        },
-        {
-          "key": "leif-login03-bmc",
-          "doc_count": 1068,
-          "sub_buckets": [
-            {
-              "key": "1018",
-              "doc_count": 522
-            },
-            {
-              "key": "1017",
-              "doc_count": 521
+              "doc_count": 85
             },
             {
               "key": "1",
@@ -2349,137 +1773,173 @@
             },
             {
               "key": "2",
-              "doc_count": 2
+              "doc_count": 4
+            }
+          ]
+        },
+        {
+          "key": "leif-login03-bmc",
+          "doc_count": 1099,
+          "sub_buckets": [
+            {
+              "key": "1017",
+              "doc_count": 541
             },
             {
-              "key": "1024",
-              "doc_count": 1
+              "key": "1018",
+              "doc_count": 541
+            },
+            {
+              "key": "1",
+              "doc_count": 15
+            },
+            {
+              "key": "2",
+              "doc_count": 2
+            }
+          ]
+        },
+        {
+          "key": "leif-login01-bmc",
+          "doc_count": 1096,
+          "sub_buckets": [
+            {
+              "key": "1017",
+              "doc_count": 437
+            },
+            {
+              "key": "1018",
+              "doc_count": 437
+            },
+            {
+              "key": "1021",
+              "doc_count": 90
+            },
+            {
+              "key": "1022",
+              "doc_count": 90
+            },
+            {
+              "key": "1",
+              "doc_count": 38
+            },
+            {
+              "key": "2",
+              "doc_count": 4
             }
           ]
         }
       ],
       "direct_buckets": [
         {
-          "key": "leif-login02-bmc",
-          "doc_count": 1167,
-          "sub_buckets": [
-            {
-              "key": 1017,
-              "doc_count": 461
-            },
-            {
-              "key": 1018,
-              "doc_count": 461
-            },
-            {
-              "key": 1,
-              "doc_count": 81
-            },
-            {
-              "key": 1022,
-              "doc_count": 77
-            },
-            {
-              "key": 1021,
-              "doc_count": 76
-            },
-            {
-              "key": 2,
-              "doc_count": 10
-            },
-            {
-              "key": 3033,
-              "doc_count": 1
-            }
-          ]
-        },
-        {
           "key": "fmn01-bmc",
-          "doc_count": 1118,
+          "doc_count": 1104,
           "sub_buckets": [
             {
-              "key": 1018,
-              "doc_count": 443
+              "key": "1017",
+              "doc_count": 458
             },
             {
-              "key": 1017,
-              "doc_count": 442
+              "key": "1018",
+              "doc_count": 458
             },
             {
-              "key": 1021,
-              "doc_count": 87
+              "key": "1021",
+              "doc_count": 79
             },
             {
-              "key": 1022,
-              "doc_count": 87
+              "key": "1022",
+              "doc_count": 79
             },
             {
-              "key": 1,
-              "doc_count": 52
+              "key": "1",
+              "doc_count": 27
             },
             {
-              "key": 2,
-              "doc_count": 7
+              "key": "2",
+              "doc_count": 3
             }
           ]
         },
         {
-          "key": "leif-login01-bmc",
-          "doc_count": 1108,
+          "key": "leif-login02-bmc",
+          "doc_count": 1104,
           "sub_buckets": [
             {
-              "key": 1018,
-              "doc_count": 456
+              "key": "1017",
+              "doc_count": 454
             },
             {
-              "key": 1017,
-              "doc_count": 455
+              "key": "1018",
+              "doc_count": 454
             },
             {
-              "key": 1021,
-              "doc_count": 70
+              "key": "1021",
+              "doc_count": 85
             },
             {
-              "key": 1022,
-              "doc_count": 70
+              "key": "1022",
+              "doc_count": 85
             },
             {
-              "key": 1,
-              "doc_count": 51
+              "key": "1",
+              "doc_count": 22
             },
             {
-              "key": 2,
-              "doc_count": 5
-            },
-            {
-              "key": 3040,
-              "doc_count": 1
+              "key": "2",
+              "doc_count": 4
             }
           ]
         },
         {
           "key": "leif-login03-bmc",
-          "doc_count": 1068,
+          "doc_count": 1099,
           "sub_buckets": [
             {
-              "key": 1018,
-              "doc_count": 522
+              "key": "1017",
+              "doc_count": 541
             },
             {
-              "key": 1017,
-              "doc_count": 521
+              "key": "1018",
+              "doc_count": 541
             },
             {
-              "key": 1,
-              "doc_count": 22
+              "key": "1",
+              "doc_count": 15
             },
             {
-              "key": 2,
+              "key": "2",
               "doc_count": 2
+            }
+          ]
+        },
+        {
+          "key": "leif-login01-bmc",
+          "doc_count": 1096,
+          "sub_buckets": [
+            {
+              "key": "1017",
+              "doc_count": 437
             },
             {
-              "key": 1024,
-              "doc_count": 1
+              "key": "1018",
+              "doc_count": 437
+            },
+            {
+              "key": "1021",
+              "doc_count": 90
+            },
+            {
+              "key": "1022",
+              "doc_count": 90
+            },
+            {
+              "key": "1",
+              "doc_count": 38
+            },
+            {
+              "key": "2",
+              "doc_count": 4
             }
           ]
         }
@@ -2493,10 +1953,10 @@
       "direct_sampled_rows": 100,
       "agent_sampled_rows": 100,
       "agent_lag_summary_seconds": {
-        "min": 0.004,
-        "median": 0.533,
-        "p90": 0.926,
-        "max": 1.154
+        "min": 0.017,
+        "median": 0.579,
+        "p90": 0.98,
+        "max": 2.05
       }
     }
   ]

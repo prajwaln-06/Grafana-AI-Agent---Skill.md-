@@ -205,8 +205,9 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "- Time proximity across two index families (\"near\", \"around the same time as\") is answered with "
         "mode \"multi\": exactly two ordinary row queries (one per pattern_id, each with its own fields) plus a "
         "top-level `correlation` object {\"type\": \"temporal_proximity\", \"left\": 0, \"right\": 1, "
-        "\"tolerance\": \"<duration>\"}. Take `tolerance` ONLY from the user's own words; if the user did not say how "
-        "close counts as near, omit it and the user is asked. Python does the comparison; never estimate it yourself.",
+        "\"tolerance\": \"<duration>\"}. Use the tolerance stated by the user if given, or \"5m\" for general \"near\" "
+        "questions (such as whether link-down events occurred near fabric availability problems) and state the 5m "
+        "tolerance in the explanation. Python does the comparison; never estimate it yourself.",
     ]
     for pid in sorted(ctx.patterns):
         pc = ctx.patterns[pid]
@@ -237,8 +238,12 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         L.append("  group-by / cardinality paths: " + (", ".join(gb) if gb else "none"))
         if v.roles_confirmed:
             L.append("  roles: " + "; ".join(f"{r}={'|'.join(ps)}" for r, ps in sorted(v.roles_confirmed.items())))
+        if v.missing_fields:
+            L.append("  fields registered in the skill but ABSENT from the live mapping (NEVER use in filters, aggs, or _source; "
+                     "search the text role with match_phrase instead): " + ", ".join(sorted(v.missing_fields)))
         L.append("  never group on free text: " + (", ".join(sorted(e.never_group)) or "n/a"))
-        L.append("  rows return only: " + ", ".join(e.output_projection))
+        live_proj = [p for p in e.output_projection if p in v.allowed_fields] or list(e.output_projection)
+        L.append("  rows return only: " + ", ".join(live_proj))
         sem = e.severity_semantics
         if sem is not None:
             if sem.mode == "positive_abnormal":

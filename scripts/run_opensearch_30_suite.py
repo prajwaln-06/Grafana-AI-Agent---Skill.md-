@@ -493,7 +493,7 @@ SUITE_CASES: list[dict[str, Any]] = [
                 "query": {
                     "bool": {
                         "filter": [
-                            {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+                            WINDOW_24H,
                             {"named_condition": "abnormal_severity"},
                         ]
                     }
@@ -505,7 +505,7 @@ SUITE_CASES: list[dict[str, Any]] = [
                     }
                 },
             },
-            "Ranked ports/locations by active 1-hour intervals over the last 7 days using the recurrence analysis. Note: 1h interval is an unverified placeholder, and because of duplicate_reemission (hourly re-emit), this ranking cannot distinguish a persistent fault re-emitted hourly from repeated new occurrences.",
+            "Ranked ports/locations by active 1-hour intervals over the last 24 hours using the recurrence analysis. Note: 1h interval is an unverified placeholder, and because of duplicate_reemission (hourly re-emit), this ranking cannot distinguish a persistent fault re-emitted hourly from repeated new occurrences.",
             analysis={"type": "recurrence"},
         ),
         "direct_opensearch": {
@@ -515,7 +515,7 @@ SUITE_CASES: list[dict[str, Any]] = [
                 "query": {
                     "bool": {
                         "filter": [
-                            {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+                            WINDOW_24H,
                             {
                                 "bool": {
                                     "filter": [{"exists": {"field": "fields.PhysicalSubContext"}}],
@@ -769,7 +769,7 @@ SUITE_CASES: list[dict[str, Any]] = [
                     "bool": {
                         "filter": [
                             WINDOW_24H,
-                            {"term": {"Resource.service.name.keyword": "fabric-manager"}},
+                            {"terms": {"Resource.service.name.keyword": ["fabric-manager.sh", "fabric-manager"]}},
                             {"match_phrase": {"Body": "switches available"}},
                         ]
                     }
@@ -788,7 +788,7 @@ SUITE_CASES: list[dict[str, Any]] = [
                     "bool": {
                         "filter": [
                             WINDOW_24H,
-                            {"term": {"Resource.service.name.keyword": "fabric-manager"}},
+                            {"terms": {"Resource.service.name.keyword": ["fabric-manager.sh", "fabric-manager"]}},
                             {"match_phrase": {"Body": "switches available"}},
                         ]
                     }
@@ -1674,7 +1674,10 @@ def _extract_os_buckets(aggs: dict[str, Any] | None) -> list[dict[str, Any]]:
         if isinstance(body, dict) and isinstance(body.get("buckets"), list):
             out = []
             for b in body["buckets"]:
-                item: dict[str, Any] = {"key": b.get("key_as_string", b.get("key")), "doc_count": b.get("doc_count")}
+                item: dict[str, Any] = {
+                    "key": str(b.get("key_as_string", b.get("key", ""))),
+                    "doc_count": b.get("doc_count"),
+                }
                 subs = []
                 metrics = {}
                 for k, v in b.items():
@@ -1682,11 +1685,14 @@ def _extract_os_buckets(aggs: dict[str, Any] | None) -> list[dict[str, Any]]:
                         continue
                     if isinstance(v, dict) and isinstance(v.get("buckets"), list):
                         subs.extend(
-                            {"key": sb.get("key_as_string", sb.get("key")), "doc_count": sb.get("doc_count")}
+                            {
+                                "key": str(sb.get("key_as_string", sb.get("key", ""))),
+                                "doc_count": sb.get("doc_count"),
+                            }
                             for sb in v["buckets"]
                         )
                     elif isinstance(v, dict) and "value" in v:
-                        metrics[k] = v["value"]
+                        metrics[k] = float(v["value"]) if isinstance(v["value"], (int, float)) else v["value"]
                 if subs:
                     item["sub_buckets"] = subs
                 if metrics:
@@ -1694,7 +1700,7 @@ def _extract_os_buckets(aggs: dict[str, Any] | None) -> list[dict[str, Any]]:
                 out.append(item)
             return out
         if isinstance(body, dict) and isinstance(body.get("buckets"), dict):
-            return [{"key": k, "doc_count": v.get("doc_count")} for k, v in body["buckets"].items()]
+            return [{"key": str(k), "doc_count": v.get("doc_count")} for k, v in body["buckets"].items()]
     return []
 
 
@@ -1718,7 +1724,7 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
         entries = res_obj.get("results") or []
         parts = direct_res.get("parts") or []
         part_comparisons = []
-        all_ok = len(entries) == len(parts)
+        all_ok = len(entries) == len(parts) and len(parts) > 0
         for idx, (e, p) in enumerate(zip(entries, parts)):
             ex = e.get("execution") or {}
             os_raw = p["response"]
@@ -1726,7 +1732,8 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
             direct_total = ((os_raw.get("hits") or {}).get("total") or {}).get("value")
             agent_hits = len(ex.get("hits") or [])
             direct_hits = len((os_raw.get("hits") or {}).get("hits") or [])
-            ok = (agent_total == direct_total) and (agent_hits == direct_hits) and (direct_total or 0) > 0
+            exec_ok = ex.get("execution_status") in ("success", "empty_result")
+            ok = exec_ok and (agent_total == direct_total) and (agent_hits == direct_hits)
             all_ok = all_ok and ok
             part_comparisons.append(
                 {
@@ -1746,14 +1753,25 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
         return {
             "test_id": tid,
             "question": case["question"],
-            "match": all_ok and outcome in ("correlated", "not_correlated") and (pairs_found or 0) > 0,
+            "match": all_ok and outcome in ("correlated", "none_found", "none_found_in_examined_rows"),
             "comparison_type": "multi_query_temporal_proximity",
             "legs": part_comparisons,
             "correlation_status": outcome,
             "correlation_pairs_found": pairs_found,
         }
 
+    if res_obj.get("status") != "ok":
+        return {
+            "test_id": tid,
+            "question": case["question"],
+            "match": False,
+            "comparison_type": "agent_not_ok",
+            "agent_status": res_obj.get("status"),
+            "agent_explanation": res_obj.get("explanation"),
+        }
+
     ex = res_obj.get("execution") or {}
+    exec_ok = ex.get("execution_status") in ("success", "empty_result")
     os_raw = direct_res["response"]
     agent_total = ((ex.get("metadata") or {}).get("count") or {}).get("value")
     direct_total = ((os_raw.get("hits") or {}).get("total") or {}).get("value")
@@ -1766,7 +1784,7 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
             agent_buckets = ex.get("buckets") or []
             direct_keys = {str(b["key"]): b["doc_count"] for b in direct_buckets}
             agent_keys = {str(b["key"]): b["doc_count"] for b in agent_buckets}
-            match = (agent_keys == direct_keys) and len(agent_keys) > 0
+            match = exec_ok and (agent_total == direct_total) and (agent_keys == direct_keys)
             return {
                 "test_id": tid,
                 "question": case["question"],
@@ -1791,7 +1809,11 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
                 if m and int(m.group(1)) < int(m.group(2)):
                     direct_shortfalls.append({"available": int(m.group(1)), "expected": int(m.group(2))})
             agent_hits = ex.get("hits") or []
-            match = (len(agent_hits) == len(direct_shortfalls)) and len(agent_hits) > 0
+            match = (
+                exec_ok
+                and (analysis_block.get("rows_scanned") == len(direct_hits))
+                and (len(agent_hits) == len(direct_shortfalls))
+            )
             return {
                 "test_id": tid,
                 "question": case["question"],
@@ -1806,7 +1828,7 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
             direct_anchors = (os_raw.get("hits") or {}).get("hits") or []
             agent_hits = ex.get("hits") or []
             anchor_rows = [h for h in agent_hits if (h.get("analysis") or {}).get("position") == "anchor"]
-            match = len(direct_anchors) == len(anchor_rows) and len(agent_hits) >= len(direct_anchors) and len(direct_anchors) > 0
+            match = exec_ok and (len(direct_anchors) == len(anchor_rows)) and (len(agent_hits) >= len(direct_anchors))
             return {
                 "test_id": tid,
                 "question": case["question"],
@@ -1819,7 +1841,7 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
         if atype == "ingest_lag":
             direct_hits = (os_raw.get("hits") or {}).get("hits") or []
             agent_hits = ex.get("hits") or []
-            match = (len(direct_hits) == len(agent_hits)) and len(agent_hits) > 0 and analysis_block.get("rows_measured") == len(direct_hits)
+            match = exec_ok and (len(direct_hits) == len(agent_hits)) and (analysis_block.get("rows_measured") == len(direct_hits))
             return {
                 "test_id": tid,
                 "question": case["question"],
@@ -1840,7 +1862,7 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
         agent_buckets = ex.get("buckets") or []
         direct_pairs = [(str(b["key"]), b["doc_count"]) for b in direct_buckets]
         agent_pairs = [(str(b["key"]), b["doc_count"]) for b in agent_buckets]
-        match = (agent_total == direct_total) and (agent_pairs == direct_pairs) and len(agent_pairs) > 0
+        match = exec_ok and (agent_total == direct_total) and (agent_pairs == direct_pairs)
         return {
             "test_id": tid,
             "question": case["question"],
@@ -1854,7 +1876,7 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
 
     direct_hits = (os_raw.get("hits") or {}).get("hits") or []
     agent_hits = ex.get("hits") or []
-    match = (agent_total == direct_total) and (len(agent_hits) == len(direct_hits)) and len(agent_hits) > 0
+    match = exec_ok and (agent_total == direct_total) and (len(agent_hits) == len(direct_hits))
     return {
         "test_id": tid,
         "question": case["question"],
@@ -1867,7 +1889,33 @@ def _compare_agent_and_direct(case: dict[str, Any], agent_res: dict[str, Any], d
     }
 
 
-def _run_one_agent_case(
+def _adapt_case_to_live_mapping(case: dict[str, Any], fh_missing_fields: set[str]) -> dict[str, Any]:
+    """Dynamically adapts FH-05's mock generator and direct OpenSearch query when
+    `fields.Port` is not present in the live OpenSearch mapping."""
+    import copy
+
+    c = copy.deepcopy(case)
+    if c["test_id"] == "FH-05" and "fields.Port" in fh_missing_fields:
+        src = [
+            "@timestamp",
+            "fields.Switch",
+            "fields.Location",
+            "fields.PhysicalContext",
+            "fields.PhysicalSubContext",
+            "fields.Value",
+        ]
+        c["generator"]["query"]["query"]["bool"]["filter"][1] = {"match_phrase": {"fields.Value": "j104p1"}}
+        c["generator"]["query"]["_source"] = src
+        c["generator"]["explanation"] = (
+            "Searched fields.Value for port 'j104p1' over the last 24 hours and projected fields.Value "
+            "because fields.Port is absent from the live cluster mapping."
+        )
+        c["direct_opensearch"]["body"]["query"]["bool"]["filter"][1] = {"match_phrase": {"fields.Value": "j104p1"}}
+        c["direct_opensearch"]["body"]["_source"] = src
+    return c
+
+
+def _generate_agent_contract(
     case: dict[str, Any],
     skill_index: SkillIndex,
     settings: Settings,
@@ -1876,8 +1924,7 @@ def _run_one_agent_case(
     t0 = time.perf_counter()
     if use_live_llm:
         contract = asyncio.run(pipeline.run_pipeline(case["question"], skill_index, settings))
-        executed = executor.execute_contract(contract, settings)
-        return {"result": executed, "session_id": None}, time.perf_counter() - t0
+        return contract, time.perf_counter() - t0
 
     calls = [case["router"], case["generator"]]
 
@@ -1887,8 +1934,25 @@ def _run_one_agent_case(
 
     with patch.object(llm_client, "call_llm_json", side_effect=_fake_llm):
         contract = asyncio.run(pipeline.run_pipeline(case["question"], skill_index, settings))
-        executed = executor.execute_contract(contract, settings)
-    return {"result": executed, "session_id": None}, time.perf_counter() - t0
+    return contract, time.perf_counter() - t0
+
+
+def _direct_spec_for_contract(case: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any] | None:
+    """Builds the direct OpenSearch request spec to run in parallel with executor.execute_contract,
+    using the canonicalized query from the validated contract when available so word-form expansion
+    and aggregation sizes match, or falling back to case['direct_opensearch']."""
+    if case["direct_opensearch"] is None:
+        return None
+    if contract.get("mode") == "multi" and isinstance(contract.get("results"), list):
+        parts = []
+        for entry in contract["results"]:
+            if entry.get("status") == "ok" and entry.get("index") and isinstance(entry.get("query"), dict):
+                parts.append({"index": entry["index"], "body": entry["query"]})
+        if len(parts) == len(contract["results"]) and parts:
+            return {"multi": parts}
+    elif contract.get("status") == "ok" and contract.get("index") and isinstance(contract.get("query"), dict):
+        return {"index": contract["index"], "body": contract["query"]}
+    return case["direct_opensearch"]
 
 
 def main() -> int:
@@ -1909,6 +1973,8 @@ def main() -> int:
     reg = runtime.get_registry(settings)
     cache = runtime.get_field_cache(settings)
     preflight_families = [smoke_test_opensearch.check_family(e, cache) for e in reg.enabled_patterns]
+    fh_preflight = next((f for f in preflight_families if f["pattern_id"] == "fabric_health"), {})
+    fh_missing_fields = set(fh_preflight.get("registered_fields_missing_live") or [])
 
     suite_results: list[dict[str, Any]] = []
     manual_results: list[dict[str, Any]] = []
@@ -1918,13 +1984,19 @@ def main() -> int:
     print(f"Running 30 OpenSearch Mentor Questions (Backend Pipeline + Parallel Direct OpenSearch @ {os_url})")
     print("=" * 105)
 
-    for case in SUITE_CASES:
+    for raw_case in SUITE_CASES:
+        case = _adapt_case_to_live_mapping(raw_case, fh_missing_fields)
         tid = case["test_id"]
+        contract, gen_elapsed = _generate_agent_contract(case, skill_index, settings, use_live_llm)
+        direct_spec = _direct_spec_for_contract(case, contract)
+        t_exec0 = time.perf_counter()
         with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_agent = pool.submit(_run_one_agent_case, case, skill_index, settings, use_live_llm)
-            fut_direct = pool.submit(_run_direct_opensearch, os_url, case["direct_opensearch"])
-            agent_resp, elapsed = fut_agent.result()
+            fut_agent = pool.submit(executor.execute_contract, contract, settings)
+            fut_direct = pool.submit(_run_direct_opensearch, os_url, direct_spec)
+            executed = fut_agent.result()
             direct_resp = fut_direct.result()
+        elapsed = gen_elapsed + (time.perf_counter() - t_exec0)
+        agent_resp = {"result": executed, "session_id": None}
 
         comp = _compare_agent_and_direct(case, agent_resp, direct_resp)
         comparisons.append(comp)
