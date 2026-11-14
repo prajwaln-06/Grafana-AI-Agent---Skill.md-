@@ -110,7 +110,14 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
         ) from e
 
     try:
-        client = genai.Client(api_key=api_key)
+        import os
+
+        use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1")
+        gcp_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        if use_vertex and gcp_project and api_key and api_key.startswith("AQ."):
+            client = genai.Client(vertexai=True, project=gcp_project, location="global")
+        else:
+            client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
             model=model,
             contents=prompt,

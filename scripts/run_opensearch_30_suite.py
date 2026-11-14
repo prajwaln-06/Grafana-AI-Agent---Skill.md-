@@ -1966,7 +1966,7 @@ def main() -> int:
 
     os_url = os.environ.get("OPENSEARCH_URL", "http://127.0.0.1:9250")
     api_key = os.environ.get("GEMINI_API_KEY", "")
-    use_live_llm = bool(api_key and not api_key.startswith("test") and not api_key.startswith("AQ."))
+    use_live_llm = bool(api_key and not api_key.startswith("test"))
 
     settings = Settings(
         gemini_api_key=api_key or "test-key-pipeline-verification",
