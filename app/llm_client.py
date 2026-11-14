@@ -114,19 +114,51 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
 
         use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1")
         gcp_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if use_vertex and gcp_project and api_key and api_key.startswith("AQ."):
+        is_ai_studio_key = bool(api_key and api_key.strip().startswith("AIza"))
+
+        if is_ai_studio_key:
+            # Standard Google AI Studio key (AIzaSy...): explicitly force Gemini Developer API
+            # (vertexai=False) so any machine-level GOOGLE_GENAI_USE_VERTEXAI env var cannot
+            # redirect it to Vertex AI.
+            client = genai.Client(api_key=api_key.strip(), vertexai=False)
+        elif use_vertex and gcp_project and api_key and api_key.strip().startswith("AQ."):
             client = genai.Client(vertexai=True, project=gcp_project, location="global")
         else:
             client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                temperature=0.0,
-            ),
+
+        gen_config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            temperature=0.0,
         )
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=gen_config,
+            )
+        except errors.APIError as first_err:
+            # If a Google AI Studio key is used with the default Vertex model ID
+            # ('gemini-3.5-flash-lite') and AI Studio returns 404 NOT_FOUND, automatically
+            # fall back to standard AI Studio Flash models ('gemini-2.5-flash-lite', 'gemini-2.5-flash').
+            if is_ai_studio_key and getattr(first_err, "code", None) == 404 and model == "gemini-3.5-flash-lite":
+                response = None
+                for fallback_model in ("gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"):
+                    try:
+                        response = client.models.generate_content(
+                            model=fallback_model,
+                            contents=prompt,
+                            config=gen_config,
+                        )
+                        break
+                    except errors.APIError as fb_err:
+                        if getattr(fb_err, "code", None) == 404:
+                            continue
+                        raise
+                if response is None:
+                    raise first_err
+            else:
+                raise
         text = response.text
         if text is None:
             raise _TransientError("Gemini returned an empty response body.")

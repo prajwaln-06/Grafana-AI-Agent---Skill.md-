@@ -1964,14 +1964,26 @@ def main() -> int:
     parser.add_argument("--id", type=str, default=None, help="Run a single question by test_id (e.g. FH-01, CL-05, ILO-11).")
     args = parser.parse_args()
 
-    os_url = os.environ.get("OPENSEARCH_URL", "http://127.0.0.1:9250")
-    api_key = os.environ.get("GEMINI_API_KEY", "")
+    try:
+        dotenv_settings = Settings()
+        default_api_key = dotenv_settings.gemini_api_key
+        default_os_url = dotenv_settings.opensearch_url or "http://127.0.0.1:9250"
+        default_prom_url = dotenv_settings.prometheus_url or "http://127.0.0.1:9090"
+    except Exception:
+        default_api_key = ""
+        default_os_url = "http://127.0.0.1:9250"
+        default_prom_url = "http://127.0.0.1:9090"
+
+    os_url = os.environ.get("OPENSEARCH_URL", default_os_url)
+    if "localhost:9200" in os_url:
+        os_url = "http://127.0.0.1:9250"
+    api_key = os.environ.get("GEMINI_API_KEY", default_api_key)
     use_live_llm = bool(api_key and not api_key.startswith("test"))
 
     settings = Settings(
         gemini_api_key=api_key or "test-key-pipeline-verification",
         opensearch_url=os_url,
-        prometheus_url=os.environ.get("PROMETHEUS_URL", "http://127.0.0.1:9090"),
+        prometheus_url=os.environ.get("PROMETHEUS_URL", default_prom_url),
         opensearch_result_cache_enabled=False,
     )
     runtime.reset()
