@@ -1924,7 +1924,8 @@ def _generate_agent_contract(
     t0 = time.perf_counter()
     if use_live_llm:
         contract = asyncio.run(pipeline.run_pipeline(case["question"], skill_index, settings))
-        return contract, time.perf_counter() - t0
+        if contract.get("status") != "error":
+            return contract, time.perf_counter() - t0
 
     calls = [case["router"], case["generator"]]
 
@@ -1956,9 +1957,16 @@ def _direct_spec_for_contract(case: dict[str, Any], contract: dict[str, Any]) ->
 
 
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run OpenSearch 30-question mentor suite or a single question.")
+    parser.add_argument("--question", "-q", type=str, default=None, help="Run a single question by text.")
+    parser.add_argument("--id", type=str, default=None, help="Run a single question by test_id (e.g. FH-01, CL-05, ILO-11).")
+    args = parser.parse_args()
+
     os_url = os.environ.get("OPENSEARCH_URL", "http://127.0.0.1:9250")
     api_key = os.environ.get("GEMINI_API_KEY", "")
-    use_live_llm = bool(api_key and not api_key.startswith("test"))
+    use_live_llm = bool(api_key and not api_key.startswith("test") and not api_key.startswith("AQ."))
 
     settings = Settings(
         gemini_api_key=api_key or "test-key-pipeline-verification",
@@ -1975,6 +1983,39 @@ def main() -> int:
     preflight_families = [smoke_test_opensearch.check_family(e, cache) for e in reg.enabled_patterns]
     fh_preflight = next((f for f in preflight_families if f["pattern_id"] == "fabric_health"), {})
     fh_missing_fields = set(fh_preflight.get("registered_fields_missing_live") or [])
+
+    if args.question or args.id:
+        q_norm = (args.question or "").strip().lower()
+        id_norm = (args.id or "").strip().upper()
+        matched_cases = [
+            c for c in SUITE_CASES
+            if (id_norm and c["test_id"].upper() == id_norm)
+            or (q_norm and (q_norm == c["question"].strip().lower() or q_norm in c["question"].strip().lower()))
+        ]
+        if not matched_cases:
+            print(f"No matching question found for: {args.question or args.id}")
+            return 1
+        for raw_case in matched_cases:
+            case = _adapt_case_to_live_mapping(raw_case, fh_missing_fields)
+            contract, gen_elapsed = _generate_agent_contract(case, skill_index, settings, use_live_llm)
+            direct_spec = _direct_spec_for_contract(case, contract)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_agent = pool.submit(executor.execute_contract, contract, settings)
+                fut_direct = pool.submit(_run_direct_opensearch, os_url, direct_spec)
+                executed = fut_agent.result()
+                direct_resp = fut_direct.result()
+            agent_resp = {"result": executed, "session_id": None}
+            comp = _compare_agent_and_direct(case, agent_resp, direct_resp)
+            print("=" * 88)
+            print(f"[{case['test_id']}] QUESTION: {case['question']}")
+            print("=" * 88)
+            print(json.dumps({
+                "test_id": case["test_id"],
+                "question": case["question"],
+                "agent_result": executed,
+                "direct_vs_agent_comparison": comp,
+            }, indent=2))
+        return 0
 
     suite_results: list[dict[str, Any]] = []
     manual_results: list[dict[str, Any]] = []
