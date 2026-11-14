@@ -698,11 +698,22 @@ def test_the_pipeline_runs_when_the_pattern_is_ambiguous(monkeypatch, cluster, p
     assert run.pipeline_questions == [Q_BASE, Q_REWORDED] and plan_info(res) is None
 
 
-def test_a_sibling_without_the_analysis_does_not_block_semantic_reuse(monkeypatch, cluster, plan_only):
+def test_a_sibling_that_cannot_ground_the_entities_does_not_block_semantic_reuse(monkeypatch, cluster, plan_only):
     _prime_cache(monkeypatch, cluster, plan_only)
+    reg = _registry_with_sibling(plan_only, roles={}, queryable_fields=())
+    monkeypatch.setattr(runtime, "get_registry", lambda s: reg)
+    # the real controller_log / ilo_events do not ground "switch" either: only the sibling could have mattered
+    assert _lookup(plan_only, Q_REWORDED).hit.match == "semantic"
+
+
+def test_a_sibling_that_grounds_the_entities_blocks_even_without_the_analysis(monkeypatch, cluster, plan_only):
+    """Stricter than the previous rule, which only looked at patterns offering the same analysis."""
+    cache = _prime_cache(monkeypatch, cluster, plan_only)
     reg = _registry_with_sibling(plan_only, analyses={})
     monkeypatch.setattr(runtime, "get_registry", lambda s: reg)
-    assert _lookup(plan_only, Q_REWORDED).hit.match == "semantic"
+    out = _lookup(plan_only, Q_REWORDED)
+    assert out.hit is None and out.invalidation_reason is None and len(cache) == 1
+    assert _lookup(plan_only, Q_BASE).hit.match == "exact"
 
 
 def test_pattern_ambiguity_rules(monkeypatch, cluster, plan_only):
@@ -714,7 +725,7 @@ def test_pattern_ambiguity_rules(monkeypatch, cluster, plan_only):
     ungrounded = _registry_with_sibling(plan_only, roles={}, queryable_fields=())
     assert plan_cache.pattern_ambiguity(Q_REWORDED, entry, ungrounded, {}) is None
     # ... but a question naming NO entity is grounded everywhere, so it is ambiguous
-    assert "could equally own" in plan_cache.pattern_ambiguity("Show heartbeats that stopped", entry, ungrounded, {})
+    assert "names no entity" in plan_cache.pattern_ambiguity("Show heartbeats that stopped", entry, ungrounded, {})
     # a sibling that is disabled is not a candidate
     off = _registry_with_sibling(plan_only, enabled=False)
     assert plan_cache.pattern_ambiguity(Q_REWORDED, entry, off, {}) is None
@@ -891,3 +902,150 @@ def test_an_opensearch_failure_on_a_plan_hit_is_returned_not_stored(monkeypatch,
     cluster.handler = absence_handler(SWITCHES, ALIVE)                    # the cluster recovers: plan still serves
     res2, _ = run.ask(Q_BASE)
     assert plan_info(res2)["hit"] is True and res2["execution"]["execution_status"] == "success"
+
+
+# ---------------------------------------------------------------------------------------------------
+# L. third round: ANY other enabled pattern that could own the question blocks semantic reuse
+# ---------------------------------------------------------------------------------------------------
+
+Q_PORT = "Which ports have stopped sending heartbeats?"
+Q_PORT_REWORDED = "Which ports have gone silent?"
+Q_NO_ENTITY = "Which are silent?"
+Q_NO_ENTITY_REWORDED = "Which are quiet?"
+
+
+def _store(settings, question, skill_index=None):
+    cluster_executed = executor.execute_contract(canon(settings, absence_entry()), settings)
+    assert runtime.store_validated_plan(question, SCOPE, cluster_executed, settings, skill_index) == ""
+    return pcache(settings)
+
+
+def test_port_question_is_not_reused_across_patterns_with_a_different_analysis(monkeypatch, cluster, plan_only):
+    """`port` is grounded by fabric_health AND controller_log; controller_log offers no absence/recurrence."""
+    cluster.handler = absence_handler(SWITCHES, ALIVE)
+    cache = _store(plan_only, Q_PORT)
+    reg = runtime.get_registry(plan_only)
+    assert reg.get("controller_log") is not None and "absence" not in reg.get("controller_log").analyses
+    # control: the matcher alone WOULD reuse it (what the previous rule did)
+    ctrl = cache.lookup(Q_PORT_REWORDED, SCOPE, lambda e: None, lambda e, q: None)
+    assert ctrl.hit is not None and ctrl.hit.match == "semantic"
+    out = _lookup(plan_only, Q_PORT_REWORDED)
+    assert out.hit is None and out.invalidation_reason is None
+    (entry,) = cache._entries.values()
+    assert "controller_log" in plan_cache.pattern_ambiguity(Q_PORT_REWORDED, entry, reg, {})
+    assert cache.snapshot()["pattern_ambiguous"] >= 1 and len(cache) == 1, "kept: still valid for its own pattern"
+    assert _lookup(plan_only, Q_PORT).hit.match == "exact", "identical wording is unchanged"
+
+
+def test_an_entity_free_question_is_ambiguous_with_several_enabled_patterns(monkeypatch, cluster, plan_only):
+    cluster.handler = absence_handler(SWITCHES, ALIVE)
+    cache = _store(plan_only, Q_NO_ENTITY)
+    (entry,) = cache._entries.values()
+    assert entry.semantic_ok, "the entry is Level-2 eligible, so the miss below is the ambiguity rule"
+    out = _lookup(plan_only, Q_NO_ENTITY_REWORDED)
+    assert out.hit is None and len(cache) == 1
+    assert "names no entity" in plan_cache.pattern_ambiguity(
+        Q_NO_ENTITY_REWORDED, entry, runtime.get_registry(plan_only), {})
+    assert _lookup(plan_only, Q_NO_ENTITY).hit.match == "exact"
+    # with ONE enabled pattern nothing can compete: reuse is allowed
+    real = runtime.get_registry(plan_only)
+    solo = IndexRegistry(patterns=tuple(p for p in real.patterns if p.pattern_id == "fabric_health"),
+                         registry_version=real.registry_version)
+    monkeypatch.setattr(runtime, "get_registry", lambda s: solo)
+    assert _lookup(plan_only, Q_NO_ENTITY_REWORDED).hit.match == "semantic"
+
+
+def _alias_settings(settings, aliases):
+    return settings.model_copy(update={"opensearch_result_cache_aliases": aliases})
+
+
+Q_ALIAS_STORED = "Which switches are silent?"
+Q_ALIAS_INCOMING = "Which nodes are silent?"
+
+
+@pytest.mark.parametrize("aliases, reused", [
+    ({"fabric_health": {"node": "switch"}}, True),                                     # nobody else interprets it
+    ({"fabric_health": {"node": "switch"}, "controller_log": {"node": "host"}}, False),  # conflicting meaning
+    ({"fabric_health": {"node": "switch"}, "ilo_events": {"node": "host"}}, False),
+    ({"fabric_health": {"node": "switch"}, "controller_log": {"node": "switch"}}, True),  # same meaning: no conflict
+    ({"fabric_health": {"node": "switch"}, "controller_log": {"sonic": "host"}}, True),   # unrelated word
+])
+def test_aliases_declared_by_other_patterns_are_inspected(monkeypatch, cluster, settings, aliases, reused):
+    s = _alias_settings(_s(settings, result=False, plan=True), aliases)
+    cluster.handler = absence_handler(SWITCHES, ALIVE)
+    cache = _store(s, Q_ALIAS_STORED)
+    (entry,) = cache._entries.values()
+    assert entry.semantic_ok
+    out = runtime.lookup_cached_plan(Q_ALIAS_INCOMING, SCOPE, s, None)
+    assert (out.hit is not None) is reused, aliases
+    if not reused:
+        reg = runtime.get_registry(s)
+        assert "interprets 'node' differently" in plan_cache.pattern_ambiguity(Q_ALIAS_INCOMING, entry, reg, aliases)
+    assert runtime.lookup_cached_plan(Q_ALIAS_STORED, SCOPE, s, None).hit.match == "exact"
+
+
+def test_the_stored_patterns_alias_cannot_make_a_question_look_unambiguous(monkeypatch, cluster, plan_only):
+    """The stored family's alias is judged only as that family's reading. Each competitor also reads the
+    question under ITS OWN aliases (none here), so an alias cannot hide a named entity or fake one."""
+    cluster.handler = absence_handler(SWITCHES, ALIVE)
+    al = {"fabric_health": {"interface": "switch"}}
+    s = _alias_settings(plan_only, al)
+    (entry,) = _store(s, "Which switches are silent?")._entries.values()
+    reg = runtime.get_registry(s)
+    # "interface" is not an entity word: read without the alias the question names no entity, so
+    # controller_log/ilo_events could own it -> miss (fail closed), although the aliased reading is clean
+    assert "names no entity" in plan_cache.pattern_ambiguity("Which interfaces are silent?", entry, reg, al)
+    # an entity word the alias leaves alone ("port") stays ambiguous because controller_log grounds it
+    assert "controller_log" in plan_cache.pattern_ambiguity("Which ports are silent?", entry, reg, al)
+    # an entity word nobody grounds ("node") is not claimed by a competitor: with the alias it is reusable
+    al2 = {"fabric_health": {"node": "switch"}}
+    assert plan_cache.pattern_ambiguity("Which nodes are silent?", entry, reg, al2) is None
+
+
+def test_normal_pipeline_runs_after_an_ambiguous_semantic_lookup(monkeypatch, cluster, plan_only):
+    run = agent(monkeypatch, cluster, plan_only)
+    run.ask(Q_PORT)
+    assert len(pcache(plan_only)) == 1
+    n = len(cluster.searches)
+    res, _ = run.ask(Q_PORT_REWORDED)
+    assert run.pipeline_questions == [Q_PORT, Q_PORT_REWORDED], "Router/Generator ran: no semantic reuse"
+    assert plan_info(res) is None and len(cluster.searches) == n + 2, "exactly one execution: the fresh plan"
+    res2, _ = run.ask(Q_PORT)                                    # exact wording still hits
+    assert plan_info(res2)["match"] == "exact" and len(run.pipeline_questions) == 2
+
+
+def test_semantic_reuse_still_works_when_no_competitor_can_own_the_question(monkeypatch, cluster, plan_only):
+    run = primed(monkeypatch, cluster, plan_only)
+    n = len(cluster.searches)
+    res, _ = run.ask(Q_REWORDED)                                  # switch: grounded by fabric_health alone
+    assert plan_info(res)["match"] == "semantic" and run.pipeline_questions == [Q_BASE]
+    assert len(cluster.searches) == n + 2
+
+
+# The exact impact of the stricter rule on the questions found in the repo (skills docs, evals, tests):
+# 39 are Level-2 admissible for fabric_health (entities grounded by it). Against the real registry:
+# question -> text the refusal reason must contain (and why)
+LOSES_SEMANTIC_REUSE = {
+    "Which ports have recurring faults?": "controller_log",                      # also grounds 'port'
+    "Which ports have stopped sending heartbeats in the last 15 minutes?": "controller_log",
+    "Which event codes recur most on each BMC?": "names no entity",              # BMC is a literal, not an entity
+}
+KEEPS_SEMANTIC_REUSE = [
+    "Which switches have stopped sending heartbeats?", "Which switches are silent?",
+    "Which switches have gone quiet in the past 1 day?", "Which locations have recurring faults?",
+    "Which locations have stopped sending heartbeats?", "Which switches in rack 5 have stopped sending heartbeats?",
+    "Which switches have recurring heartbeat problems?",
+]
+
+
+@pytest.mark.parametrize("question", sorted(LOSES_SEMANTIC_REUSE))
+def test_documented_questions_that_lose_semantic_reuse(settings, question):
+    entry = SimpleNamespace(pattern_id="fabric_health", analysis_type="recurrence" if "recur" in question else "absence")
+    why = plan_cache.pattern_ambiguity(question, entry, runtime.get_registry(settings), {})
+    assert why and LOSES_SEMANTIC_REUSE[question] in why, why
+
+
+@pytest.mark.parametrize("question", KEEPS_SEMANTIC_REUSE)
+def test_documented_questions_that_keep_semantic_reuse(settings, question):
+    entry = SimpleNamespace(pattern_id="fabric_health", analysis_type="recurrence" if "recur" in question else "absence")
+    assert plan_cache.pattern_ambiguity(question, entry, runtime.get_registry(settings), {}) is None

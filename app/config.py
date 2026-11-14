@@ -104,7 +104,8 @@ class Settings(BaseSettings):
                     "window and every leftover word. False = identical wording only (Level 1). "
                     "ALSO governs the query-plan cache's semantic matching "
                     "(OPENSEARCH_QUERY_PLAN_CACHE_ENABLED); that cache additionally refuses a reworded "
-                    "question when another enabled pattern could equally own it.")
+                    "question whenever ANY other enabled pattern could own it: it grounds the entities the "
+                    "question names, the question names none, or it declares a conflicting alias.")
     opensearch_result_cache_aliases: dict[str, dict[str, str]] = Field(
         default_factory=dict,
         description="Operator-declared synonyms per index family (pattern_id), e.g. "
@@ -112,7 +113,8 @@ class Settings(BaseSettings):
                     "to assert that in that family 'nodes are down' means 'switches stopped sending "
                     "heartbeats'. Empty by default: no equivalence is assumed that was not declared. "
                     "Applied only to entries of that single family. The query-plan cache reads the same "
-                    "aliases (it has none of its own).")
+                    "aliases (it has none of its own) and also treats another family's alias for a word "
+                    "in the question as a conflict (no semantic reuse).")
 
     # --- OpenSearch QUERY-PLAN cache (opensearch_catalog.plan_cache) ---
     # Independent of the result cache above: this one stores validated query PLANS (never results), so an

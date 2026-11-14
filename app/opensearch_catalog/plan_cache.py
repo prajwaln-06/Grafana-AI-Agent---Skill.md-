@@ -94,26 +94,39 @@ def check_consistency(entry: PlanEntry) -> str | None:
 
 
 def pattern_ambiguity(question: str, entry: "PlanEntry", registry, aliases) -> str | None:
-    """None only if no OTHER enabled registry pattern could equally own `question`; else why not.
+    """None only if the entry's pattern is the only one that could own `question`; else why not.
 
-    Level-2 equivalence compares wording only (query_cache.equivalent) -- it knows nothing of which
-    registry pattern a question belongs to, and the per-family aliases are applied through the STORED
-    entry's pattern. Choosing the pattern is the Router's (LLM) job and must not happen at lookup time,
-    so the check is deterministic and one-sided: if any other enabled pattern offers the entry's
-    analysis AND grounds every entity the question names (the same test query_cache applies when it
-    admits an entry to Level 2), the question might belong to that pattern -> miss, never reuse. A
-    question that names no entity is grounded everywhere, so it is ambiguous whenever a second
-    pattern offers the analysis."""
-    atype = entry.analysis_type
-    if atype is None:
-        return "entry has no analysis type"
-    sig = query_cache.build_signature(question, query_cache.alias_items_for(aliases, [entry.pattern_id]))
+    Level-2 equivalence compares wording only (query_cache.equivalent): it knows nothing of which
+    registry pattern a question belongs to, and picking the pattern is the Router's (LLM) job, which
+    must not be repeated -- or second-guessed -- at lookup time. So ownership is judged
+    deterministically, conservatively and one-sidedly: any doubt is a miss, never a reuse.
+
+    EVERY other enabled pattern is a competitor, whatever analyses it offers, when
+      1. it grounds every entity the question names (the same substring test query_cache applies when
+         it admits an entry to Level 2) -- judged both under the stored pattern's aliases and under
+         the competitor's own, so an alias cannot hide an entity; or
+      2. the question names no entity at all (nothing distinguishes the patterns); or
+      3. it declares an alias for a word in the question that the stored pattern does not interpret
+         identically (a conflicting interpretation), even if it grounds nothing.
+    """
+    own_items = query_cache.alias_items_for(aliases, [entry.pattern_id])
+    own = dict(own_items)
+    stored_sig = query_cache.build_signature(question, own_items)
+    stems = {query_cache._stem(t) for t in query_cache._TOKEN_RE.findall(question)}
     for p in registry.enabled_patterns:
-        if p.pattern_id == entry.pattern_id or atype not in (getattr(p, "analyses", None) or {}):
+        if p.pattern_id == entry.pattern_id:
             continue
+        their_items = query_cache.alias_items_for(aliases, [p.pattern_id])
+        their = dict(their_items)
+        for stem in sorted(stems & their.keys()):
+            if str(own.get(stem, "")).strip().lower() != str(their[stem]).strip().lower():
+                return f"pattern {p.pattern_id!r} interprets {stem!r} differently"
         names = [r.lower() for r in p.roles] + [f.lower() for f in p.queryable_fields]
-        if all(any(ent in n for n in names) for ent in sig.entities):
-            return f"pattern {p.pattern_id!r} could equally own this question"
+        seen_by = (stored_sig.entities, query_cache.build_signature(question, their_items).entities)
+        for entities in seen_by:
+            if all(any(ent in n for n in names) for ent in entities):    # vacuously true when none are named
+                why = "could equally own this question" if entities else "could own this question: it names no entity"
+                return f"pattern {p.pattern_id!r} {why}"
     return None
 
 
