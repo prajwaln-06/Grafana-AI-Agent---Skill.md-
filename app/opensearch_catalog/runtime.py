@@ -260,10 +260,10 @@ def lookup_cached_plan(question: str, scope: str, settings, skill_index) -> plan
     dropped. Never raises. A hit has passed the schema check, the registry/field-view/config/skill
     fingerprint comparison and a fresh guard.check_entry; the caller must still execute it (the
     executor runs the full guard again)."""
-    cache = get_plan_cache(settings)
-    if cache is None:
-        return plan_cache.PlanLookup()
     try:
+        cache = get_plan_cache(settings)
+        if cache is None:
+            return plan_cache.PlanLookup()
         registry = get_registry(settings)
         field_cache = get_field_cache(settings)
     except Exception:  # noqa: BLE001 -- a registry problem is a miss; the pipeline then fails closed itself
@@ -273,22 +273,28 @@ def lookup_cached_plan(question: str, scope: str, settings, skill_index) -> plan
         return query_cache.revalidate_entry(entry, settings=settings, registry=registry,
                                             field_cache=field_cache, skill_index=skill_index)
 
-    return cache.lookup(question, scope, revalidate)
+    def pattern_check(entry, q):
+        return plan_cache.pattern_ambiguity(q, entry, registry, cache.aliases)
+
+    return cache.lookup(question, scope, revalidate, pattern_check)
 
 
 def invalidate_cached_plan(settings, entry_id: int) -> None:
-    cache = get_plan_cache(settings)
-    if cache is not None:
-        cache.invalidate(entry_id)
+    try:
+        cache = get_plan_cache(settings)
+        if cache is not None:
+            cache.invalidate(entry_id)
+    except Exception:  # noqa: BLE001 -- never fail a request because of the cache
+        logger.exception("invalidating the cached plan failed")
 
 
 def store_validated_plan(question: str, scope: str, executed: dict, settings, skill_index) -> str:
     """Stores the plan behind `executed` if (and only if) it is eligible (see plan_cache.plan_eligibility).
     Returns "" when stored, otherwise the reason. Never raises."""
-    cache = get_plan_cache(settings)
-    if cache is None:
-        return "plan cache disabled"
     try:
+        cache = get_plan_cache(settings)
+        if cache is None:
+            return "plan cache disabled"
         registry = get_registry(settings)
         assessment = query_cache.assess_executed(question, executed, registry=registry, aliases=cache.aliases)
         why = plan_cache.plan_eligibility(assessment, executed)

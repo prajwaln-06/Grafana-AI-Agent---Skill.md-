@@ -47,6 +47,7 @@ PLAN_SCHEMA_VERSION = 1
 MAX_PLAN_BYTES = 200_000
 
 Revalidator = Callable[["PlanEntry"], "str | None"]
+PatternCheck = Callable[["PlanEntry", str], "str | None"]
 
 
 def plan_eligibility(assessment: Assessment, executed: Any) -> str:
@@ -90,6 +91,30 @@ def check_consistency(entry: PlanEntry) -> str | None:
         return None
     except (ValueError, TypeError, IndexError):
         return "stored plan is malformed"
+
+
+def pattern_ambiguity(question: str, entry: "PlanEntry", registry, aliases) -> str | None:
+    """None only if no OTHER enabled registry pattern could equally own `question`; else why not.
+
+    Level-2 equivalence compares wording only (query_cache.equivalent) -- it knows nothing of which
+    registry pattern a question belongs to, and the per-family aliases are applied through the STORED
+    entry's pattern. Choosing the pattern is the Router's (LLM) job and must not happen at lookup time,
+    so the check is deterministic and one-sided: if any other enabled pattern offers the entry's
+    analysis AND grounds every entity the question names (the same test query_cache applies when it
+    admits an entry to Level 2), the question might belong to that pattern -> miss, never reuse. A
+    question that names no entity is grounded everywhere, so it is ambiguous whenever a second
+    pattern offers the analysis."""
+    atype = entry.analysis_type
+    if atype is None:
+        return "entry has no analysis type"
+    sig = query_cache.build_signature(question, query_cache.alias_items_for(aliases, [entry.pattern_id]))
+    for p in registry.enabled_patterns:
+        if p.pattern_id == entry.pattern_id or atype not in (getattr(p, "analyses", None) or {}):
+            continue
+        names = [r.lower() for r in p.roles] + [f.lower() for f in p.queryable_fields]
+        if all(any(ent in n for n in names) for ent in sig.entities):
+            return f"pattern {p.pattern_id!r} could equally own this question"
+    return None
 
 
 @dataclass(frozen=True)
@@ -154,6 +179,12 @@ class QueryPlanCache:
             return {"enabled": True, "entries": len(self._entries), "max_entries": self.max_entries,
                     "semantic_enabled": self.semantic_enabled, **dict(self._stats)}
 
+    def _bump(self, key: str) -> None:
+        """The only way a statistic changes. Counter `+=` is a read-modify-write, so it takes the
+        (re-entrant, never held across slow work) lock; concurrent updates cannot be lost."""
+        with self._lock:
+            self._stats[key] += 1
+
     def _evict_locked(self, entry_id: int) -> None:
         e = self._entries.pop(entry_id, None)
         if e is not None and self._by_key.get((e.scope, e.canonical_text)) == entry_id:
@@ -168,30 +199,30 @@ class QueryPlanCache:
         try:
             why = plan_eligibility(assessment, executed)
             if why:
-                self._stats["not_stored"] += 1
+                self._bump("not_stored")
                 return False, why
             if fingerprints is None or not isinstance(scope, str) or not scope:
-                self._stats["not_stored"] += 1
+                self._bump("not_stored")
                 return False, "no fingerprints or scope"
             try:
                 contract_json = json.dumps(plan_shell(executed), ensure_ascii=False, allow_nan=False,
                                            separators=(",", ":"))
             except (TypeError, ValueError):
-                self._stats["not_stored"] += 1
+                self._bump("not_stored")
                 return False, "plan is not JSON-serialisable"
             if len(contract_json.encode("utf-8")) > MAX_PLAN_BYTES:
-                self._stats["not_stored"] += 1
+                self._bump("not_stored")
                 return False, "plan too large to cache"
             part = assessment.parts[0]
             canonical_text = query_cache.build_signature(question).canonical_text
             with self._lock:
                 if (scope, canonical_text) in self._by_key:
-                    self._stats["duplicate_not_stored"] += 1
+                    self._bump("duplicate_not_stored")
                     return False, "a plan for this question already exists"
                 while len(self._entries) >= self.max_entries:
                     oldest = next(iter(self._entries))
                     self._evict_locked(oldest)
-                    self._stats["evicted_capacity"] += 1
+                    self._bump("evicted_capacity")
                 eid = self._next_id
                 self._next_id += 1
                 self._entries[eid] = PlanEntry(
@@ -200,29 +231,33 @@ class QueryPlanCache:
                     analysis_type=part.analysis_type, parts=(part,), contract_json=contract_json,
                     fingerprints=fingerprints, created_wall=self._wall(), created_at=self._clock())
                 self._by_key[(scope, canonical_text)] = eid
-                self._stats["stored"] += 1
+                self._bump("stored")
             return True, ""
         except Exception:  # noqa: BLE001 -- caching must never fail a request
             logger.exception("query plan cache store failed")
-            self._stats["errors"] += 1
+            self._bump("errors")
             return False, "internal error"
 
     # ---- lookup ----
 
-    def lookup(self, question: str, scope: str, revalidate: Revalidator) -> PlanLookup:
+    def lookup(self, question: str, scope: str, revalidate: Revalidator,
+               pattern_check: PatternCheck | None = None) -> PlanLookup:
         """Never raises. `invalidation_reason` is set when a matching entry was found but failed
-        revalidation (and was evicted)."""
+        revalidation (and was evicted). `pattern_check(entry, question)` returns None when the entry's
+        pattern is the only one that could own the question (see pattern_ambiguity); without it only
+        exact wording is matched (Level 2 fails closed)."""
         reasons: list[str] = []
         try:
-            hit = self._lookup(question, scope, revalidate, reasons)
+            hit = self._lookup(question, scope, revalidate, reasons, pattern_check)
         except Exception:  # noqa: BLE001
             logger.exception("query plan cache lookup failed")
-            self._stats["errors"] += 1
+            self._bump("errors")
             return PlanLookup()
-        self._stats["hits_" + hit.match if hit else "misses"] += 1
+        self._bump("hits_" + hit.match if hit else "misses")
         return PlanLookup(hit, reasons[-1] if (reasons and hit is None) else None)
 
-    def _lookup(self, question: str, scope: str, revalidate: Revalidator, reasons: list[str]) -> PlanHit | None:
+    def _lookup(self, question: str, scope: str, revalidate: Revalidator, reasons: list[str],
+                pattern_check: PatternCheck | None = None) -> PlanHit | None:
         if not isinstance(question, str) or not question.strip() or not isinstance(scope, str) or not scope:
             return None
         sig = query_cache.build_signature(question)
@@ -232,9 +267,11 @@ class QueryPlanCache:
         exact = sorted((e for e in candidates if e.canonical_text == sig.canonical_text), key=lambda e: -e.created_at)
         for e in exact:
             if self._accept(e, revalidate, reasons):
-                return self._hit(e, "exact")
+                hit = self._hit(e, "exact")
+                if hit is not None:
+                    return hit
 
-        if not (self.semantic_enabled and sig.understood):
+        if not (self.semantic_enabled and sig.understood and pattern_check is not None):
             return None
         tried = {e.entry_id for e in exact}
         matches: list[PlanEntry] = []
@@ -247,13 +284,26 @@ class QueryPlanCache:
                                                query_cache.build_signature(e.question, al))
             except Exception:  # noqa: BLE001 -- a matching failure is a miss for this candidate
                 logger.exception("plan matching failed; treating as a miss")
-                self._stats["match_errors"] += 1
+                self._bump("match_errors")
                 continue
-            if equal:
-                matches.append(e)
+            if not equal:
+                continue
+            try:
+                ambiguity = pattern_check(e, question)
+            except Exception:  # noqa: BLE001 -- cannot prove the pattern: a miss, never an unsafe reuse
+                logger.exception("plan pattern check failed; treating as a miss")
+                self._bump("match_errors")
+                continue
+            if ambiguity:
+                logger.info("cached plan %s not reused semantically: %s", e.entry_id, ambiguity)
+                self._bump("pattern_ambiguous")
+                continue
+            matches.append(e)
         for e in sorted(matches, key=lambda e: -e.created_at):
             if self._accept(e, revalidate, reasons):
-                return self._hit(e, "semantic")
+                hit = self._hit(e, "semantic")
+                if hit is not None:
+                    return hit
         return None
 
     def _accept(self, entry: PlanEntry, revalidate: Revalidator, reasons: list[str]) -> bool:
@@ -267,7 +317,7 @@ class QueryPlanCache:
         if problem:
             logger.info("cached plan %s not reused: %s", entry.entry_id, problem)
             self.invalidate(entry.entry_id)
-            self._stats["revalidation_failed"] += 1
+            self._bump("revalidation_failed")
             reasons.append(problem)
             return False
         return True
@@ -276,12 +326,16 @@ class QueryPlanCache:
         with self._lock:
             self._evict_locked(entry_id)
 
-    def _hit(self, entry: PlanEntry, match: str) -> PlanHit:
+    def _hit(self, entry: PlanEntry, match: str) -> PlanHit | None:
+        """Revalidation ran outside the lock, so the entry may have been invalidated, evicted or
+        cleared meanwhile. It is a hit only if THIS entry is still the live one; otherwise None."""
         with self._lock:
-            if entry.entry_id in self._entries:
-                self._entries.move_to_end(entry.entry_id)          # LRU: most recently used
-        return PlanHit(contract=json.loads(entry.contract_json), match=match, entry_id=entry.entry_id,
-                       age_seconds=round(self._clock() - entry.created_at, 3))
+            if self._entries.get(entry.entry_id) is not entry:
+                self._stats["lost_race"] += 1
+                return None
+            self._entries.move_to_end(entry.entry_id)          # LRU: most recently used
+            age = round(self._clock() - entry.created_at, 3)
+        return PlanHit(contract=json.loads(entry.contract_json), match=match, entry_id=entry.entry_id, age_seconds=age)
 
 
 def annotate(result: Any, info: dict) -> None:

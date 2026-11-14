@@ -658,3 +658,236 @@ def test_a_plan_cache_error_never_fails_the_request(monkeypatch, cluster, plan_o
     res, _ = run.ask(Q_BASE)
     assert res["execution"]["execution_status"] == "success" and run.pipeline_questions == [Q_BASE]
     assert len(pcache(plan_only)) == 0 and pcache(plan_only).snapshot()["errors"] >= 1
+
+
+# ---------------------------------------------------------------------------------------------------
+# H. review round: pattern-aware semantic matching
+# ---------------------------------------------------------------------------------------------------
+
+def _registry_with_sibling(settings, **overrides):
+    """The real registry plus `fabric_health_b`: a second enabled family that, like fabric_health, offers
+    the `absence` analysis (so a reworded absence question could just as well belong to it)."""
+    reg = runtime.get_registry(settings)
+    fabric = reg.get("fabric_health")
+    sibling = dataclasses.replace(fabric, pattern_id="fabric_health_b", index_pattern="fabricb-*",
+                                  domain_reference=fabric.domain_reference, **overrides)
+    return IndexRegistry(patterns=tuple(reg.patterns) + (sibling,), registry_version=reg.registry_version)
+
+
+def test_semantic_reuse_is_refused_when_another_pattern_could_own_the_question(monkeypatch, cluster, plan_only):
+    cache = _prime_cache(monkeypatch, cluster, plan_only)
+    # control (what Level 2 alone would do): the two wordings ARE signature-equivalent -> reuse
+    ctrl = cache.lookup(Q_REWORDED, SCOPE, lambda e: None, lambda e, q: None)
+    assert ctrl.hit is not None and ctrl.hit.match == "semantic"
+
+    both_patterns = _registry_with_sibling(plan_only)
+    monkeypatch.setattr(runtime, "get_registry", lambda s: both_patterns)
+    out = _lookup(plan_only, Q_REWORDED)
+    assert out.hit is None and out.invalidation_reason is None, "a miss, not an invalidation"
+    assert len(cache) == 1, "the plan is still valid for ITS pattern: it is kept"
+    assert cache.snapshot()["pattern_ambiguous"] == 1
+    # identical wording is not a different question: still an exact hit
+    assert _lookup(plan_only, Q_BASE).hit.match == "exact"
+
+
+def test_the_pipeline_runs_when_the_pattern_is_ambiguous(monkeypatch, cluster, plan_only):
+    run = primed(monkeypatch, cluster, plan_only)
+    reg = _registry_with_sibling(plan_only)
+    monkeypatch.setattr(runtime, "get_registry", lambda s: reg)
+    res, _ = run.ask(Q_REWORDED)
+    assert run.pipeline_questions == [Q_BASE, Q_REWORDED] and plan_info(res) is None
+
+
+def test_a_sibling_without_the_analysis_does_not_block_semantic_reuse(monkeypatch, cluster, plan_only):
+    _prime_cache(monkeypatch, cluster, plan_only)
+    reg = _registry_with_sibling(plan_only, analyses={})
+    monkeypatch.setattr(runtime, "get_registry", lambda s: reg)
+    assert _lookup(plan_only, Q_REWORDED).hit.match == "semantic"
+
+
+def test_pattern_ambiguity_rules(monkeypatch, cluster, plan_only):
+    cache = _prime_cache(monkeypatch, cluster, plan_only)
+    (entry,) = cache._entries.values()
+    real = runtime.get_registry(plan_only)
+    assert plan_cache.pattern_ambiguity(Q_REWORDED, entry, real, {}) is None
+    # a sibling that cannot ground the entity the question names is not a candidate ...
+    ungrounded = _registry_with_sibling(plan_only, roles={}, queryable_fields=())
+    assert plan_cache.pattern_ambiguity(Q_REWORDED, entry, ungrounded, {}) is None
+    # ... but a question naming NO entity is grounded everywhere, so it is ambiguous
+    assert "could equally own" in plan_cache.pattern_ambiguity("Show heartbeats that stopped", entry, ungrounded, {})
+    # a sibling that is disabled is not a candidate
+    off = _registry_with_sibling(plan_only, enabled=False)
+    assert plan_cache.pattern_ambiguity(Q_REWORDED, entry, off, {}) is None
+
+
+def test_semantic_matching_fails_closed_without_or_with_a_broken_pattern_check(executed_plan):
+    s, ex = executed_plan
+    cache = plan_cache.QueryPlanCache(max_entries=5)
+    a, p = _assess_and_prints(s, ex, Q_BASE)
+    cache.put(Q_BASE, SCOPE, ex, a, p)
+    assert cache.lookup(Q_REWORDED, SCOPE, _ok).hit is None, "no pattern check supplied: exact wording only"
+    assert cache.lookup(Q_BASE, SCOPE, _ok).hit.match == "exact"
+
+    def boom(entry, q):
+        raise RuntimeError("cannot tell")
+
+    assert cache.lookup(Q_REWORDED, SCOPE, _ok, boom).hit is None
+    assert cache.snapshot()["match_errors"] == 1
+
+
+# ---------------------------------------------------------------------------------------------------
+# I. review round: invalidation between revalidation and hit construction
+# ---------------------------------------------------------------------------------------------------
+
+def _one_plan(executed_plan):
+    s, ex = executed_plan
+    cache = plan_cache.QueryPlanCache(max_entries=5)
+    a, p = _assess_and_prints(s, ex, Q_BASE)
+    cache.put(Q_BASE, SCOPE, ex, a, p)
+    return cache, (a, p, ex)
+
+
+@pytest.mark.parametrize("how", ["invalidate", "clear", "replaced"])
+def test_an_entry_removed_after_revalidation_is_not_returned(executed_plan, how):
+    cache, (a, p, ex) = _one_plan(executed_plan)
+
+    def revalidate_then_lose_the_entry(entry):
+        if how == "invalidate":
+            cache.invalidate(entry.entry_id)
+        else:
+            cache.clear()
+            if how == "replaced":                     # a NEW live entry now owns the same key
+                assert cache.put(Q_BASE, SCOPE, ex, a, p)[0] is True
+        return None                                   # revalidation itself "succeeded"
+
+    out = cache.lookup(Q_BASE, SCOPE, revalidate_then_lose_the_entry)
+    assert out.hit is None, "the stale entry must not be served"
+    snap = cache.snapshot()
+    assert snap["lost_race"] == 1 and snap.get("revalidation_failed", 0) == 0 and snap["misses"] == 1
+    assert snap.get("hits_exact", 0) == 0
+    assert len(cache) == (1 if how == "replaced" else 0)
+
+
+def test_a_lost_race_on_one_candidate_falls_through_to_the_next(executed_plan):
+    cache, (a, p, ex) = _one_plan(executed_plan)
+    cache.put("Which switches are not reporting heartbeats?", SCOPE, ex, a, p)       # a second, equivalent plan
+    seen = []
+
+    def revalidate(entry):
+        seen.append(entry.entry_id)
+        if len(seen) == 1:
+            cache.invalidate(entry.entry_id)
+        return None
+
+    out = cache.lookup(Q_REWORDED, SCOPE, revalidate, lambda e, q: None)
+    assert out.hit is not None and out.hit.entry_id == seen[1] and out.hit.entry_id != seen[0]
+
+
+def test_revalidation_never_holds_the_cache_lock(executed_plan):
+    cache, _ = _one_plan(executed_plan)
+    held = []
+
+    def revalidate(entry):
+        got = cache._lock.acquire(blocking=False)         # RLock: the lookup thread itself could re-enter,
+        held.append(got)                                  # so probe from ANOTHER thread
+        if got:
+            cache._lock.release()
+        probe = []
+        t = threading.Thread(target=lambda: (probe.append(cache._lock.acquire(timeout=1)),
+                                             cache._lock.release() if probe[0] else None))
+        t.start()
+        t.join()
+        held.append(probe[0])
+        return None
+
+    assert cache.lookup(Q_BASE, SCOPE, revalidate).hit is not None
+    assert held[-1] is True, "another thread could take the lock while revalidation ran"
+
+
+# ---------------------------------------------------------------------------------------------------
+# J. review round: statistics under concurrency
+# ---------------------------------------------------------------------------------------------------
+
+def test_statistics_are_exact_under_concurrent_lookups_stores_and_evictions(executed_plan):
+    import sys
+    s, ex = executed_plan
+    a, p = _assess_and_prints(s, ex, Q_BASE)
+    cache = plan_cache.QueryPlanCache(max_entries=3)
+    threads_n, per = 16, 300
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)                            # make an unlocked `+=` lose updates if it ever could
+    try:
+        def looker():
+            for _ in range(per):
+                cache.lookup("Show nothing here", SCOPE, _ok)
+
+        def storer(k):
+            for i in range(per):
+                cache.put(f"Show item{k}x{i} switches", SCOPE, ex, a, p)
+
+        ts = [threading.Thread(target=looker) for _ in range(threads_n)] + \
+             [threading.Thread(target=storer, args=(k,)) for k in range(threads_n)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+    finally:
+        sys.setswitchinterval(old)
+    snap = cache.snapshot()
+    assert snap["misses"] == threads_n * per
+    assert snap["stored"] == threads_n * per
+    assert snap["evicted_capacity"] == threads_n * per - 3
+    assert snap["entries"] == 3 and snap.get("errors", 0) == 0
+
+
+def test_invalidations_are_counted_exactly(executed_plan):
+    cache, _ = _one_plan(executed_plan)
+    for _ in range(5):
+        cache.lookup(Q_BASE, SCOPE, lambda e: "nope")      # first evicts; the rest find nothing
+    assert cache.snapshot()["revalidation_failed"] == 1 and cache.snapshot()["misses"] == 5
+
+
+# ---------------------------------------------------------------------------------------------------
+# K. review round: error handling on the plan path
+# ---------------------------------------------------------------------------------------------------
+
+def test_a_failing_plan_lookup_runs_the_normal_pipeline(monkeypatch, cluster, plan_only):
+    run = primed(monkeypatch, cluster, plan_only)
+
+    def boom(settings):
+        raise RuntimeError("cache unavailable")
+
+    monkeypatch.setattr(runtime, "get_plan_cache", boom)
+    res, _ = run.ask(Q_BASE)
+    assert res["execution"]["execution_status"] == "success"
+    assert run.pipeline_questions == [Q_BASE, Q_BASE] and plan_info(res) is None
+
+
+def test_a_failing_plan_store_never_fails_the_request(monkeypatch, cluster, both):
+    run = agent(monkeypatch, cluster, both)
+    monkeypatch.setattr(plan_cache.QueryPlanCache, "put", lambda *a, **k: 1 / 0)
+    res, _ = run.ask(Q_BASE)
+    assert res["execution"]["execution_status"] == "success"
+    assert len(pcache(both)) == 0 and len(run.cache) == 1, "the answer cache is unaffected"
+
+    def boom(settings):
+        raise RuntimeError("cache unavailable")
+
+    monkeypatch.setattr(runtime, "get_plan_cache", boom)
+    res2, _ = run.ask("Which switches have gone quiet?")
+    assert res2["execution"]["execution_status"] == "success"
+
+
+def test_an_opensearch_failure_on_a_plan_hit_is_returned_not_stored(monkeypatch, cluster, both):
+    from tests.os_fixtures import _Resp
+    run = primed(monkeypatch, cluster, both)
+    runtime.reset_result_cache()
+    stored_before = pcache(both).snapshot()["stored"]
+    cluster.handler = lambda i, d: _Resp(500, {"error": "boom"})
+    res, _ = run.ask(Q_BASE)
+    assert run.pipeline_questions == [Q_BASE], "no fallback: regenerating the same query would fail the same way"
+    assert res["execution"]["execution_status"] not in ("success", "empty_result") and res["execution"].get("error")
+    assert plan_info(res)["hit"] is True
+    assert len(run.cache) == 0, "the failed result is not stored in the answer cache"
+    assert pcache(both).snapshot()["stored"] == stored_before and len(pcache(both)) == 1, "the valid plan is kept"
+    cluster.handler = absence_handler(SWITCHES, ALIVE)                    # the cluster recovers: plan still serves
+    res2, _ = run.ask(Q_BASE)
+    assert plan_info(res2)["hit"] is True and res2["execution"]["execution_status"] == "success"
