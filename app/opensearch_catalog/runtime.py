@@ -22,7 +22,7 @@ import logging
 import threading
 from pathlib import Path
 
-from app.opensearch_catalog import query_cache
+from app.opensearch_catalog import plan_cache, query_cache
 from app.opensearch_catalog.context import Limits, OpenSearchContext, build_context, error_context
 from app.opensearch_catalog.field_catalog import FieldCatalogCache, make_mapping_fetcher
 from app.opensearch_catalog.registry import (
@@ -35,6 +35,7 @@ _lock = threading.Lock()
 _registries: dict[tuple, IndexRegistry] = {}
 _caches: dict[tuple, FieldCatalogCache] = {}
 _result_caches: dict[tuple, query_cache.ResultCache] = {}
+_plan_caches: dict[tuple, plan_cache.QueryPlanCache] = {}
 
 
 def reset() -> None:
@@ -42,6 +43,7 @@ def reset() -> None:
         _registries.clear()
         _caches.clear()
         _result_caches.clear()
+        _plan_caches.clear()
 
 
 def reset_registry() -> None:
@@ -57,6 +59,7 @@ def reload_registry_status(settings) -> dict:
     is cached and every OpenSearch request keeps failing closed until it is fixed."""
     reset_registry()
     reset_result_cache()
+    reset_plan_cache()
     try:
         reg = get_registry(settings)
     except RegistryError as e:
@@ -215,4 +218,90 @@ def store_executed_result(question: str, scope: str, executed: dict, settings, s
         return "" if stored else reason
     except Exception:  # noqa: BLE001 -- never fail a request because of the cache
         logger.exception("storing the OpenSearch result in the result cache failed")
+        return "internal error"
+
+
+# ---- query-plan cache (validated plans; see plan_cache.py) ------------------------------------------------
+
+
+def get_plan_cache(settings) -> plan_cache.QueryPlanCache | None:
+    """The one process-wide plan cache for these settings, or None when disabled. Independent of the
+    result cache's switch; it only borrows that cache's semantic switch and aliases for matching."""
+    if not settings.opensearch_query_plan_cache_enabled:
+        return None
+    key = (settings.opensearch_query_plan_cache_max_entries, settings.opensearch_result_cache_semantic_enabled,
+           json.dumps(settings.opensearch_result_cache_aliases, sort_keys=True))
+    with _lock:
+        cache = _plan_caches.get(key)
+        if cache is None:
+            cache = plan_cache.QueryPlanCache(
+                max_entries=settings.opensearch_query_plan_cache_max_entries,
+                semantic_enabled=settings.opensearch_result_cache_semantic_enabled,
+                aliases=settings.opensearch_result_cache_aliases)
+            _plan_caches[key] = cache
+        return cache
+
+
+def reset_plan_cache() -> None:
+    """Empties every plan cache (keeps the instances). Used by the admin reload and by tests."""
+    with _lock:
+        caches = list(_plan_caches.values())
+    for cache in caches:
+        cache.clear()
+
+
+def plan_cache_snapshot(settings) -> dict:
+    cache = get_plan_cache(settings)
+    return {"enabled": False} if cache is None else cache.snapshot()
+
+
+def lookup_cached_plan(question: str, scope: str, settings, skill_index) -> plan_cache.PlanLookup:
+    """A re-validated plan for an identical or equivalent question (hit), or why a matching plan was
+    dropped. Never raises. A hit has passed the schema check, the registry/field-view/config/skill
+    fingerprint comparison and a fresh guard.check_entry; the caller must still execute it (the
+    executor runs the full guard again)."""
+    cache = get_plan_cache(settings)
+    if cache is None:
+        return plan_cache.PlanLookup()
+    try:
+        registry = get_registry(settings)
+        field_cache = get_field_cache(settings)
+    except Exception:  # noqa: BLE001 -- a registry problem is a miss; the pipeline then fails closed itself
+        return plan_cache.PlanLookup()
+
+    def revalidate(entry):
+        return query_cache.revalidate_entry(entry, settings=settings, registry=registry,
+                                            field_cache=field_cache, skill_index=skill_index)
+
+    return cache.lookup(question, scope, revalidate)
+
+
+def invalidate_cached_plan(settings, entry_id: int) -> None:
+    cache = get_plan_cache(settings)
+    if cache is not None:
+        cache.invalidate(entry_id)
+
+
+def store_validated_plan(question: str, scope: str, executed: dict, settings, skill_index) -> str:
+    """Stores the plan behind `executed` if (and only if) it is eligible (see plan_cache.plan_eligibility).
+    Returns "" when stored, otherwise the reason. Never raises."""
+    cache = get_plan_cache(settings)
+    if cache is None:
+        return "plan cache disabled"
+    try:
+        registry = get_registry(settings)
+        assessment = query_cache.assess_executed(question, executed, registry=registry, aliases=cache.aliases)
+        why = plan_cache.plan_eligibility(assessment, executed)
+        if why:
+            cache.put(question, scope, executed, assessment, None)       # counted, not stored
+            return why
+        prints, why = query_cache.compute_fingerprints(
+            [p.pattern_id for p in assessment.parts], registry=registry, field_cache=get_field_cache(settings),
+            settings=settings, skill_index=skill_index)
+        if prints is None:
+            return why
+        stored, reason = cache.put(question, scope, executed, assessment, prints)
+        return "" if stored else reason
+    except Exception:  # noqa: BLE001 -- never fail a request because of the cache
+        logger.exception("storing the OpenSearch plan in the plan cache failed")
         return "internal error"

@@ -110,6 +110,23 @@ class Settings(BaseSettings):
                     "heartbeats'. Empty by default: no equivalence is assumed that was not declared. "
                     "Applied only to entries of that single family.")
 
+    # --- OpenSearch QUERY-PLAN cache (opensearch_catalog.plan_cache) ---
+    # Independent of the result cache above: this one stores validated query PLANS (never results), so an
+    # identical or equivalent question skips the Router/Generator LLM calls but is re-validated against
+    # the current registry / live mapping / config / skill text, re-run through the guard, and EXECUTED
+    # AGAIN for fresh data. Matching rules (and the semantic switch / aliases) are the result cache's.
+    opensearch_query_plan_cache_enabled: bool = Field(
+        default=False,
+        description="Reuse a validated OpenSearch query plan for an identical or equivalent question, "
+                    "skipping the LLM calls but always re-validating and re-executing it. In memory only. "
+                    "False (the default: opt-in, so existing behaviour is unchanged) = every result-cache "
+                    "miss runs the full Router/Generator pipeline. Independent of "
+                    "OPENSEARCH_RESULT_CACHE_ENABLED.")
+    opensearch_query_plan_cache_max_entries: int = Field(
+        default=500, ge=1, le=10000,
+        description="Capacity of the plan cache. When full the least recently used plan is evicted. "
+                    "Plans are valid while their fingerprints and the guard say so, so there is no TTL.")
+
     prometheus_timeout_seconds: float = Field(default=15.0)
     opensearch_timeout_seconds: float = Field(default=15.0)
 

@@ -11,6 +11,7 @@ from app.catalog import runtime as catalog_runtime
 from app.pipeline import ALREADY_EXECUTED_MARKER, PipelineContext, run_pipeline
 from app.config import get_settings
 from app import executor
+from app.opensearch_catalog import plan_cache as os_plan_cache
 from app.opensearch_catalog import runtime as os_runtime
 from app.skill_index import SkillIndex
 
@@ -150,6 +151,47 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                 )
                 return
 
+        # 3c. OpenSearch QUERY-PLAN cache (app/opensearch_catalog/plan_cache.py). Reached only after a
+        # result-cache miss, and only for a fresh question. A hit skips the Router/Generator LLM calls
+        # but NOT validation or execution: the stored plan has been re-proved against the current
+        # registry, live field view, configuration and skill text and re-run through the guard, and
+        # the executor (full guard again) runs it against OpenSearch NOW, so the data is fresh. Its
+        # relative time ("now-15m") is evaluated at execution time. If the plan is rejected at any
+        # point it is evicted and the normal pipeline below runs; the answer carries
+        # `execution.metadata.query_plan_cache` (separate from `result_cache`).
+        plan_invalidation: str | None = None
+        if fresh_question and question.strip():
+            lookup = await asyncio.to_thread(
+                os_runtime.lookup_cached_plan, question, cache_scope, settings, skill_index)
+            plan_invalidation = lookup.invalidation_reason
+            if lookup.hit is not None:
+                plan_hit = lookup.hit
+                executed = await asyncio.to_thread(executor.execute_contract, plan_hit.contract, settings)
+                ex_block = executed.get("execution") if isinstance(executed, dict) else None
+                if isinstance(ex_block, dict) and ex_block.get("execution_status") == "not_executed":
+                    # the executor's own guard refused the plan: never serve it, drop it, run the pipeline
+                    await asyncio.to_thread(os_runtime.invalidate_cached_plan, settings, plan_hit.entry_id)
+                    plan_invalidation = "the executor's guard refused the stored plan"
+                else:
+                    # Eligible for the answer cache under its own rules; stored BEFORE the plan metadata is
+                    # added so a later answer-cache hit does not claim a plan-cache hit it never had.
+                    await asyncio.to_thread(
+                        os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
+                    os_plan_cache.annotate(executed, {
+                        "hit": True, "match": plan_hit.match, "age_seconds": plan_hit.age_seconds,
+                        "cache_entry_id": plan_hit.entry_id, "revalidated": True})
+                    yield Event(
+                        invocation_id=ctx.invocation_id,
+                        author=self.name,
+                        message=json.dumps({"result": executed, "session_id": None}),
+                        state={
+                            "previous_question": None,
+                            "previous_result": None,
+                            "pending_alert_proposal": None,
+                        }
+                    )
+                    return
+
         # 4. Run the pipeline
         try:
             contract = await asyncio.wait_for(
@@ -233,6 +275,12 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         if fresh_question and not already_executed:
             await asyncio.to_thread(
                 os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
+            # Remember the validated PLAN of that same successful execution (single, relative-window,
+            # non-dependent OpenSearch entries only -- the plan cache refuses everything else).
+            await asyncio.to_thread(
+                os_runtime.store_validated_plan, question, cache_scope, executed, settings, skill_index)
+        if plan_invalidation:
+            os_plan_cache.annotate(executed, {"hit": False, "invalidation_reason": plan_invalidation})
         yield Event(
             invocation_id=ctx.invocation_id,
             author=self.name,
