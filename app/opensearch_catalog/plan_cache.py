@@ -34,6 +34,7 @@ import json
 import logging
 import threading
 import time
+import unicodedata
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -112,7 +113,9 @@ def pattern_ambiguity(question: str, entry: "PlanEntry", registry, aliases) -> s
     own_items = query_cache.alias_items_for(aliases, [entry.pattern_id])
     own = dict(own_items)
     stored_sig = query_cache.build_signature(question, own_items)
-    stems = {query_cache._stem(t) for t in query_cache._TOKEN_RE.findall(question)}
+    # NFKC first, exactly as the matcher does, so a compatibility spelling (fullwidth letters, ...)
+    # of an aliased word is seen here as well
+    stems = {query_cache._stem(t) for t in query_cache._TOKEN_RE.findall(unicodedata.normalize("NFKC", question))}
     for p in registry.enabled_patterns:
         if p.pattern_id == entry.pattern_id:
             continue

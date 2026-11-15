@@ -1038,6 +1038,50 @@ KEEPS_SEMANTIC_REUSE = [
 ]
 
 
+# --- fourth round: the alias-conflict rule must see the same words as the matcher (NFKC) ----------------
+
+Q_NODES_ASCII = "Which nodes are silent?"
+Q_NODES_FULLWIDTH = "Which \uff4e\uff4f\uff44\uff45\uff53 are silent?"   # "nodes" in fullwidth letters
+
+
+def _conflicting(value):
+    return {"fabric_health": {"node": "switch"}, "controller_log": {"node": value}}
+
+
+def test_fullwidth_spelling_of_an_aliased_word_is_a_miss_with_the_alias_reason(monkeypatch, cluster, settings):
+    s = _alias_settings(_s(settings, result=False, plan=True), _conflicting("bmc"))
+    cluster.handler = absence_handler(SWITCHES, ALIVE)
+    cache = _store(s, Q_ALIAS_STORED)
+    (entry,) = cache._entries.values()
+    assert entry.semantic_ok
+    before = cache.snapshot().get("pattern_ambiguous", 0)
+    # control: the matcher itself reuses it, in both spellings (the alias is applied after NFKC)
+    own = query_cache.alias_items_for(s.opensearch_result_cache_aliases, ["fabric_health"])
+    for q in (Q_NODES_ASCII, Q_NODES_FULLWIDTH):
+        assert query_cache.equivalent(query_cache.build_signature(q, own), query_cache.build_signature(Q_ALIAS_STORED, own))
+    out = runtime.lookup_cached_plan(Q_NODES_FULLWIDTH, SCOPE, s, None)
+    assert out.hit is None and out.invalidation_reason is None and len(cache) == 1
+    assert cache.snapshot().get("pattern_ambiguous", 0) == before + 1
+    why = plan_cache.pattern_ambiguity(Q_NODES_FULLWIDTH, entry, runtime.get_registry(s), s.opensearch_result_cache_aliases)
+    assert "interprets 'node' differently" in why and "controller_log" in why
+    assert runtime.lookup_cached_plan(Q_ALIAS_STORED, SCOPE, s, None).hit.match == "exact"
+
+
+@pytest.mark.parametrize("value", ["bmc", "controller", "host"])
+def test_ascii_and_fullwidth_spellings_get_the_same_verdict(monkeypatch, cluster, settings, value):
+    s = _alias_settings(_s(settings, result=False, plan=True), _conflicting(value))
+    cluster.handler = absence_handler(SWITCHES, ALIVE)
+    cache = _store(s, Q_ALIAS_STORED)
+    (entry,) = cache._entries.values()
+    verdicts = []
+    for q in (Q_NODES_ASCII, Q_NODES_FULLWIDTH):
+        n = cache.snapshot().get("pattern_ambiguous", 0)
+        out = runtime.lookup_cached_plan(q, SCOPE, s, None)
+        verdicts.append((out.hit is not None, cache.snapshot().get("pattern_ambiguous", 0) - n,
+                         plan_cache.pattern_ambiguity(q, entry, runtime.get_registry(s), s.opensearch_result_cache_aliases) is not None))
+    assert verdicts[0] == verdicts[1] == (False, 1, True), (value, verdicts)
+
+
 @pytest.mark.parametrize("question", sorted(LOSES_SEMANTIC_REUSE))
 def test_documented_questions_that_lose_semantic_reuse(settings, question):
     entry = SimpleNamespace(pattern_id="fabric_health", analysis_type="recurrence" if "recur" in question else "absence")
