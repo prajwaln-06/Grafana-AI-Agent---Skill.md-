@@ -370,6 +370,9 @@ class _Checker:
         if self.clauses > self.limits.max_clauses:
             _fail(CODE_LIMIT, f"the query has more than {self.limits.max_clauses} clauses")
         (kind, body), = node.items()
+        if kind in ("match_phase", "match_phrases"):
+            self.applied.append(f"{where}: canonicalised clause type typo {kind!r} to 'match_phrase'")
+            kind = "match_phrase"
         handler = {
             "bool": self._bool, "term": self._term, "terms": self._terms, "match": self._match,
             "match_phrase": self._match, "prefix": self._prefix, "range": self._range,

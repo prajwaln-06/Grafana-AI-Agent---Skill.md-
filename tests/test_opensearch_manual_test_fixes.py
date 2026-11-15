@@ -721,3 +721,12 @@ def test_empty_rows_result_is_normalised_with_hits_result_type(skill_index, sett
     ex = executed["execution"]
     assert ex["execution_status"] == "empty_result"
     assert ex["result_type"] == "hits" and ex["hits"] == [] and ex["total_hits"] == 0
+
+
+def test_guard_canonicalises_match_phase_typo_to_match_phrase(os_ctx):
+    r = check(os_ctx(), "controller_log", rows_query(
+        {"terms": {"Resource.service.name.keyword": ["fabric-manager.sh", "fabric-manager"]}},
+        {"match_phase": {"Body": "switches available"}},
+    ))
+    assert r.ok, r.reason
+    assert any("canonicalised clause type typo 'match_phase' to 'match_phrase'" in note for note in r.applied)
