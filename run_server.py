@@ -188,6 +188,7 @@ async def opensearch_status():
     info["limits"] = dataclasses.asdict(Limits.from_settings(settings))
     info["field_catalogs"] = os_runtime.field_cache_snapshots()
     info["result_cache"] = os_runtime.result_cache_snapshot(settings)
+    info["query_plan_cache"] = os_runtime.plan_cache_snapshot(settings)
     return info
 
 

@@ -101,14 +101,39 @@ class Settings(BaseSettings):
         description="Allow a DIFFERENTLY WORDED question to reuse an answer (Level 2). This is "
                     "deterministic rule-based matching, not embeddings or a similarity score: the two "
                     "questions must agree exactly in operation, entity scope, concepts, literals, time "
-                    "window and every leftover word. False = identical wording only (Level 1).")
+                    "window and every leftover word. False = identical wording only (Level 1). "
+                    "ALSO governs the query-plan cache's semantic matching "
+                    "(OPENSEARCH_QUERY_PLAN_CACHE_ENABLED); that cache additionally refuses a reworded "
+                    "question whenever ANY other enabled pattern could own it: it grounds the entities the "
+                    "question names, the question names none, or it declares a conflicting alias.")
     opensearch_result_cache_aliases: dict[str, dict[str, str]] = Field(
         default_factory=dict,
         description="Operator-declared synonyms per index family (pattern_id), e.g. "
                     "{\"fabric_health\": {\"node\": \"switch\", \"down\": \"stopped sending heartbeats\"}} "
                     "to assert that in that family 'nodes are down' means 'switches stopped sending "
                     "heartbeats'. Empty by default: no equivalence is assumed that was not declared. "
-                    "Applied only to entries of that single family.")
+                    "Applied only to entries of that single family. The query-plan cache reads the same "
+                    "aliases (it has none of its own) and also treats another family's alias for a word "
+                    "in the question as a conflict (no semantic reuse).")
+
+    # --- OpenSearch QUERY-PLAN cache (opensearch_catalog.plan_cache) ---
+    # Independent of the result cache above: this one stores validated query PLANS (never results), so an
+    # identical or equivalent question skips the Router/Generator LLM calls but is re-validated against
+    # the current registry / live mapping / config / skill text, re-run through the guard, and EXECUTED
+    # AGAIN for fresh data. Matching rules (and the semantic switch / aliases) are the result cache's.
+    opensearch_query_plan_cache_enabled: bool = Field(
+        default=False,
+        description="Reuse a validated OpenSearch query plan for an identical or equivalent question, "
+                    "skipping the LLM calls but always re-validating and re-executing it. In memory only. "
+                    "False (the default: opt-in, so existing behaviour is unchanged) = every result-cache "
+                    "miss runs the full Router/Generator pipeline. Independent of "
+                    "OPENSEARCH_RESULT_CACHE_ENABLED. Its semantic matching and aliases are "
+                    "OPENSEARCH_RESULT_CACHE_SEMANTIC_ENABLED / OPENSEARCH_RESULT_CACHE_ALIASES, shared "
+                    "on purpose: one place declares what counts as an equivalent question.")
+    opensearch_query_plan_cache_max_entries: int = Field(
+        default=500, ge=1, le=10000,
+        description="Capacity of the plan cache. When full the least recently used plan is evicted. "
+                    "Plans are valid while their fingerprints and the guard say so, so there is no TTL.")
 
     prometheus_timeout_seconds: float = Field(default=15.0)
     opensearch_timeout_seconds: float = Field(default=15.0)
