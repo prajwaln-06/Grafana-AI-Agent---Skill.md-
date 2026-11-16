@@ -53,11 +53,18 @@ def reset_registry() -> None:
         _registries.clear()
 
 
+def reset_field_cache() -> None:
+    """Drops cached field-catalog instances so newly added index fields are discovered immediately."""
+    with _lock:
+        _caches.clear()
+
+
 def reload_registry_status(settings) -> dict:
     """Admin reload: drop the cached registry and load it again now, so a broken
     edit is reported to the operator immediately. Never raises. On failure nothing
     is cached and every OpenSearch request keeps failing closed until it is fixed."""
     reset_registry()
+    reset_field_cache()
     reset_result_cache()
     reset_plan_cache()
     try:
