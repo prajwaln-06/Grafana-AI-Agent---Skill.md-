@@ -10,6 +10,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 
+import { getActAsUser, setActAsUser } from "../api";
 import { changePassword, fetchPrincipal } from "../auth";
 import type { Principal } from "../auth";
 import { useAuth } from "./AuthGate";
@@ -61,7 +62,8 @@ export function ProfileMenu() {
   const shown = details ?? principal;
   const initials = initialsOf(shown);
   const email = shown?.email || null;
-  const isAdmin = shown?.role === "admin";
+  const actAs = getActAsUser();
+  const isAdmin = shown?.role === "admin" || Boolean(actAs);
 
   return (
     <>
@@ -117,6 +119,25 @@ export function ProfileMenu() {
               <div className="profile-panel-row">
                 <span className="muted small">Username</span>
                 <span className="small">{shown.username}</span>
+              </div>
+            )}
+
+            {actAs && (
+              <div style={{ marginTop: 10, padding: "8px 10px", background: "rgba(99, 102, 241, 0.1)", borderRadius: "6px", border: "1px solid rgba(99, 102, 241, 0.3)" }}>
+                <span className="small" style={{ color: "var(--accent)", display: "block", marginBottom: 6, fontWeight: 500 }}>
+                  🎭 Testing as {shown?.name || shown?.username}
+                </span>
+                <button
+                  type="button"
+                  className="btn small"
+                  style={{ width: "100%", justifyContent: "center" }}
+                  onClick={() => {
+                    setActAsUser(null);
+                    window.location.reload();
+                  }}
+                >
+                  ✕ Exit Testing Persona
+                </button>
               </div>
             )}
 

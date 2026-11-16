@@ -156,9 +156,17 @@ async def _resolve_principal_from_store(
 ) -> Principal:
     """Core identity verification and database lookup logic."""
     settings = get_settings()
+    act_as = request.headers.get("X-Act-As-User") or request.query_params.get("act_as")
 
     if not settings.authentik_enabled:
         principal = Principal.development_anonymous()
+        setattr(request.state, "caller_is_admin", True)
+        setattr(request.state, "authenticated_admin_user_id", principal.user_id)
+        if act_as:
+            with get_db_session() as db:
+                target_user = UserStore.get_user_by_id(db, act_as)
+                if target_user and (target_user.status == "active" or allow_inactive):
+                    principal = Principal.from_user_model(target_user)
         setattr(request.state, PRINCIPAL_STATE_KEY, principal)
         set_current_principal(principal)
         return principal
@@ -209,6 +217,20 @@ async def _resolve_principal_from_store(
             claims=profile.get("claims"),
         )
 
+        is_real_admin = user is not None and user.status == "active" and (user.role or "").lower() == "admin"
+        setattr(request.state, "caller_is_admin", is_real_admin)
+        setattr(request.state, "authenticated_admin_user_id", user.user_id if user else None)
+
+        # Allow an active Administrator to act-as another user for RBAC verification & scoping
+        if act_as and is_real_admin:
+            target_user = UserStore.get_user_by_id(db, act_as)
+            if target_user and (target_user.status == "active" or allow_inactive):
+                logger.info("Admin %s acting as user %s (%s, role=%s)", principal.user_id, target_user.user_id, target_user.username, target_user.role)
+                principal = Principal.from_user_model(
+                    target_user,
+                    app=getattr(settings, "authentik_app_slug", None),
+                )
+
     setattr(request.state, PRINCIPAL_STATE_KEY, principal)
     set_current_principal(principal)
 
@@ -246,6 +268,9 @@ async def require_admin_principal(
     here with HTTP 403. The check lives on the server, so a direct HTTP call
     cannot reach an administrative endpoint by hiding a button in the UI.
     """
+    if getattr(request.state, "caller_is_admin", False):
+        return principal
+
     if principal is None or (principal.role or "").lower() != "admin":
         logger.warning(
             "Rejected administrative request to %s from user %s (role=%s)",

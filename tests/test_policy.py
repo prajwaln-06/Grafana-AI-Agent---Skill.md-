@@ -399,3 +399,186 @@ class TestAdminScopeManagement:
                 assert set(data["user"]["scopes"]["allowed_folder_uids"]) == {"alerts-folder"}
         finally:
             app.dependency_overrides.pop(require_principal, None)
+
+
+# ============================================================================
+# Scoping Tests: Maintainer / Operator of X has No Access to Y
+# ============================================================================
+
+class TestMaintainerOperatorScopingXY:
+    """Explicitly verify that a Maintainer or Operator of X has NO access to Y."""
+
+    def test_maintainer_of_x_dashboard_access_denied_for_y(self):
+        """Maintainer assigned to Folder X ('fld-x') and Dashboard X ('dash-x')
+        has NO read, propose, update, delete, or execute access to Y ('fld-y', 'dash-y')."""
+        maintainer_x = Principal(
+            user_id="usr_maint_x",
+            issuer="https://authentik.test",
+            subject="sub_maint_x",
+            authenticated=True,
+            status="active",
+            role="maintainer",
+            allowed_folder_uids=frozenset({"fld-x"}),
+            allowed_dashboard_uids=frozenset({"dash-x"}),
+            denied_dashboard_uids=frozenset(),
+            allowed_environments=frozenset({"staging"}),
+            username="maint_x",
+        )
+
+        # 1. READ: Can read X, CANNOT read Y
+        assert authorize_dashboard_read(maintainer_x, dashboard_uid="dash-x", folder_uid="fld-x").allowed is True
+        dec_read_y = authorize_dashboard_read(maintainer_x, dashboard_uid="dash-y", folder_uid="fld-y")
+        assert dec_read_y.allowed is False
+        assert "outside permitted resource scope" in dec_read_y.reason
+
+        # 2. CREATE: Can create in folder X, CANNOT create in folder Y
+        assert authorize_dashboard_propose(maintainer_x, operation="create", folder_uid="fld-x").allowed is True
+        dec_create_y = authorize_dashboard_propose(maintainer_x, operation="create", folder_uid="fld-y")
+        assert dec_create_y.allowed is False
+        assert "Destination folder 'fld-y' is not in allowed folders" in dec_create_y.reason
+
+        # 3. UPDATE: Can update dash-x in fld-x, CANNOT update dash-y in fld-y
+        assert authorize_dashboard_propose(maintainer_x, operation="update", dashboard_uid="dash-x", folder_uid="fld-x").allowed is True
+        dec_update_y = authorize_dashboard_propose(maintainer_x, operation="update", dashboard_uid="dash-y", folder_uid="fld-y")
+        assert dec_update_y.allowed is False
+        assert "Dashboard 'dash-y' is outside permitted scope" in dec_update_y.reason
+
+        # 4. DELETE: Can delete dash-x in fld-x, CANNOT delete dash-y in fld-y
+        assert authorize_dashboard_propose(maintainer_x, operation="delete", dashboard_uid="dash-x", folder_uid="fld-x").allowed is True
+        dec_delete_y = authorize_dashboard_propose(maintainer_x, operation="delete", dashboard_uid="dash-y", folder_uid="fld-y")
+        assert dec_delete_y.allowed is False
+        assert "Dashboard 'dash-y' is outside permitted scope" in dec_delete_y.reason
+
+        # 5. EXECUTE: Can execute dash-x in fld-x, CANNOT execute dash-y in fld-y
+        assert authorize_dashboard_execute(maintainer_x, dashboard_uid="dash-x", folder_uid="fld-x", environment="staging").allowed is True
+        dec_exec_y = authorize_dashboard_execute(maintainer_x, dashboard_uid="dash-y", folder_uid="fld-y", environment="staging")
+        assert dec_exec_y.allowed is False
+        assert "Dashboard 'dash-y' is outside permitted scope" in dec_exec_y.reason
+
+    def test_maintainer_of_x_environment_promql_denied_for_y(self):
+        """Maintainer assigned to environment 'staging' CANNOT query environment 'production'."""
+        maintainer_x = Principal(
+            user_id="usr_maint_x",
+            issuer="https://authentik.test",
+            subject="sub_maint_x",
+            authenticated=True,
+            status="active",
+            role="maintainer",
+            allowed_folder_uids=frozenset({"fld-x"}),
+            allowed_dashboard_uids=frozenset({"dash-x"}),
+            allowed_environments=frozenset({"staging"}),
+            username="maint_x",
+        )
+
+        assert authorize_promql(maintainer_x, is_custom=True, expr="up", environment="staging").allowed is True
+        dec_prom_y = authorize_promql(maintainer_x, is_custom=True, expr="up", environment="production")
+        assert dec_prom_y.allowed is False
+
+    def test_maintainer_of_x_denied_for_all_alert_rules(self):
+        """Maintainer role has no permission to manage alert rules in any folder/env."""
+        maintainer_x = Principal(
+            user_id="usr_maint_x",
+            issuer="https://authentik.test",
+            subject="sub_maint_x",
+            authenticated=True,
+            status="active",
+            role="maintainer",
+            allowed_folder_uids=frozenset({"fld-x"}),
+            allowed_environments=frozenset({"staging"}),
+            username="maint_x",
+        )
+        assert authorize_alert_propose(maintainer_x, environment="staging").allowed is False
+        assert authorize_alert_propose(maintainer_x, environment="production").allowed is False
+
+    def test_operator_of_x_alert_access_denied_for_y(self):
+        """Operator assigned to environment 'staging' CANNOT propose/approve/execute alerts in 'production'."""
+        operator_x = Principal(
+            user_id="usr_op_x",
+            issuer="https://authentik.test",
+            subject="sub_op_x",
+            authenticated=True,
+            status="active",
+            role="operator",
+            allowed_folder_uids=frozenset({"fld-x"}),
+            allowed_environments=frozenset({"staging"}),
+            username="op_x",
+        )
+
+        # Alerts in staging: ALLOWED
+        assert authorize_alert_propose(operator_x, environment="staging").allowed is True
+        assert authorize_alert_approve(operator_x, environment="staging").allowed is True
+        assert authorize_alert_execute(operator_x, environment="staging").allowed is True
+
+        # Alerts in production: DENIED
+        dec_prop_y = authorize_alert_propose(operator_x, environment="production")
+        assert dec_prop_y.allowed is False
+
+        dec_appr_y = authorize_alert_approve(operator_x, environment="production")
+        assert dec_appr_y.allowed is False
+
+        dec_exec_y = authorize_alert_execute(operator_x, environment="production")
+        assert dec_exec_y.allowed is False
+
+    def test_operator_of_x_promql_denied_for_y(self):
+        """Operator assigned to 'staging' CANNOT execute PromQL in 'production'."""
+        operator_x = Principal(
+            user_id="usr_op_x",
+            issuer="https://authentik.test",
+            subject="sub_op_x",
+            authenticated=True,
+            status="active",
+            role="operator",
+            allowed_folder_uids=frozenset({"fld-x"}),
+            allowed_environments=frozenset({"staging"}),
+            username="op_x",
+        )
+
+        assert authorize_promql(operator_x, is_custom=True, expr="up", environment="staging").allowed is True
+        assert authorize_promql(operator_x, is_custom=True, expr="up", environment="production").allowed is False
+
+    def test_operator_of_x_dashboard_mutation_denied_everywhere(self):
+        """Operator role has NO permission to propose or execute dashboard creations or edits anywhere."""
+        operator_x = Principal(
+            user_id="usr_op_x",
+            issuer="https://authentik.test",
+            subject="sub_op_x",
+            authenticated=True,
+            status="active",
+            role="operator",
+            allowed_folder_uids=frozenset({"fld-x"}),
+            allowed_environments=frozenset({"staging"}),
+            username="op_x",
+        )
+
+        # Even in their allowed folder fld-x, Operators cannot create or edit dashboards
+        assert authorize_dashboard_propose(operator_x, operation="create", folder_uid="fld-x").allowed is False
+        assert authorize_dashboard_propose(operator_x, operation="update", dashboard_uid="dash-x", folder_uid="fld-x").allowed is False
+        assert authorize_dashboard_execute(operator_x, dashboard_uid="dash-x", folder_uid="fld-x").allowed is False
+
+        # Reading in fld-x is allowed, but reading in fld-y is DENIED
+        assert authorize_dashboard_read(operator_x, dashboard_uid="dash-x", folder_uid="fld-x").allowed is True
+        assert authorize_dashboard_read(operator_x, dashboard_uid="dash-y", folder_uid="fld-y").allowed is False
+
+    def test_explicit_denied_dashboard_overrides_folder_allowance(self):
+        """Explicitly denied dashboard inside allowed folder X is strictly DENIED."""
+        maintainer = Principal(
+            user_id="usr_maint",
+            issuer="https://authentik.test",
+            subject="sub_maint",
+            authenticated=True,
+            status="active",
+            role="maintainer",
+            allowed_folder_uids=frozenset({"fld-x"}),
+            allowed_dashboard_uids=frozenset(),
+            denied_dashboard_uids=frozenset({"dash-restricted-in-x"}),
+            allowed_environments=frozenset({"staging"}),
+            username="maint",
+        )
+
+        # Other dashboard in fld-x is allowed
+        assert authorize_dashboard_read(maintainer, dashboard_uid="dash-normal", folder_uid="fld-x").allowed is True
+
+        # Restricted dashboard in fld-x is DENIED
+        assert authorize_dashboard_read(maintainer, dashboard_uid="dash-restricted-in-x", folder_uid="fld-x").allowed is False
+        assert authorize_dashboard_propose(maintainer, operation="update", dashboard_uid="dash-restricted-in-x", folder_uid="fld-x").allowed is False
+

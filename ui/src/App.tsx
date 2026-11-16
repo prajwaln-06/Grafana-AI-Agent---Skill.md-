@@ -1,5 +1,5 @@
 import { FormEvent, lazy, Suspense, useEffect, useRef, useState } from "react";
-import { fetchHealth, searchObservability } from "./api";
+import { fetchHealth, getActAsUser, searchObservability, setActAsUser } from "./api";
 import { AuthProvider, RequireAuth, useAuth } from "./components/AuthGate";
 import { ProfileMenu } from "./components/ProfileMenu";
 import type { SearchHit, SearchResponse } from "./types";
@@ -120,7 +120,8 @@ export default function App() {
 }
 
 function AppShell() {
-  const { devMode } = useAuth();
+  const { devMode, principal } = useAuth();
+  const [actAsUser, setLocalActAsUser] = useState<string | null>(() => getActAsUser());
   const [searchMode, setSearchMode] = useState<SearchMode>("ai");
   const [theme, setTheme] = useState<ThemeMode>(() => readStoredTheme());
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
@@ -138,6 +139,14 @@ function AppShell() {
     null
   );
   const [searchNotice, setSearchNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    function onActAsChanged() {
+      setLocalActAsUser(getActAsUser());
+    }
+    window.addEventListener("grafana-ai:act-as-changed", onActAsChanged);
+    return () => window.removeEventListener("grafana-ai:act-as-changed", onActAsChanged);
+  }, []);
 
   useEffect(() => {
     applyTheme(theme);
@@ -457,6 +466,64 @@ function AppShell() {
           <ProfileMenu />
         </div>
       </header>
+
+      {actAsUser && (
+        <div
+          style={{
+            background: "linear-gradient(90deg, #1e1b4b 0%, #312e81 100%)",
+            color: "#e0e7ff",
+            padding: "8px 20px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            fontSize: "13px",
+            borderBottom: "1px solid #4338ca",
+          }}
+          role="status"
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <span style={{ fontSize: "16px" }}>🎭</span>
+            <span>
+              <strong>Active Testing Persona:</strong>{" "}
+              {principal?.name || principal?.username || actAsUser} (
+              <span
+                style={{
+                  background:
+                    principal?.role === "maintainer"
+                      ? "#059669"
+                      : principal?.role === "operator"
+                      ? "#d97706"
+                      : "#6b7280",
+                  color: "#fff",
+                  padding: "1px 6px",
+                  borderRadius: "4px",
+                  fontWeight: 600,
+                  fontSize: "11px",
+                }}
+              >
+                {principal?.role?.toUpperCase() || "NO ROLE"}
+              </span>
+              ) • <strong>Folders:</strong>{" "}
+              <code>{principal?.scopes?.allowedFolderUids?.join(", ") || "—"}</code> •{" "}
+              <strong>Dashboards:</strong>{" "}
+              <code>{principal?.scopes?.allowedDashboardUids?.join(", ") || "—"}</code> •{" "}
+              <strong>Envs:</strong>{" "}
+              <code>{principal?.scopes?.allowedEnvironments?.join(", ") || "—"}</code>
+            </span>
+          </div>
+          <button
+            type="button"
+            className="btn ghost small"
+            style={{ color: "#fff", borderColor: "#6366f1" }}
+            onClick={() => {
+              setActAsUser(null);
+              window.location.reload();
+            }}
+          >
+            ✕ Exit Persona (Back to Admin)
+          </button>
+        </div>
+      )}
 
       {searchNotice && searchMode === "classic" && (
         <div className="search-notice" role="status">

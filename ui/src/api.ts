@@ -14,13 +14,44 @@ import type {
  */
 export const AUTH_EXPIRED_EVENT = "grafana-ai:auth-expired";
 
+const ACT_AS_STORAGE_KEY = "grafana_ai_act_as_user";
+
+export function getActAsUser(): string | null {
+  try {
+    return localStorage.getItem(ACT_AS_STORAGE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setActAsUser(userId: string | null): void {
+  try {
+    if (userId) {
+      localStorage.setItem(ACT_AS_STORAGE_KEY, userId);
+    } else {
+      localStorage.removeItem(ACT_AS_STORAGE_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new CustomEvent("grafana-ai:act-as-changed", { detail: userId }));
+}
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
+  const actAs = getActAsUser();
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (actAs) {
+    headers.set("X-Act-As-User", actAs);
+  }
   try {
     res = await fetch(url, {
-      headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
       credentials: "same-origin",
       ...init,
+      headers,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -121,8 +152,8 @@ export async function adkChat(
     dashboardLink: raw.dashboardLink || null,
     usedLlm: true,
     sessionId: raw.sessionId || sessionId || null,
-    proposalId: raw.proposalId || null,
-    proposal: raw.proposal || null,
+    proposalId: raw.proposalId || undefined,
+    proposal: raw.proposal || undefined,
     alertRule: raw.alertRule || null,
     candidates: raw.candidates || undefined,
   };

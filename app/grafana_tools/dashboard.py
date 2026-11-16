@@ -10,10 +10,20 @@ _dashboard_list_time: float = 0.0
 _dashboard_details: dict[str, dict] = {}
 
 
+def invalidate_dashboard_cache() -> None:
+    """Clear all cached dashboard listings and details."""
+    global _dashboard_list, _dashboard_list_time, _dashboard_details
+    _dashboard_list = None
+    _dashboard_list_time = 0.0
+    _dashboard_details.clear()
+    logger.info("Invalidated in-memory dashboard cache")
+
+
 async def fetch_dashboard_list(*, refresh: bool = False) -> list[dict]:
     """Fetch and cache the list of all dashboards (title, uid, tags)."""
     global _dashboard_list, _dashboard_list_time
-    if _dashboard_list is not None and not refresh:
+    now = time.monotonic()
+    if _dashboard_list is not None and not refresh and (now - _dashboard_list_time < 30.0):
         return _dashboard_list
 
     dash_str = await mcp_call(

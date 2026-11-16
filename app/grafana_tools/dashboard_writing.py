@@ -823,7 +823,7 @@ async def _resolve_dashboard(
             intent_type = Intent.REMOVE if operation == "remove" else Intent.UPDATE
             try:
                 name = _dashboard_identity(request, intent_type)
-                candidates = await _find_dashboards(name) if name else []
+                candidates = await _find_dashboards(name, principal) if name else []
             except ValueError:
                 candidates = []
 

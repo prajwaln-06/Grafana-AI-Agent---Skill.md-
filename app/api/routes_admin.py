@@ -389,11 +389,12 @@ async def update_user_access(
             detail=f"Invalid status. Must be one of: {sorted(valid_statuses)}",
         )
 
+    admin_user_id = getattr(request.state, "authenticated_admin_user_id", None) or principal.user_id
     with get_db_session() as session:
         try:
             target = UserStore.update_user_access(
                 session,
-                admin_user_id=principal.user_id,
+                admin_user_id=admin_user_id,
                 target_user_id=user_id,
                 role=update.role,
                 status=update.status,
@@ -413,6 +414,10 @@ async def update_user_access(
             raise HTTPException(status_code=403, detail=str(exc))
         except KeyError:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found.")
+
+        # Invalidate in-memory dashboard metadata cache so scope updates reflect immediately
+        from app.grafana_tools.dashboard import invalidate_dashboard_cache
+        invalidate_dashboard_cache()
 
         # A scope change can introduce or remove an environment name, so the
         # deployment's environment catalogue has to be refreshed.

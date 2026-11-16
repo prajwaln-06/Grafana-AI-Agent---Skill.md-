@@ -142,9 +142,13 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
 /** The verified identity of the current session, or `null` when there is none. */
 export async function fetchPrincipal(): Promise<Principal | null> {
   let response: Response;
+  const actAs = typeof localStorage !== "undefined" ? localStorage.getItem("grafana_ai_act_as_user") : null;
   try {
     response = await fetch("/api/auth/whoami", {
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        ...(actAs ? { "X-Act-As-User": actAs } : {}),
+      },
       credentials: "same-origin",
     });
   } catch {

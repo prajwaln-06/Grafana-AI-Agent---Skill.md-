@@ -280,6 +280,21 @@ def grafana(monkeypatch) -> FakeGrafana:
 
     monkeypatch.setattr(alerting, "mcp_call", fake.mcp_call)
 
+    import app.mcp.session as mcp_session
+    monkeypatch.setattr(mcp_session, "mcp_call", fake.mcp_call)
+
+    import app.storage.seed_audit as seed_audit
+    monkeypatch.setattr(
+        seed_audit,
+        "fetch_grafana_inventory",
+        AsyncMock(return_value={
+            "available": True,
+            "folders": list(fake.folders.keys()),
+            "dashboards": list(fake.dashboards.keys()),
+            "error": None,
+        }),
+    )
+
     # Prometheus / datasource discovery
     monkeypatch.setattr(
         writing, "resolve_datasource",
@@ -1525,3 +1540,130 @@ class TestEnvironmentResolution:
         assert resolve_environment(ADMIN, ENV_ALLOWED) == ENV_ALLOWED
         assert resolve_environment(ADMIN, ENV_SECOND) == ENV_SECOND
         assert resolve_environment(ADMIN, ENV_FORBIDDEN) == ENV_FORBIDDEN
+
+
+class TestActAsScopeEnforcement:
+    """Verifies that an administrator acting as another user gets immediate, strict scope enforcement."""
+
+    def test_act_as_folder_scope_enforcement(self, grafana, environments):
+        from app.api.main import app
+        from app.storage.database import get_db_session, get_engine
+        from app.storage.models import Base
+        from app.storage.user_store import UserStore
+
+        Base.metadata.create_all(bind=get_engine())
+
+        from app.storage.models import UserModel, UserScopeModel
+        from app.storage.seed import DEFAULT_ISSUER
+
+        # Seed admin and maintainer scoped exclusively to FOLDER_A
+        with get_db_session() as s:
+            admin_user = UserStore.get_user_by_id(s, "usr_admin_01")
+            if not admin_user:
+                admin_user = UserModel(
+                    user_id="usr_admin_01",
+                    issuer=DEFAULT_ISSUER,
+                    subject="ak_sub_admin_system",
+                    username="akadmin",
+                    email="admin@example.com",
+                    status="active",
+                    role="admin",
+                    authz_version=1,
+                )
+                admin_user.scopes = UserScopeModel(
+                    user_id="usr_admin_01",
+                    allowed_folder_uids=["*"],
+                    allowed_dashboard_uids=[],
+                    denied_dashboard_uids=[],
+                    allowed_environments=["staging", "production"],
+                )
+                s.add(admin_user)
+
+            maint = UserStore.get_user_by_id(s, "usr_maint_scoped_test")
+            if not maint:
+                maint = UserModel(
+                    user_id="usr_maint_scoped_test",
+                    issuer="https://authentik.test",
+                    subject="sub_maint_scoped_test",
+                    username="maint.scoped",
+                    status="active",
+                    role="maintainer",
+                    authz_version=1,
+                )
+                maint.scopes = UserScopeModel(
+                    user_id="usr_maint_scoped_test",
+                    allowed_folder_uids=[FOLDER_A],
+                    allowed_dashboard_uids=["dash-alpha"],
+                    denied_dashboard_uids=[],
+                    allowed_environments=[ENV_ALLOWED],
+                )
+                s.add(maint)
+            s.commit()
+
+        client = TestClient(app)
+
+        # Authenticate client as the admin user so X-Act-As-User is authorized
+        from app.auth.dependencies import build_session
+        from app.config import get_settings
+        from app.storage.seed import DEFAULT_ISSUER
+        settings = get_settings()
+        session = build_session(settings)
+        admin_cookie = session.encode({
+            "iss": DEFAULT_ISSUER,
+            "sub": "ak_sub_admin_system",
+            "email": "admin@example.com",
+            "username": "akadmin",
+        })
+        client.cookies.set(session.cookie_name, admin_cookie)
+
+        # 1. Acting as maintainer with FOLDER_A
+        headers = {"X-Act-As-User": "usr_maint_scoped_test"}
+
+        # Whoami returns maintainer role and FOLDER_A
+        res = client.get("/api/auth/whoami", headers=headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["role"] == "maintainer"
+        assert FOLDER_A in data["scopes"]["allowedFolderUids"]
+        assert FOLDER_B not in data["scopes"]["allowedFolderUids"]
+
+        # 2. Panel read for dashboard in FOLDER_A is permitted; FOLDER_B is 403
+        res_a = client.post("/api/chat", json={"message": "show panels for dash-alpha"}, headers=headers)
+        assert res_a.status_code == 200
+
+        res_b = client.post("/api/chat", json={"message": "show panels for dash-beta"}, headers=headers)
+        assert res_b.status_code == 403
+        assert "permitted scope" in res_b.json().get("detail", "").lower()
+
+        # 3. Create dashboard in FOLDER_B is denied with 403
+        res_create_b = client.post(
+            "/api/chat",
+            json={"message": f"create dashboard in folder {FOLDER_B} for node_load1"},
+            headers=headers,
+        )
+        assert res_create_b.status_code == 403
+        assert f"Folder '{FOLDER_B}' is outside your permitted folders" in res_create_b.json().get("detail", "")
+
+        # 4. Now admin updates maintainer scopes: switches from FOLDER_A to FOLDER_B
+        with get_db_session() as s:
+            UserStore.update_user_access(
+                s,
+                admin_user_id="usr_admin_system",
+                target_user_id="usr_maint_scoped_test",
+                scopes={"allowed_folder_uids": [FOLDER_B], "allowed_dashboard_uids": ["dash-beta"]},
+                admin_role="admin",
+            )
+            s.commit()
+
+        # 5. Immediately, without restart, new scopes are strictly enforced:
+        # FOLDER_B is now allowed, FOLDER_A is now denied!
+        res_who = client.get("/api/auth/whoami", headers=headers)
+        assert FOLDER_B in res_who.json()["scopes"]["allowedFolderUids"]
+        assert FOLDER_A not in res_who.json()["scopes"]["allowedFolderUids"]
+
+        res_a_after = client.post("/api/chat", json={"message": "show panels for dash-alpha"}, headers=headers)
+        assert res_a_after.status_code == 403
+
+        res_b_after = client.post("/api/chat", json={"message": "show panels for dash-beta"}, headers=headers)
+        assert res_b_after.status_code == 200
+

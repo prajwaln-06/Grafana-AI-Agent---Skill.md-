@@ -7,6 +7,7 @@
  */
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { getActAsUser, setActAsUser } from "../api";
 
 export type AdminUser = {
   user_id: string;
@@ -45,6 +46,17 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
     { uid: "*", title: "All Folders (*)" },
   ]);
   const [saving, setSaving] = useState(false);
+  const [activeActAs, setActiveActAs] = useState<string | null>(() => getActAsUser());
+
+  function handleToggleActAs(u: AdminUser) {
+    if (activeActAs === u.user_id) {
+      setActAsUser(null);
+      setActiveActAs(null);
+    } else {
+      setActAsUser(u.user_id);
+      setActiveActAs(u.user_id);
+    }
+  }
 
   function loadUsers() {
     setLoading(true);
@@ -112,7 +124,7 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
         ? (foldersList.length ? foldersList : ["*"])
         : editRole === "observer"
         ? []
-        : (foldersList.length ? foldersList : ["*"]);
+        : foldersList;
 
     const allowedDashboards =
       editRole === "observer" ? [] : dashboardsList;
@@ -164,7 +176,7 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
     setEditStatus(u.status === "pending" ? "active" : u.status);
     const initialFolders = u.scopes?.allowed_folder_uids?.length
       ? u.scopes.allowed_folder_uids.join(", ")
-      : (role === "admin" ? "*" : (role === "maintainer" || role === "operator" ? "*" : ""));
+      : (role === "admin" ? "*" : "");
     setEditFolders(initialFolders);
     setEditDashboards(
       u.scopes?.allowed_dashboard_uids?.length
@@ -181,9 +193,6 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
   function handleRoleChange(newRole: string) {
     setEditRole(newRole);
     if (newRole === "maintainer" || newRole === "operator") {
-      if (!editFolders.trim()) {
-        setEditFolders("*");
-      }
       if (!editEnvs.trim()) {
         setEditEnvs("staging, production");
       }
@@ -496,13 +505,34 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
                               </button>
                             </div>
                           ) : (
-                            <button
-                              type="button"
-                              className={u.status === "pending" ? "btn primary small" : "btn ghost small"}
-                              onClick={() => startEdit(u)}
-                            >
-                              {u.status === "pending" ? "⚡ Activate" : "Edit"}
-                            </button>
+                            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                              <button
+                                type="button"
+                                className={u.status === "pending" ? "btn primary small" : "btn ghost small"}
+                                onClick={() => startEdit(u)}
+                              >
+                                {u.status === "pending" ? "⚡ Activate" : "Edit"}
+                              </button>
+                              {u.status === "active" && (
+                                <button
+                                  type="button"
+                                  className={activeActAs === u.user_id ? "btn small" : "btn ghost small"}
+                                  style={
+                                    activeActAs === u.user_id
+                                      ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" }
+                                      : {}
+                                  }
+                                  onClick={() => handleToggleActAs(u)}
+                                  title={
+                                    activeActAs === u.user_id
+                                      ? "Currently testing as this user. Click to revert to Admin."
+                                      : `Test and experience application as ${u.display_name || u.username || u.user_id}`
+                                  }
+                                >
+                                  {activeActAs === u.user_id ? "✓ Active Persona" : "🎭 Act As"}
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
                       </tr>
