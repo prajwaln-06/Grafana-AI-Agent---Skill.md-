@@ -176,6 +176,7 @@ async def list_users(
                         "allowed_dashboard_uids": list(u.scopes.allowed_dashboard_uids) if u.scopes else [],
                         "denied_dashboard_uids": list(u.scopes.denied_dashboard_uids) if u.scopes else [],
                         "allowed_environments": list(u.scopes.allowed_environments) if u.scopes else [],
+                        "role_grants": list(getattr(u.scopes, "role_grants", None) or []) if u.scopes else [],
                     },
                 }
                 for u in users
@@ -439,6 +440,7 @@ async def update_user_access(
                     "allowed_dashboard_uids": list(target.scopes.allowed_dashboard_uids) if target.scopes else [],
                     "denied_dashboard_uids": list(target.scopes.denied_dashboard_uids) if target.scopes else [],
                     "allowed_environments": list(target.scopes.allowed_environments) if target.scopes else [],
+                    "role_grants": list(getattr(target.scopes, "role_grants", None) or []) if target.scopes else [],
                 },
             },
         }

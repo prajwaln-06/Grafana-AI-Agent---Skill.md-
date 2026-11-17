@@ -152,8 +152,19 @@ async def _get_dashboard_panels_async(uid: str) -> str:
 
     result_str = await get_dashboard_summary_mcp(uid)
 
-    if not result_str:
-        return "Error: Dashboard not found or MCP unavailable."
+    if not result_str or "Error" in result_str or "Unauthorized" in result_str:
+        from app.grafana_tools.demo_dashboards import DEMO_DASHBOARDS
+        if uid in DEMO_DASHBOARDS:
+            demo = DEMO_DASHBOARDS[uid]
+            summary = {
+                "title": demo["title"],
+                "panels": demo["panels"],
+                "variables": [{"name": "instance"}],
+                "timeRange": {"from": "now-1h", "to": "now"},
+            }
+            result_str = json.dumps(summary)
+        else:
+            return "Error: Dashboard not found or MCP unavailable."
 
     try:
         summary = json.loads(result_str)

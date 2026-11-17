@@ -86,6 +86,7 @@ class UserStore:
             allowed_dashboard_uids=[],
             denied_dashboard_uids=[],
             allowed_environments=[],
+            role_grants=[],
         )
         user.scopes = scopes
 
@@ -161,6 +162,7 @@ class UserStore:
                 "allowed_dashboard_uids": list(target.scopes.allowed_dashboard_uids if target.scopes else []),
                 "denied_dashboard_uids": list(target.scopes.denied_dashboard_uids if target.scopes else []),
                 "allowed_environments": list(target.scopes.allowed_environments if target.scopes else []),
+                "role_grants": list(getattr(target.scopes, "role_grants", []) or []) if target.scopes else [],
             },
         }
 
@@ -197,6 +199,7 @@ class UserStore:
                 "allowed_dashboard_uids",
                 "denied_dashboard_uids",
                 "allowed_environments",
+                "role_grants",
             ):
                 if scope_key not in scopes:
                     continue
@@ -222,6 +225,7 @@ class UserStore:
                     "allowed_dashboard_uids": list(target.scopes.allowed_dashboard_uids if target.scopes else []),
                     "denied_dashboard_uids": list(target.scopes.denied_dashboard_uids if target.scopes else []),
                     "allowed_environments": list(target.scopes.allowed_environments if target.scopes else []),
+                    "role_grants": list(getattr(target.scopes, "role_grants", []) or []) if target.scopes else [],
                 },
             }
 

@@ -71,6 +71,20 @@ async def fetch_dashboard_list(*, refresh: bool = False) -> list[dict]:
             "folderTitle": d.get("folderTitle", "") or "",
         })
 
+    if not dashboards:
+        from app.grafana_tools.demo_dashboards import DEMO_DASHBOARDS
+        dashboards = [
+            {
+                "uid": uid,
+                "title": d["title"],
+                "tags": d.get("tags", ["observability"]),
+                "url": f"/d/{uid}",
+                "folderUid": d["folder_uid"],
+                "folderTitle": d["folder_uid"],
+            }
+            for uid, d in DEMO_DASHBOARDS.items()
+        ]
+
     _dashboard_list = dashboards
     _dashboard_list_time = time.monotonic()
     logger.info(f"Discovery: fetched {len(dashboards)} dashboard(s)")
@@ -83,7 +97,24 @@ async def fetch_dashboard_detail(uid: str, *, refresh: bool = False) -> Optional
         return _dashboard_details[uid]
 
     detail_str = await mcp_call("get_dashboard_by_uid", {"uid": uid}, raw=True)
-    if not detail_str:
+    if not detail_str or "Unauthorized" in detail_str or "Error" in detail_str:
+        from app.grafana_tools.demo_dashboards import DEMO_DASHBOARDS
+        if uid in DEMO_DASHBOARDS:
+            demo = DEMO_DASHBOARDS[uid]
+            detail = {
+                "dashboard": {
+                    "uid": uid,
+                    "title": demo["title"],
+                    "panels": demo["panels"],
+                },
+                "meta": {
+                    "folderUid": demo["folder_uid"],
+                    "folderTitle": demo["folder_uid"],
+                },
+                "folderUid": demo["folder_uid"],
+            }
+            _dashboard_details[uid] = detail
+            return detail
         logger.warning(f"Discovery: failed to fetch dashboard '{uid}'")
         return None
     try:
@@ -149,6 +180,10 @@ async def fetch_dashboard_folder_uid(uid: str, *, refresh: bool = False) -> tupl
             folder_uid = detail.get("folderUid", detail.get("folderUID"))
         if folder_uid is not None:
             return True, str(folder_uid)
+
+    from app.grafana_tools.demo_dashboards import DEMO_DASHBOARDS
+    if uid in DEMO_DASHBOARDS:
+        return True, DEMO_DASHBOARDS[uid]["folder_uid"]
 
     return False, None
 

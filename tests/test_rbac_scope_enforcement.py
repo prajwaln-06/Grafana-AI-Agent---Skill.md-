@@ -1667,3 +1667,130 @@ class TestActAsScopeEnforcement:
         res_b_after = client.post("/api/chat", json={"message": "show panels for dash-beta"}, headers=headers)
         assert res_b_after.status_code == 200
 
+    def test_act_as_observer_and_multi_role_scope_enforcement(self, grafana, environments):
+        """Verifies multi-role scoping: Maintainer on FOLDER_A + Observer on FOLDER_B.
+        - Can read FOLDER_A and FOLDER_B
+        - Can create in FOLDER_A (Maintainer)
+        - CANNOT create in FOLDER_B (Observer read-only)
+        - Outside FOLDER_A/B is strictly 403."""
+        from app.api.main import app
+        from app.storage.database import get_db_session, get_engine
+        from app.storage.models import Base, UserModel, UserScopeModel
+        from app.storage.seed import DEFAULT_ISSUER
+        from app.storage.user_store import UserStore
+
+        Base.metadata.create_all(bind=get_engine())
+
+        with get_db_session() as s:
+            admin_user = UserStore.get_user_by_id(s, "usr_admin_01")
+            if not admin_user:
+                admin_user = UserModel(
+                    user_id="usr_admin_01",
+                    issuer=DEFAULT_ISSUER,
+                    subject="ak_sub_admin_system",
+                    username="akadmin",
+                    email="admin@example.com",
+                    status="active",
+                    role="admin",
+                    authz_version=1,
+                )
+                admin_user.scopes = UserScopeModel(
+                    user_id="usr_admin_01",
+                    allowed_folder_uids=["*"],
+                    allowed_dashboard_uids=[],
+                    denied_dashboard_uids=[],
+                    allowed_environments=["staging", "production"],
+                )
+                s.add(admin_user)
+            else:
+                admin_user.status = "active"
+                admin_user.role = "admin"
+
+            user = UserStore.get_user_by_id(s, "usr_multi_test")
+            if not user:
+                user = UserModel(
+                    user_id="usr_multi_test",
+                    issuer="https://authentik.test",
+                    subject="sub_multi_test",
+                    username="multi.user",
+                    status="active",
+                    role="maintainer",
+                    authz_version=1,
+                )
+                user.scopes = UserScopeModel(
+                    user_id="usr_multi_test",
+                    allowed_folder_uids=[FOLDER_A, FOLDER_B],
+                    allowed_dashboard_uids=["dash-alpha", "dash-beta"],
+                    denied_dashboard_uids=[],
+                    allowed_environments=[ENV_ALLOWED],
+                    role_grants=[
+                        {
+                            "role": "maintainer",
+                            "allowed_folder_uids": [FOLDER_A],
+                            "allowed_dashboard_uids": ["dash-alpha"],
+                            "allowed_environments": [ENV_ALLOWED],
+                        },
+                        {
+                            "role": "observer",
+                            "allowed_folder_uids": [FOLDER_B],
+                            "allowed_dashboard_uids": ["dash-beta"],
+                            "allowed_environments": [ENV_ALLOWED],
+                        },
+                    ],
+                )
+                s.add(user)
+            s.commit()
+
+        client = TestClient(app)
+        from app.auth.dependencies import build_session
+        from app.config import get_settings
+        settings = get_settings()
+        session = build_session(settings)
+        admin_cookie = session.encode({
+            "iss": DEFAULT_ISSUER,
+            "sub": "ak_sub_admin_system",
+            "email": "admin@example.com",
+            "username": "akadmin",
+        })
+        client.cookies.set(session.cookie_name, admin_cookie)
+
+        headers = {"X-Act-As-User": "usr_multi_test"}
+
+        # 1. Whoami shows role and role grants
+        res_who = client.get("/api/auth/whoami", headers=headers)
+        assert res_who.status_code == 200, res_who.text
+        who = res_who.json()
+        assert who["role"] == "maintainer"
+        assert FOLDER_A in who["scopes"]["allowedFolderUids"]
+        assert FOLDER_B in who["scopes"]["allowedFolderUids"]
+        assert len(who["scopes"]["roleGrants"]) == 2
+
+        # 2. Can inspect panels in FOLDER_A (Maintainer)
+        res_a = client.post("/api/chat", json={"message": "show panels for dash-alpha"}, headers=headers)
+        assert res_a.status_code == 200
+
+        # 3. Can inspect panels in FOLDER_B (Observer)
+        res_b = client.post("/api/chat", json={"message": "show panels for dash-beta"}, headers=headers)
+        assert res_b.status_code == 200
+
+        # 4. Outside FOLDER_A/B is denied (403)
+        res_c = client.post("/api/chat", json={"message": "show panels for dash-gamma"}, headers=headers)
+        assert res_c.status_code == 403
+
+        # 5. Can propose/create in FOLDER_A (Maintainer)
+        res_create_a = client.post(
+            "/api/chat",
+            json={"message": f"create dashboard in folder {FOLDER_A} for node_load1"},
+            headers=headers,
+        )
+        assert res_create_a.status_code == 200
+
+        # 6. CANNOT create in FOLDER_B (Observer read-only!)
+        res_create_b = client.post(
+            "/api/chat",
+            json={"message": f"create dashboard in folder {FOLDER_B} for node_load1"},
+            headers=headers,
+        )
+        assert res_create_b.status_code == 403
+        assert "restricted to Observer" in res_create_b.json().get("detail", "")
+

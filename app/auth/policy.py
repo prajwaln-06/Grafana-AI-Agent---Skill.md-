@@ -49,9 +49,11 @@ def is_dashboard_in_scope(
 
     Precedence:
     1. Explicit Deny: denied_dashboard_uids wins over every allowance.
-    2. Allowed Dashboard: allowed_dashboard_uids grants access to specific dashboard.
-    3. Wildcard Folder: '*' in allowed_folder_uids grants access across all folders.
-    4. Allowed Folder: folder_uid in allowed_folder_uids grants access.
+    2. Role grants: if defined, evaluates whether any grant covers the dashboard.
+    3. Allowed Dashboard: allowed_dashboard_uids grants access to specific dashboard.
+    4. Wildcard Folder: '*' in allowed_folder_uids grants access across all folders.
+    5. Allowed Folder: folder_uid in allowed_folder_uids grants access (unless restricted
+       to specific dashboards).
 
     A missing dashboard UID or folder UID never grants access on its own --
     an unknown scope fails closed.
@@ -59,8 +61,33 @@ def is_dashboard_in_scope(
     if dashboard_uid and dashboard_uid in principal.denied_dashboard_uids:
         return False
 
+    if principal.role_grants:
+        for grant in principal.role_grants:
+            folder_match = (
+                folder_uid is None
+                or "*" in grant.allowed_folder_uids
+                or folder_uid in grant.allowed_folder_uids
+            )
+            if not folder_match:
+                continue
+
+            if dashboard_uid and dashboard_uid in grant.allowed_dashboard_uids:
+                return True
+            if not grant.allowed_dashboard_uids or dashboard_uid is None:
+                if "*" in grant.allowed_folder_uids or (folder_uid is not None and folder_uid in grant.allowed_folder_uids):
+                    return True
+        return False
+
+    # Check folder match if folder_uid is specified and allowed_folder_uids is defined
+    if folder_uid is not None and principal.allowed_folder_uids and "*" not in principal.allowed_folder_uids:
+        if folder_uid not in principal.allowed_folder_uids:
+            return False
+
     if dashboard_uid and dashboard_uid in principal.allowed_dashboard_uids:
         return True
+
+    if dashboard_uid is not None and principal.allowed_dashboard_uids:
+        return False
 
     if "*" in principal.allowed_folder_uids:
         return True
@@ -196,17 +223,27 @@ def authorize_dashboard_propose(
 
     role = (principal.role or "").lower()
 
+    # Resolve effective role when granular role grants exist
+    effective_role = role
+    if operation == "create":
+        if folder_uid:
+            effective_role = principal.get_role_for_folder(folder_uid) or role
+    else:
+        if dashboard_uid or folder_uid:
+            effective_role = principal.get_role_for_dashboard(dashboard_uid, folder_uid) or role
+
     # Observers and Operators are strictly forbidden from creating/modifying dashboards & panels
-    if role == "observer":
+    if effective_role == "observer":
+        folder_msg = f" on folder '{folder_uid}'" if folder_uid else ""
         return PolicyDecision(
             allowed=False,
             reason=(
-                "Policy Denied: Role 'observer' lacks permission 'dashboard:propose'. "
+                f"Policy Denied: Role{folder_msg} is 'observer' which lacks permission 'dashboard:propose'. "
                 "Observers have read-only access and cannot create dashboards or add/modify panels."
             ),
         )
 
-    if role == "operator":
+    if effective_role == "operator":
         return PolicyDecision(
             allowed=False,
             reason=(
@@ -215,14 +252,14 @@ def authorize_dashboard_propose(
             ),
         )
 
-    if role not in ("maintainer", "admin"):
+    if effective_role not in ("maintainer", "admin"):
         return PolicyDecision(
             allowed=False,
-            reason=f"Policy Denied: Role '{principal.role}' cannot create or modify dashboards.",
+            reason=f"Policy Denied: Role '{effective_role}' cannot create or modify dashboards.",
         )
 
     # Scoping check for Maintainers (Admins have global scope unless explicitly denied)
-    if role == "maintainer":
+    if effective_role == "maintainer":
         if operation == "create":
             # The destination folder must be known and authorized.
             if folder_uid is None:
@@ -239,6 +276,11 @@ def authorize_dashboard_propose(
                     allowed=False,
                     reason=f"Policy Denied: Destination folder '{folder_uid}' is not in allowed folders.",
                 )
+            elif principal.role_grants and principal.get_role_for_folder(folder_uid) not in ("maintainer", "admin"):
+                return PolicyDecision(
+                    allowed=False,
+                    reason=f"Policy Denied: Destination folder '{folder_uid}' has 'observer' access only.",
+                )
         else:
             # Updates, deletions and panel changes act on an existing dashboard.
             if dashboard_uid is None:
@@ -254,6 +296,11 @@ def authorize_dashboard_propose(
                 return PolicyDecision(
                     allowed=False,
                     reason=f"Policy Denied: Dashboard '{dashboard_uid}' is outside permitted scope.",
+                )
+            elif principal.role_grants and principal.get_role_for_dashboard(dashboard_uid, folder_uid) not in ("maintainer", "admin"):
+                return PolicyDecision(
+                    allowed=False,
+                    reason=f"Policy Denied: Dashboard '{dashboard_uid}' has 'observer' access only.",
                 )
 
     impact_class = "destructive_delete" if operation in ("remove", "delete") else "routine_edit"
@@ -560,10 +607,20 @@ def authorize_dashboard_execute(
                     allowed=False,
                     reason=f"Policy Denied: Destination folder '{folder_uid}' is not in allowed folders.",
                 )
+            elif principal.role_grants and principal.get_role_for_folder(folder_uid) not in ("maintainer", "admin"):
+                return PolicyDecision(
+                    allowed=False,
+                    reason=f"Policy Denied: Role on destination folder '{folder_uid}' lacks maintainer privileges.",
+                )
         elif not is_dashboard_in_scope(principal, dashboard_uid, folder_uid):
             return PolicyDecision(
                 allowed=False,
                 reason=f"Policy Denied: Dashboard '{dashboard_uid}' is outside permitted scope.",
+            )
+        elif principal.role_grants and principal.get_role_for_dashboard(dashboard_uid, folder_uid) not in ("maintainer", "admin"):
+            return PolicyDecision(
+                allowed=False,
+                reason=f"Policy Denied: Role on dashboard '{dashboard_uid}' lacks maintainer privileges.",
             )
 
     resolved_environment, environment_error = _resolve_environment_for_policy(principal, environment)

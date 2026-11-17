@@ -287,17 +287,28 @@ def resolve_destination_folder(
             raise AuthorizationDenied(
                 f"Folder '{requested}' is outside your permitted folders."
             )
+        fld_role = principal.get_role_for_folder(requested)
+        if fld_role and fld_role == "observer":
+            raise AuthorizationDenied(
+                f"Folder '{requested}' is restricted to Observer (read-only) access. You cannot create dashboards in this folder."
+            )
         return requested
 
     default = str(default_folder_uid or "").strip()
     if default and folder_in_scope(principal, default):
-        return default
+        fld_role = principal.get_role_for_folder(default)
+        if fld_role in ("maintainer", "admin") or not principal.role_grants:
+            return default
 
-    explicit = sorted(
-        str(uid) for uid in principal.allowed_folder_uids if str(uid) and str(uid) != "*"
+    maintainer_folders = sorted(
+        str(uid)
+        for uid in principal.allowed_folder_uids
+        if str(uid)
+        and str(uid) != "*"
+        and (principal.get_role_for_folder(str(uid)) in ("maintainer", "admin") or not principal.role_grants)
     )
-    if len(explicit) == 1:
-        return explicit[0]
+    if len(maintainer_folders) == 1:
+        return maintainer_folders[0]
 
     if is_admin(principal):
         # Administrators keep global access; the deployment default (or the

@@ -37,6 +37,12 @@ export type Principal = {
     allowedDashboardUids: string[];
     deniedDashboardUids: string[];
     allowedEnvironments: string[];
+    roleGrants?: Array<{
+      role: string;
+      allowed_folder_uids?: string[];
+      allowed_dashboard_uids?: string[];
+      allowed_environments?: string[];
+    }>;
   } | null;
 };
 

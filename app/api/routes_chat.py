@@ -425,12 +425,24 @@ async def unified_chat_endpoint(
     # ------------------------------------------------------------------------
     # 3. Intent Classification
     # ------------------------------------------------------------------------
-    is_alert_request = bool(re.search(r"\b(alert|alerts|alerting|alarm|rule|rules|notification|notify)\b", text, re.I))
     _resolved_mutation = resolve_dashboard_intent(request=text).get("intent")
-    is_dashboard_action = (
-        bool(re.search(r"\b(dashboard|dashboards|panel|panels)\b", text, re.I))
+    is_explicit_dashboard = (
+        bool(re.search(r"\b(dashboard|dashboards|panel|panels|board)\b", text, re.I))
         or _resolved_mutation in ("CREATE", "UPDATE", "REMOVE")
-    ) and not is_alert_request
+    )
+
+    is_explicit_alert_rule = bool(re.search(
+        r"\b(alert\s+rule|alerting\s+rule|alarm\s+rule|create\s+alert|set\s+alert|alert\s+when|alert\s+if|trigger\s+alert|notification\s+policy)\b",
+        text,
+        re.I,
+    ))
+
+    is_alert_request = is_explicit_alert_rule or (
+        bool(re.search(r"\b(alert|alerts|alerting|alarm|rule|rules|notification|notify)\b", text, re.I))
+        and not is_explicit_dashboard
+    )
+
+    is_dashboard_action = is_explicit_dashboard and not is_explicit_alert_rule
 
     # A) Alert Rule Creation / Management
     if is_alert_request:

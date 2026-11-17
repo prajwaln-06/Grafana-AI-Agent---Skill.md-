@@ -24,7 +24,7 @@ from app.auth.policy import (
     authorize_dashboard_read,
     authorize_promql,
 )
-from app.auth.principal import Principal
+from app.auth.principal import Principal, RoleGrant
 from app.proposals.store import PROPOSALS
 
 
@@ -581,4 +581,93 @@ class TestMaintainerOperatorScopingXY:
         # Restricted dashboard in fld-x is DENIED
         assert authorize_dashboard_read(maintainer, dashboard_uid="dash-restricted-in-x", folder_uid="fld-x").allowed is False
         assert authorize_dashboard_propose(maintainer, operation="update", dashboard_uid="dash-restricted-in-x", folder_uid="fld-x").allowed is False
+
+    def test_observer_folder_and_dashboard_restrictions(self):
+        """Observer with specific folder and dashboard restrictions is strictly restricted."""
+        observer = Principal(
+            user_id="usr_obs_scoped",
+            issuer="https://authentik.test",
+            subject="sub_obs_scoped",
+            authenticated=True,
+            status="active",
+            role="observer",
+            allowed_folder_uids=frozenset({"fld-payments"}),
+            allowed_dashboard_uids=frozenset({"dash-checkout-slo"}),
+            allowed_environments=frozenset({"staging"}),
+            username="obs_scoped",
+        )
+
+        # Allowed dashboard in allowed folder is readable
+        assert authorize_dashboard_read(observer, dashboard_uid="dash-checkout-slo", folder_uid="fld-payments").allowed is True
+
+        # Other dashboard in same folder is NOT readable (restricted to dash-checkout-slo)
+        dec_other_dash = authorize_dashboard_read(observer, dashboard_uid="dash-other", folder_uid="fld-payments")
+        assert dec_other_dash.allowed is False
+        assert "outside permitted resource scope" in dec_other_dash.reason
+
+        # Different folder is NOT readable
+        dec_other_fld = authorize_dashboard_read(observer, dashboard_uid="dash-checkout-slo", folder_uid="fld-analytics")
+        assert dec_other_fld.allowed is False
+
+        # Observer cannot propose dashboards even in allowed folder
+        dec_propose = authorize_dashboard_propose(observer, operation="create", folder_uid="fld-payments")
+        assert dec_propose.allowed is False
+        assert "observer" in dec_propose.reason.lower()
+
+    def test_maintainer_with_observer_grant_multirole_enforcement(self):
+        """Maintainer of Folder X with an additional Observer grant on Folder Y has:
+        - Full Maintainer permissions in Folder X (read + create)
+        - Strictly Observer (read-only) permissions in Folder Y (can read, CANNOT create)
+        - NO permissions outside X and Y."""
+        grant_maintainer_x = RoleGrant(
+            role="maintainer",
+            allowed_folder_uids=frozenset({"fld-payments"}),
+            allowed_dashboard_uids=frozenset(),
+            allowed_environments=frozenset({"staging"}),
+        )
+        grant_observer_y = RoleGrant(
+            role="observer",
+            allowed_folder_uids=frozenset({"fld-analytics"}),
+            allowed_dashboard_uids=frozenset({"dash-checkout-slo"}),
+            allowed_environments=frozenset({"staging"}),
+        )
+
+        user = Principal(
+            user_id="usr_maint_with_obs",
+            issuer="https://authentik.test",
+            subject="sub_maint_obs",
+            authenticated=True,
+            status="active",
+            role="maintainer",
+            allowed_folder_uids=frozenset({"fld-payments", "fld-analytics"}),
+            allowed_dashboard_uids=frozenset({"dash-checkout-slo"}),
+            allowed_environments=frozenset({"staging"}),
+            role_grants=(grant_maintainer_x, grant_observer_y),
+            username="maint_obs",
+        )
+
+        # 1. Effective roles resolved correctly
+        assert user.get_role_for_folder("fld-payments") == "maintainer"
+        assert user.get_role_for_folder("fld-analytics") == "observer"
+        assert user.get_role_for_folder("fld-unrelated") is None
+
+        # 2. In fld-payments (Maintainer):
+        # Can read any dashboard
+        assert authorize_dashboard_read(user, dashboard_uid="dash-pay-1", folder_uid="fld-payments").allowed is True
+        # Can create dashboard
+        assert authorize_dashboard_propose(user, operation="create", folder_uid="fld-payments").allowed is True
+
+        # 3. In fld-analytics (Observer):
+        # Can read the granted dashboard
+        assert authorize_dashboard_read(user, dashboard_uid="dash-checkout-slo", folder_uid="fld-analytics").allowed is True
+        # Cannot read other ungranted dashboard in fld-analytics
+        assert authorize_dashboard_read(user, dashboard_uid="dash-secret-metrics", folder_uid="fld-analytics").allowed is False
+        # Strictly CANNOT create dashboard in fld-analytics (Observer access only!)
+        dec_create_in_obs = authorize_dashboard_propose(user, operation="create", folder_uid="fld-analytics")
+        assert dec_create_in_obs.allowed is False
+        assert "observer" in dec_create_in_obs.reason.lower()
+
+        # 4. In fld-unrelated:
+        assert authorize_dashboard_read(user, dashboard_uid="dash-foreign", folder_uid="fld-unrelated").allowed is False
+        assert authorize_dashboard_propose(user, operation="create", folder_uid="fld-unrelated").allowed is False
 

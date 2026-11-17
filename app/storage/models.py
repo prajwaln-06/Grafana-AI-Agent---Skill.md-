@@ -74,6 +74,7 @@ class UserScopeModel(Base):
     allowed_dashboard_uids = Column(JSON, nullable=False, default=list)
     denied_dashboard_uids = Column(JSON, nullable=False, default=list)
     allowed_environments = Column(JSON, nullable=False, default=list)
+    role_grants = Column(JSON, nullable=False, default=list)
 
     user = relationship("UserModel", back_populates="scopes")
 

@@ -509,6 +509,18 @@ function AppShell() {
               <code>{principal?.scopes?.allowedDashboardUids?.join(", ") || "—"}</code> •{" "}
               <strong>Envs:</strong>{" "}
               <code>{principal?.scopes?.allowedEnvironments?.join(", ") || "—"}</code>
+              {principal?.scopes?.roleGrants && principal.scopes.roleGrants.length > 1 && (
+                <>
+                  {" "}• <strong>Role Scopes:</strong>{" "}
+                  {principal.scopes.roleGrants.map((g, idx) => (
+                    <span key={idx} style={{ marginLeft: "4px" }}>
+                      <span className={`admin-badge role-${g.role}`} style={{ fontSize: "10px", padding: "1px 5px" }}>
+                        {g.role.toUpperCase()}: {(g.allowed_folder_uids || []).join(", ") || "—"}
+                      </span>
+                    </span>
+                  ))}
+                </>
+              )}
             </span>
           </div>
           <button

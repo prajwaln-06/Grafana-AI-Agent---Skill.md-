@@ -51,6 +51,24 @@ def principal_scope(principal: Principal | None) -> Iterator[Principal | None]:
 
 
 @dataclass(frozen=True)
+class RoleGrant:
+    """A scoped role assignment tying a role to specific folders and dashboards."""
+
+    role: str
+    allowed_folder_uids: frozenset[str] = field(default_factory=frozenset)
+    allowed_dashboard_uids: frozenset[str] = field(default_factory=frozenset)
+    allowed_environments: frozenset[str] = field(default_factory=frozenset)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "allowed_folder_uids": sorted(list(self.allowed_folder_uids)),
+            "allowed_dashboard_uids": sorted(list(self.allowed_dashboard_uids)),
+            "allowed_environments": sorted(list(self.allowed_environments)),
+        }
+
+
+@dataclass(frozen=True)
 class Principal:
     """A verified identity resolved against the application User and Role Store."""
 
@@ -67,6 +85,7 @@ class Principal:
     allowed_dashboard_uids: frozenset[str] = field(default_factory=frozenset)
     denied_dashboard_uids: frozenset[str] = field(default_factory=frozenset)
     allowed_environments: frozenset[str] = field(default_factory=frozenset)
+    role_grants: tuple[RoleGrant, ...] = field(default_factory=tuple)
 
     username: str | None = None
     email: str | None = None
@@ -94,6 +113,70 @@ class Principal:
     @property
     def display_name(self) -> str | None:
         return self.name
+
+    def get_role_for_folder(self, folder_uid: str | None) -> str | None:
+        """Return the effective role for a specific folder UID."""
+        base_role = (self.role or "").lower()
+        if base_role == "admin":
+            return "admin"
+
+        if not self.role_grants:
+            if "*" in self.allowed_folder_uids or (folder_uid is not None and folder_uid in self.allowed_folder_uids):
+                return base_role
+            return None
+
+        role_prio = {"admin": 4, "maintainer": 3, "operator": 2, "observer": 1}
+        matched_roles = []
+        for grant in self.role_grants:
+            g_role = (grant.role or "").lower()
+            if "*" in grant.allowed_folder_uids or (folder_uid is not None and folder_uid in grant.allowed_folder_uids):
+                matched_roles.append(g_role)
+
+        if matched_roles:
+            matched_roles.sort(key=lambda r: role_prio.get(r, 0), reverse=True)
+            return matched_roles[0]
+
+        # If no role_grant specifically matched this folder, but the folder is in allowed_folder_uids
+        if "*" in self.allowed_folder_uids or (folder_uid is not None and folder_uid in self.allowed_folder_uids):
+            return base_role
+
+        return None
+
+    def get_role_for_dashboard(self, dashboard_uid: str | None, folder_uid: str | None = None) -> str | None:
+        """Return the effective role for a dashboard."""
+        base_role = (self.role or "").lower()
+        if base_role == "admin":
+            return "admin"
+
+        if not self.role_grants:
+            from app.auth.policy import is_dashboard_in_scope
+            if is_dashboard_in_scope(self, dashboard_uid, folder_uid):
+                return base_role
+            return None
+
+        role_prio = {"admin": 4, "maintainer": 3, "operator": 2, "observer": 1}
+        matched_roles = []
+        for grant in self.role_grants:
+            g_role = (grant.role or "").lower()
+            folder_match = (
+                folder_uid is None
+                or "*" in grant.allowed_folder_uids
+                or folder_uid in grant.allowed_folder_uids
+            )
+            if not folder_match:
+                continue
+
+            if dashboard_uid and dashboard_uid in grant.allowed_dashboard_uids:
+                matched_roles.append(g_role)
+            elif not grant.allowed_dashboard_uids:
+                if "*" in grant.allowed_folder_uids or (folder_uid is not None and folder_uid in grant.allowed_folder_uids):
+                    matched_roles.append(g_role)
+
+        if matched_roles:
+            matched_roles.sort(key=lambda r: role_prio.get(r, 0), reverse=True)
+            return matched_roles[0]
+
+        return None
 
     @classmethod
     def development_anonymous(cls) -> "Principal":
@@ -170,6 +253,19 @@ class Principal:
     ) -> "Principal":
         """Construct a Principal directly from a verified database UserModel record."""
         scopes = getattr(user, "scopes", None)
+        raw_grants = getattr(scopes, "role_grants", []) or []
+        grants: list[RoleGrant] = []
+        for rg in raw_grants:
+            if isinstance(rg, dict):
+                grants.append(
+                    RoleGrant(
+                        role=str(rg.get("role", "")).lower(),
+                        allowed_folder_uids=frozenset(rg.get("allowed_folder_uids") or rg.get("folders") or []),
+                        allowed_dashboard_uids=frozenset(rg.get("allowed_dashboard_uids") or rg.get("dashboards") or []),
+                        allowed_environments=frozenset(rg.get("allowed_environments") or rg.get("environments") or []),
+                    )
+                )
+
         return cls(
             user_id=str(getattr(user, "user_id", "")),
             issuer=str(getattr(user, "issuer", "")),
@@ -182,6 +278,7 @@ class Principal:
             allowed_dashboard_uids=frozenset(getattr(scopes, "allowed_dashboard_uids", []) or []),
             denied_dashboard_uids=frozenset(getattr(scopes, "denied_dashboard_uids", []) or []),
             allowed_environments=frozenset(getattr(scopes, "allowed_environments", []) or []),
+            role_grants=tuple(grants),
             email=getattr(user, "email", None),
             username=getattr(user, "username", None),
             name=getattr(user, "display_name", None),
@@ -208,6 +305,7 @@ class Principal:
                 "allowedDashboardUids": sorted(list(self.allowed_dashboard_uids)),
                 "deniedDashboardUids": sorted(list(self.denied_dashboard_uids)),
                 "allowedEnvironments": sorted(list(self.allowed_environments)),
+                "roleGrants": [g.to_dict() for g in self.role_grants],
             },
             "username": self.username,
             "email": self.email,

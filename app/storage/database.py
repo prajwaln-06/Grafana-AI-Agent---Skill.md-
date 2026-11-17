@@ -113,6 +113,20 @@ def init_db(auto_seed: bool = True) -> None:
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables verified.")
 
+    # Lightweight migration: ensure role_grants column exists on user_scopes
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("SELECT role_grants FROM user_scopes LIMIT 1"))
+    except Exception:
+        try:
+            from sqlalchemy import text
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE user_scopes ADD COLUMN role_grants JSON DEFAULT '[]'"))
+            logger.info("Added role_grants column to user_scopes table.")
+        except Exception as exc:
+            logger.warning("Could not add role_grants column: %s", exc)
+
     if auto_seed:
         from app.storage.seed import seed_dummy_data_if_empty
         seed_dummy_data_if_empty()
