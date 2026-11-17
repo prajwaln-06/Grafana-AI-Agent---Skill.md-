@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 import time
+import uuid
 
 from app import telemetry
 
@@ -105,6 +106,15 @@ _PUBLIC_PATHS = {"/readyz", "/health", "/metrics"}
 _startup_settings = get_settings()
 if not _startup_settings.api_key:
     logger.warning("API_KEY is not set: every endpoint is unauthenticated. Set API_KEY before exposing this service.")
+
+
+@app.middleware("http")
+async def _trace_request_id(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or f"req-{uuid.uuid4().hex[:12]}"
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 @app.middleware("http")

@@ -23,6 +23,16 @@ def test_readyz_reports_loaded_skill():
     assert r.json()["skill_name"] == "observability-query-builder"
 
 
+def test_request_id_middleware_attaches_and_echoes_header():
+    with _client() as client:
+        r = client.get("/readyz")
+        assert "x-request-id" in r.headers
+        assert r.headers["x-request-id"].startswith("req-")
+
+        r2 = client.get("/readyz", headers={"X-Request-ID": "trace-uuid-12345"})
+        assert r2.headers.get("x-request-id") == "trace-uuid-12345"
+
+
 def test_capabilities_exposes_routing_table():
     with _client() as client:
         r = client.get("/api/v1/capabilities")

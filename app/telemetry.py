@@ -33,6 +33,7 @@ adk_alert_proposals_total: Any = None
 adk_in_flight_requests: Any = None
 adk_active_sessions_gauge: Any = None
 process_resident_memory_bytes: Any = None
+adk_build_info: Any = None
 
 try:
     from prometheus_client import (
@@ -140,6 +141,15 @@ if PROMETHEUS_AVAILABLE:
 
     for _a in ("proposed", "confirmed", "discarded"):
         adk_alert_proposals_total.labels(action=_a)
+
+    adk_build_info = Gauge(
+        "adk_build_info",
+        "Application build and runtime metadata.",
+        labelnames=("version", "skill_name", "python_runtime"),
+    )
+    import sys
+    _py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    adk_build_info.labels(version="1.4", skill_name="observability-query-builder", python_runtime=_py_ver).set(1.0)
 
 
 # -----------------------------------------------------------------------------

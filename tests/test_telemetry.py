@@ -25,9 +25,18 @@ def test_telemetry_metrics_defined():
         "adk_alert_proposals_total",
         "adk_in_flight_requests",
         "adk_active_sessions_gauge",
+        "adk_build_info",
     ]
     for name in required_metric_names:
         assert hasattr(telemetry, name), f"Missing metric {name} in telemetry module"
+
+
+def test_build_info_metric_present_in_metrics_endpoint():
+    if not telemetry.PROMETHEUS_AVAILABLE:
+        pytest.skip("prometheus_client not available")
+    metrics_text = telemetry.generate_metrics_bytes().decode("utf-8")
+    assert "adk_build_info" in metrics_text
+    assert 'version="1.4"' in metrics_text
 
 
 def test_track_in_flight_lifecycle():

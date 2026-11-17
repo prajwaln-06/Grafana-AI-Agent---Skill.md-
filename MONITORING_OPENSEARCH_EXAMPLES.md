@@ -61,18 +61,44 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/query" `
 
 ---
 
-### Test 3B: Prohibited Text Grouping Guardrail (`never_group`)
-* **Goal:** Prove the **DSL Guard** blocks unsafe high-cardinality text grouping before querying OpenSearch.
+### Test 3B: Prohibited Text Grouping Guardrail & Multi-Turn Clarification
+* **Goal:** Prove the **DSL Guard** blocks unsafe high-cardinality text grouping (`never_group`), requests user clarification, and successfully resolves the query upon clarification.
+
+#### Step 1: Send Prohibited Text Grouping Query (Creates Active Clarification Session)
+```powershell
+$resp = Invoke-RestMethod -Uri "http://localhost:8000/api/v1/query" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"question": "In controller logs, group all entries by Body"}'
+
+# Store the active session ID
+$sessionId = $resp.session_id
+Write-Host "Active Clarification Session ID: $sessionId"
+```
+* **Why This Triggers:** In [`index_registry.json`](file:///e:/Grafana-AI/app/opensearch_catalog/index_registry.json#L178), `controllerlog-*` enforces `"never_group": ["Body"]` to protect the cluster from memory exhaustion.
+* **Execution Result:**
+  * Returns `status: "declined"` with `reason: "parameter_requires_clarification"`.
+  * Returns a valid `session_id` (e.g. `s-ef90fac5-...`).
+  * Suggests grouping by a structured field such as `Resource.service.name`.
+* **Dashboard Deflection:**
+  * **`Active In-Memory Chat Sessions`:** Increments from `0` to `1` (retains conversation context in RAM awaiting clarification).
+  * **`OpenSearch Cluster`:** Zero malformed aggregation queries reach port `9600`.
+
+#### Step 2: Submit Clarification (Executes Query & Frees Session Memory)
 ```powershell
 Invoke-RestMethod -Uri "http://localhost:8000/api/v1/query" `
   -Method Post `
   -ContentType "application/json" `
-  -Body '{"question": "In controller logs, group all entries by Body"}'
+  -Body (@{
+      question = "Show error count grouped by Resource.service.name over the last 1 hour";
+      session_id = $sessionId
+  } | ConvertTo-Json)
 ```
-* **Why This Triggers:** In [`index_registry.json`](file:///e:/Grafana-AI/app/opensearch_catalog/index_registry.json#L178), `controllerlog-*` enforces `"never_group": ["Body"]` to protect the cluster from out-of-memory errors.
-* **Execution Result:** Returns `status: "declined"` with clarification:
-  *"Free-text message fields (Body) cannot be aggregated or grouped in OpenSearch."*
-* **Dashboard Deflection:** Protects OpenSearch from cluster memory exhaustion; no malformed aggregation reaches port `9600`.
+* **Execution Result:**
+  * OpenSearch returns grouped service buckets (e.g. `hmpad`, `kernel`, `hmscd`).
+  * Returns `session_id: null`.
+* **Dashboard Deflection:**
+  * **`Active In-Memory Chat Sessions`:** Context is cleared from RAM and drops back to `0`.
 
 ---
 

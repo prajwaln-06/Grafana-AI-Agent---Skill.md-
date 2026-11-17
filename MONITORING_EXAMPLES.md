@@ -231,3 +231,29 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/query" `
 * **Expected Dashboard Impact:**
   * **In-Flight Concurrent Queries (Queue):** Records instantaneous request processing concurrency.
   * **Backend Container RSS Memory:** Plots physical RAM bytes used by the Python process (typically **~59 MB**, SLA: `< 1.5 GB`).
+
+---
+
+## 🔀 Multi-Mode Query Execution (Concurrent Multi-Metric Intent)
+
+Multi-mode execution (`"mode": "multi"`) is triggered when a single user question requests **two or more distinct measurements across different metric references**. The router partitions the intent, validates each sub-contract independently, executes them concurrently against the database, and returns an aggregated result in a single payload.
+
+### Test 5: Concurrent Multi-Metric State
+* **Goal:** Execute a multi-metric prompt and verify that the backend partitions the query, validates both contracts, and returns an aggregated `"mode": "multi"` response.
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8000/api/v1/query" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"question": "What is the 5-minute CPU load and the available memory on node-00 right now?"}'
+```
+
+* **Execution Result:**
+  * Returns `"mode": "multi"` with an array of executed results under `results`:
+    1. **Sub-contract 1:** `node_load5{node_id="node-00"}` from [`references/node-exporter/cpu.md`](file:///e:/Grafana-AI/skills/references/node-exporter/cpu.md) (`execution_status: "success"`).
+    2. **Sub-contract 2:** `node_memory_MemAvailable_bytes{node_id="node-00"}` from [`references/node-exporter/memory.md`](file:///e:/Grafana-AI/skills/references/node-exporter/memory.md) (`execution_status: "success"`).
+  * Returns `session_id: null` (stateless completion).
+
+* **Expected Dashboard Impact:**
+  * **User Request Throughput (QPS):** Registers request completion.
+  * **P90 Step Duration Breakdown:** Reflects concurrent metric fetching in the pipeline.
+  * **Active In-Memory Chat Sessions:** Stays at `0` (memory freed immediately upon response delivery).
