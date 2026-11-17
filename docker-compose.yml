@@ -45,5 +45,6 @@ services:
     image: prom/prometheus:latest
     volumes:
       - ./prometheus.docker.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
     ports: ["9090:9090"]
     depends_on: [node-00, node-01, node-02, node-03]

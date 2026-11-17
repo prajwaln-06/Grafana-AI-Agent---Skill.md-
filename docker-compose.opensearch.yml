@@ -16,7 +16,7 @@ services:
       CHAOS_MEAN_INTERVAL_S: "${CHAOS_MEAN_INTERVAL_S:-600}"   # about one event per 10 min
       LOG_INTERVAL_S: "${LOG_INTERVAL_S:-30}"                  # how often an active event logs again
       SIM_API_KEY: "${SIM_API_KEY:-}"                          # set it -> POST/DELETE need X-API-Key
-    ports: ["8000:8000"]                                       # Swagger UI at http://localhost:8000/docs
+    ports: ["9500:8000"]                                       # Swagger UI at http://localhost:8000/docs
 
   # ---- existing exporters: just point them at the controller -------------------
   node-00:
@@ -38,7 +38,7 @@ services:
       OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
     ulimits:
       nofile: {soft: 65536, hard: 65536}
-    ports: ["9250:9200"]        # 9250 on the host: 9200-9203 are taken by your node exporters
+    ports: ["9600:9200"]        # 9250 on the host: 9200-9203 are taken by your node exporters
     volumes: ["opensearch-data:/usr/share/opensearch/data"]
 
   opensearch-dashboards:
