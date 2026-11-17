@@ -235,7 +235,12 @@ def _update_active_sessions_gauge() -> None:
         svc = getattr(adk_web_server, "session_service", None)
         sessions_dict = getattr(svc, "_sessions", getattr(svc, "sessions", None))
         if isinstance(sessions_dict, dict):
-            telemetry.set_active_sessions_count(len(sessions_dict))
+            # Only count sessions that currently have an active, pending alert proposal awaiting user action
+            active_count = sum(
+                1 for s in sessions_dict.values()
+                if getattr(s, "state", None) and s.state.get("pending_alert_proposal")
+            )
+            telemetry.set_active_sessions_count(active_count)
             return
     except Exception:
         pass

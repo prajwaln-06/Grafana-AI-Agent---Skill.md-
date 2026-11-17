@@ -127,6 +127,20 @@ if PROMETHEUS_AVAILABLE:
         "Resident memory size in bytes (physical RAM currently used by the Python process).",
     )
 
+    # Initialize known counter labels to 0.0 on startup so Prometheus establishes
+    # baseline samples and calculates rate() / increase() immediately on the first event.
+    for _s in ("success", "client_error", "server_error"):
+        adk_requests_total.labels(status=_s)
+
+    for _t in ("prompt", "completion", "total"):
+        adk_llm_tokens_total.labels(type=_t)
+
+    for _r in ("valid", "invalid"):
+        adk_query_validation_total.labels(result=_r)
+
+    for _a in ("proposed", "confirmed", "discarded"):
+        adk_alert_proposals_total.labels(action=_a)
+
 
 # -----------------------------------------------------------------------------
 # Telemetry Helpers
