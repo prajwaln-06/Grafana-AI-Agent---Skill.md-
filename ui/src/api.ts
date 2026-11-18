@@ -271,7 +271,7 @@ export function executeProposal(proposalId: string, version: number, approvalTok
 }
 
 export function previewProposal(proposalId: string, ir: any, panelIds?: string[]) {
-  return json<{ status: string; ir: any }>(
+  return json<{ status: string; ir?: any; panels?: any[] }>(
     `/api/proposals/${proposalId}/preview`,
     {
       method: "POST",

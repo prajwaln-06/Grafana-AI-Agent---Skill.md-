@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DashboardProposal, PanelIR } from "../types";
 import { useAuth } from "./AuthGate";
 import {
@@ -28,11 +28,14 @@ const VIZ_OPTIONS = [
 const TIME_RANGES = ["15m", "1h", "6h", "12h", "24h", "7d"];
 
 export default function ProposalCard({ proposal: initialProposal }: Props) {
+  let currentRole = "admin";
   let isObserver = false;
   try {
     const auth = useAuth();
-    isObserver = auth.principal?.role === "observer";
+    currentRole = (auth.principal?.role || "admin").toLowerCase();
+    isObserver = currentRole === "observer";
   } catch {
+    currentRole = "admin";
     isObserver = false;
   }
 
@@ -46,6 +49,13 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [dashboardUrl, setDashboardUrl] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    setProposal(initialProposal);
+    setIr(initialProposal.ir || { name: "Observability Dashboard", panels: [] });
+    setError(null);
+    setSuccessMessage(null);
+  }, [initialProposal]);
 
   const panels: PanelIR[] = ir.panels || [];
   const availableTargets: string[] = ir.availableTargets || [];
@@ -148,8 +158,9 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
       if (res?.ir) {
         setIr(res.ir);
       } else if (res?.panels) {
+        const panelsList = res.panels;
         const mergedPanels = (currentIr.panels || []).map((panel: PanelIR) => {
-          const fresh = res.panels.find(
+          const fresh = panelsList.find(
             (item: any) => String(item.id) === String(panel.id)
           );
           return fresh || panel;
@@ -225,7 +236,13 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
         status: "rejected",
       }));
     } catch (err: any) {
-      setError(err?.message || "Failed to reject proposal");
+      // If the backend prevents proposers from rejecting on server (separation of duties rule),
+      // allow the user to dismiss the card locally
+      if (err?.message?.includes("proposer cannot reject") || err?.status === 403) {
+        setDismissed(true);
+      } else {
+        setError(err?.message || "Failed to reject proposal");
+      }
     } finally {
       setLoading(false);
     }
@@ -268,9 +285,15 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
           : null;
         setDashboardUrl(fullUrl);
         if (isDeleteDashboard) {
-          setSuccessMessage(
-            `Dashboard "${ir.name}" successfully deleted from Grafana!`
-          );
+          if (isFolder) {
+            setSuccessMessage(
+              `Folder "${ir.name || ir.folderUid}" successfully deleted from Grafana!`
+            );
+          } else {
+            setSuccessMessage(
+              `Dashboard "${ir.name}" successfully deleted from Grafana!`
+            );
+          }
         } else {
           setSuccessMessage(
             `Dashboard "${ir.name}" successfully created in Grafana!`
@@ -286,8 +309,26 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
     }
   };
 
+  const proposerRole = ((proposal as any)?.proposer_role || "").toLowerCase();
+  const isMaintainer = currentRole === "maintainer" || proposerRole === "maintainer";
+  const requiresAdminEscalation =
+    Boolean((proposal as any)?.requires_second_approver) ||
+    (proposal as any)?.impact_class === "destructive_delete" ||
+    isMaintainer;
+
   const isDeleteDashboard = Boolean(
-    ir?.removeDashboard || (ir?.operation === "remove" && ir?.removeDashboard)
+    ir?.removeDashboard ||
+    (ir?.operation === "remove" && ir?.removeDashboard) ||
+    ir?.removeFolder ||
+    ir?.operation === "delete" ||
+    proposal.operation === "delete" ||
+    (proposal as any)?.impact_class === "destructive_delete" ||
+    (proposal as any)?.requires_second_approver
+  );
+  const isFolder = Boolean(
+    ir?.removeFolder ||
+    ir?.resourceType === "folder" ||
+    (proposal as any)?.target_resource?.resourceType === "folder"
   );
 
   if (proposal.status === "rejected") {
@@ -301,7 +342,7 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
           <span className="proposal-rejected-icon">✕</span>
           <span className="proposal-rejected-text">
             {isDeleteDashboard ? "Deletion request for" : "Suggestion for"}{" "}
-            <strong>{ir.name || "Dashboard"}</strong> rejected
+            <strong>{ir.name || (isFolder ? `Folder ${ir.folderUid}` : "Dashboard")}</strong> rejected
           </span>
           <span className="badge" style={{ marginLeft: "auto", fontSize: "11px" }}>
             {isDeleteDashboard ? "Cancelled" : "Rejected"}
@@ -320,6 +361,7 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
   }
 
   if (isDeleteDashboard) {
+    if (dismissed) return null;
 
     return (
       <section
@@ -329,13 +371,17 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
         {/* Delete Header */}
         <div className="proposal-delete-header">
           <div className="proposal-delete-badge-row">
-            <span className="badge badge-red">Delete Dashboard</span>
+            <span className="badge badge-red">{isFolder ? "Delete Folder" : "Delete Dashboard"}</span>
             <span
               className={`badge ${
                 proposal.status === "executed"
                   ? "badge-green"
                   : proposal.status === "rejected"
                   ? ""
+                  : proposal.status === "approved"
+                  ? "badge-green"
+                  : requiresAdminEscalation
+                  ? "badge-amber"
                   : "badge-amber"
               }`}
               style={{ marginLeft: "auto" }}
@@ -343,17 +389,24 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
               {proposal.status === "executed"
                 ? "Deleted"
                 : proposal.status === "rejected"
-                ? "Cancelled"
+                ? "Cancelled / Rejected"
                 : proposal.status === "approved"
                 ? "Approved"
+                : requiresAdminEscalation
+                ? "Escalated to Administrator"
                 : "Pending Confirmation"} · v{proposal.version}
             </span>
           </div>
 
-          <h3 className="proposal-delete-title">{ir.name}</h3>
+          <h3 className="proposal-delete-title">{ir.name || (isFolder ? `Folder ${ir.folderUid}` : "Dashboard")}</h3>
           {ir.dashboardUid && (
             <p className="proposal-delete-uid">
               Dashboard UID: <code>{ir.dashboardUid}</code>
+            </p>
+          )}
+          {ir.folderUid && (
+            <p className="proposal-delete-uid">
+              Folder UID: <code>{ir.folderUid}</code>
             </p>
           )}
         </div>
@@ -365,10 +418,18 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
             <div>
               <strong>Permanent Action</strong>
               <p>
-                This will permanently delete the dashboard <strong>{ir.name}</strong>
-                {panels.length > 0 ? ` and its ${panels.length} panel${panels.length > 1 ? "s" : ""}` : ""} from your Grafana instance. This cannot be undone.
+                {isFolder ? (
+                  <>
+                    This will permanently delete the folder <strong>{ir.name || ir.folderUid}</strong> and all dashboards inside it from your Grafana instance. This cannot be undone.
+                  </>
+                ) : (
+                  <>
+                    This will permanently delete the dashboard <strong>{ir.name}</strong>
+                    {panels.length > 0 ? ` and its ${panels.length} panel${panels.length > 1 ? "s" : ""}` : ""} from your Grafana instance. This cannot be undone.
+                  </>
+                )}
               </p>
-              {panels.length > 0 && (
+              {!isFolder && panels.length > 0 && (
                 <div className="proposal-delete-panels-list">
                   <span className="proposal-delete-panels-label">Panels to be removed:</span>
                   <div className="proposal-delete-pills">
@@ -396,7 +457,7 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
         )}
         {proposal.status === "rejected" && (
           <div className="alert muted" style={{ background: "rgba(255,255,255,0.04)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
-            Deletion request cancelled.
+            Deletion request cancelled or rejected.
           </div>
         )}
 
@@ -404,30 +465,39 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
         <div className="proposal-actions">
           {proposal.status === "proposed" && (
             <>
-              <button
-                type="button"
-                className="btn danger"
-                disabled={loading || isObserver}
-                title={isObserver ? "Observers cannot approve deletions" : undefined}
-                onClick={handleApprove}
-                style={{
-                  background: "rgba(239, 68, 68, 0.15)",
-                  color: "#ef4444",
-                  borderColor: "rgba(239, 68, 68, 0.4)",
-                  fontWeight: 600,
-                  opacity: isObserver ? 0.45 : 1,
-                }}
-              >
-                {loading ? "Approving…" : "Approve Deletion"}
-              </button>
+              {requiresAdminEscalation && (
+                <div style={{ width: "100%", padding: "10px 14px", background: "rgba(245, 158, 11, 0.12)", border: "1px solid rgba(245, 158, 11, 0.4)", borderRadius: "6px", color: "#f59e0b", fontSize: "12px", marginBottom: "8px" }}>
+                  ⏳ <strong>Escalated to Administrator:</strong> Destructive deletions require administrative review and cannot be approved directly in chat. This request is queued under <strong>Admin Console → Pending Deletions</strong>.
+                </div>
+              )}
+
+              {/* If viewer is an administrator, offer direct link to Pending Deletions tab in Admin Console */}
+              {currentRole === "admin" && (
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={() => {
+                    window.dispatchEvent(new CustomEvent("grafana-ai:open-admin-pending-deletions"));
+                  }}
+                  style={{
+                    background: "#ef4444",
+                    color: "#ffffff",
+                    borderColor: "#dc2626",
+                    fontWeight: 600,
+                  }}
+                >
+                  Review in Pending Deletions Console ↗
+                </button>
+              )}
+
               <button
                 type="button"
                 className="btn quiet"
-                disabled={loading || isObserver}
-                title={isObserver ? "Observers cannot cancel proposals" : undefined}
-                onClick={handleReject}
+                disabled={loading}
+                title="Dismiss from chat view"
+                onClick={() => setDismissed(true)}
               >
-                Cancel
+                Dismiss
               </button>
             </>
           )}
@@ -453,13 +523,22 @@ export default function ProposalCard({ proposal: initialProposal }: Props) {
               <button
                 type="button"
                 className="btn quiet"
-                disabled={loading || isObserver}
-                title={isObserver ? "Observers cannot cancel proposals" : undefined}
-                onClick={handleReject}
+                disabled={loading}
+                onClick={() => setDismissed(true)}
               >
-                Cancel
+                Dismiss
               </button>
             </>
+          )}
+
+          {proposal.status === "executed" && (
+            <button
+              type="button"
+              className="btn quiet"
+              onClick={() => setDismissed(true)}
+            >
+              Dismiss
+            </button>
           )}
         </div>
       </section>

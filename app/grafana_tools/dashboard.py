@@ -31,45 +31,39 @@ async def fetch_dashboard_list(*, refresh: bool = False) -> list[dict]:
         {"method": "GET", "endpoint": "/api/search?type=dash-db"},
         raw=True,
     )
+    dashboards: list[dict] = []
     if not dash_str:
         logger.warning("Discovery: Grafana dashboard-list API returned empty string")
-        return []
+    else:
+        try:
+            data = json.loads(dash_str)
+            items: list = []
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                for key in ("result", "data", "dashboards", "hits"):
+                    if key in data and isinstance(data[key], list):
+                        items = data[key]
+                        logger.info(f"Discovery: unwrapped list from envelope key '{key}'")
+                        break
 
-    dashboards: list[dict] = []
-    try:
-        data = json.loads(dash_str)
-    except json.JSONDecodeError as exc:
-        logger.warning(f"Discovery: Grafana dashboard-list API returned invalid JSON: {exc}")
-        return []
-
-    items: list = []
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        for key in ("result", "data", "dashboards", "hits"):
-            if key in data and isinstance(data[key], list):
-                items = data[key]
-                logger.info(f"Discovery: unwrapped list from envelope key '{key}'")
-                break
-
-    for d in items:
-        if not isinstance(d, dict):
-            continue
-        uid = d.get("uid") or d.get("UID") or d.get("id", "")
-        if not uid:
-            continue
-        folder_uid = d.get("folderUid", d.get("folderUID"))
-        dashboards.append({
-            "uid": str(uid),
-            "title": d.get("title", ""),
-            "tags": [t for t in d.get("tags", []) if isinstance(t, str)],
-            "url": d.get("url", ""),
-            # The folder a dashboard lives in is part of its RBAC scope, so it
-            # travels with the listing. ``None`` means "unknown" -- callers
-            # must fail closed rather than assume the General folder.
-            "folderUid": str(folder_uid) if folder_uid is not None else None,
-            "folderTitle": d.get("folderTitle", "") or "",
-        })
+            for d in items:
+                if not isinstance(d, dict):
+                    continue
+                uid = d.get("uid") or d.get("UID") or d.get("id", "")
+                if not uid:
+                    continue
+                folder_uid = d.get("folderUid", d.get("folderUID"))
+                dashboards.append({
+                    "uid": str(uid),
+                    "title": d.get("title", ""),
+                    "tags": [t for t in d.get("tags", []) if isinstance(t, str)],
+                    "url": d.get("url", ""),
+                    "folderUid": str(folder_uid) if folder_uid is not None else None,
+                    "folderTitle": d.get("folderTitle", "") or "",
+                })
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Discovery: Grafana dashboard-list API returned invalid JSON: {exc}")
 
     if not dashboards:
         from app.grafana_tools.demo_dashboards import DEMO_DASHBOARDS

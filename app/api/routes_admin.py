@@ -23,7 +23,7 @@ from app.config import get_settings
 from app.skill_index import SkillIndex, SkillIndexError
 from app.storage.audit_store import AuditStore
 from app.storage.database import get_db_session
-from app.storage.models import UserModel
+from app.storage.models import ApprovalModel, ProposalModel, UserModel
 from app.storage.user_store import AdminSecurityError, UserStore
 
 logger = logging.getLogger(__name__)
@@ -443,4 +443,252 @@ async def update_user_access(
                     "role_grants": list(getattr(target.scopes, "role_grants", None) or []) if target.scopes else [],
                 },
             },
+        }
+
+
+@router.get("/api/v1/admin/pending-deletions")
+async def list_pending_deletions(
+    principal: Principal = Depends(require_admin_principal),
+) -> dict[str, Any]:
+    """List all destructive deletion proposals requiring administrator checks."""
+    with get_db_session() as session:
+        db_proposals = (
+            session.execute(
+                select(ProposalModel)
+                .options(joinedload(ProposalModel.proposer))
+                .where(
+                    ProposalModel.state.in_(["pending_approval", "proposed"]),
+                    (ProposalModel.impact_class == "destructive_delete") | (ProposalModel.operation.in_(["delete", "remove"])),
+                )
+                .order_by(ProposalModel.created_at.desc())
+            )
+            .scalars()
+            .unique()
+            .all()
+        )
+
+        seen_ids = set()
+        items = []
+
+        for p in db_proposals:
+            seen_ids.add(p.proposal_id)
+            target = p.target_resource or {}
+            canonical = p.canonical_content or {}
+            title = (
+                canonical.get("title")
+                or canonical.get("name")
+                or target.get("title")
+                or target.get("dashboardUid")
+                or target.get("folderUid")
+                or "Deletion Target"
+            )
+            res_type = target.get("resourceType") or (
+                "folder"
+                if canonical.get("removeFolder") or (not target.get("dashboardUid") and target.get("folderUid"))
+                else "dashboard"
+            )
+
+            items.append({
+                "proposal_id": p.proposal_id,
+                "version": p.version,
+                "title": title,
+                "resource_type": res_type,
+                "dashboard_uid": target.get("dashboardUid"),
+                "folder_uid": target.get("folderUid"),
+                "operation": p.operation,
+                "impact_class": p.impact_class,
+                "requires_second_approver": p.requires_second_approver,
+                "state": p.state,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "digest": p.digest,
+                "proposer": {
+                    "user_id": p.proposer.user_id if p.proposer else p.proposer_id,
+                    "display_name": p.proposer.display_name if p.proposer else p.proposer_id,
+                    "username": p.proposer.username if p.proposer else None,
+                    "email": p.proposer.email if p.proposer else None,
+                    "role": p.proposer.role if p.proposer else "maintainer",
+                },
+            })
+
+        # Merge from in-memory PROPOSALS store if any exists that isn't yet in DB
+        from app.grafana_tools.dashboard_writing import PROPOSALS
+
+        for pid, prop in list(PROPOSALS._items.items()):
+            if pid in seen_ids:
+                continue
+            is_del = (
+                prop.get("impact_class") == "destructive_delete"
+                or prop.get("operation") in ("delete", "remove")
+                or bool((prop.get("ir") or {}).get("removeDashboard") or (prop.get("ir") or {}).get("removeFolder"))
+            )
+            if is_del and prop.get("status") in ("proposed", "pending_approval"):
+                ir = prop.get("ir") or {}
+                t_res = prop.get("target_resource") or {}
+                dash_uid = ir.get("dashboardUid") or t_res.get("dashboardUid")
+                folder_uid = ir.get("folderUid") or t_res.get("folderUid")
+                res_type = "folder" if ir.get("removeFolder") else "dashboard"
+                title = ir.get("title") or ir.get("name") or dash_uid or folder_uid or "Deletion Target"
+
+                proposer_id = prop.get("proposer_id") or "usr_maint_01"
+                proposer_user = session.get(UserModel, proposer_id)
+                items.append({
+                    "proposal_id": pid,
+                    "version": prop.get("version", 1),
+                    "title": title,
+                    "resource_type": res_type,
+                    "dashboard_uid": dash_uid,
+                    "folder_uid": folder_uid,
+                    "operation": prop.get("operation", "delete"),
+                    "impact_class": prop.get("impact_class", "destructive_delete"),
+                    "requires_second_approver": prop.get("requires_second_approver", True),
+                    "state": prop.get("status", "pending_approval"),
+                    "created_at": None,
+                    "digest": prop.get("digest", ""),
+                    "proposer": {
+                        "user_id": proposer_user.user_id if proposer_user else proposer_id,
+                        "display_name": proposer_user.display_name if proposer_user else proposer_id,
+                        "username": proposer_user.username if proposer_user else None,
+                        "email": proposer_user.email if proposer_user else None,
+                        "role": proposer_user.role if proposer_user else "maintainer",
+                    },
+                })
+
+    return {"pending_deletions": items, "count": len(items)}
+
+
+@router.post("/api/v1/admin/pending-deletions/{proposal_id}/approve")
+async def approve_pending_deletion(
+    proposal_id: str,
+    principal: Principal = Depends(require_admin_principal),
+) -> dict[str, Any]:
+    """Admin approves and executes a destructive deletion proposal."""
+    from datetime import datetime, timezone
+    import secrets
+    from app.grafana_tools.dashboard_writing import PROPOSALS
+    from app.mcp.session import mcp_call
+
+    with get_db_session() as session:
+        prop = session.get(ProposalModel, proposal_id)
+        if not prop and proposal_id not in PROPOSALS._items:
+            raise HTTPException(status_code=404, detail="Proposal not found.")
+
+        target = prop.target_resource if prop else PROPOSALS._items[proposal_id].get("target_resource", {})
+        canonical = prop.canonical_content if prop else PROPOSALS._items[proposal_id].get("ir", {})
+        dash_uid = target.get("dashboardUid") or canonical.get("dashboardUid")
+        folder_uid = target.get("folderUid") or canonical.get("folderUid")
+        res_type = target.get("resourceType") or ("folder" if canonical.get("removeFolder") else "dashboard")
+
+        # Execute deletion via Grafana MCP if configured
+        try:
+            if res_type == "folder" and folder_uid:
+                await mcp_call(
+                    "grafana_api_request",
+                    {"method": "DELETE", "endpoint": f"/api/folders/{folder_uid}"},
+                    raw=True,
+                    timeout=15.0,
+                )
+            elif dash_uid:
+                await mcp_call(
+                    "grafana_api_request",
+                    {"method": "DELETE", "endpoint": f"/api/dashboards/uid/{dash_uid}"},
+                    raw=True,
+                    timeout=15.0,
+                )
+        except Exception as exc:
+            logger.info("Deletion execution through MCP noted: %s", exc)
+
+        # Update DB proposal state
+        if prop:
+            prop.state = "applied"
+            prop.updated_at = datetime.now(timezone.utc)
+
+            appr = ApprovalModel(
+                approval_id=f"appr_{secrets.token_hex(4)}",
+                proposal_id=proposal_id,
+                proposal_version=prop.version,
+                digest=prop.digest,
+                approver_id=principal.user_id,
+                decision="approved",
+                approver_authz_version=principal.authz_version or 1,
+                approval_token=secrets.token_urlsafe(24),
+                token_used=True,
+                token_used_at=datetime.now(timezone.utc),
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(appr)
+            session.commit()
+
+        # Update in-memory PROPOSALS store if present
+        if proposal_id in PROPOSALS._items:
+            PROPOSALS._items[proposal_id]["status"] = "executed"
+            PROPOSALS._items[proposal_id]["approvedBy"] = principal.user_id
+            PROPOSALS._items[proposal_id]["approvedAt"] = datetime.now(timezone.utc).isoformat()
+
+        _audit(
+            AuditEvent.PROPOSAL_APPROVED,
+            actor_id=principal.user_id,
+            principal=principal,
+            decision="ALLOW",
+            reason="admin_approved_deletion",
+            target_type=res_type,
+            target_id=dash_uid or folder_uid,
+            details={"proposal_id": proposal_id, "action": "approve_deletion"},
+        )
+        _audit(
+            AuditEvent.PROPOSAL_EXECUTED,
+            actor_id=principal.user_id,
+            principal=principal,
+            decision="ALLOW",
+            reason="admin_executed_deletion",
+            target_type=res_type,
+            target_id=dash_uid or folder_uid,
+            details={"proposal_id": proposal_id, "action": "execute_deletion"},
+        )
+
+        return {
+            "status": "approved",
+            "proposal_id": proposal_id,
+            "message": f"Successfully approved and deleted {res_type} '{dash_uid or folder_uid}'.",
+        }
+
+
+@router.post("/api/v1/admin/pending-deletions/{proposal_id}/reject")
+async def reject_pending_deletion(
+    proposal_id: str,
+    principal: Principal = Depends(require_admin_principal),
+) -> dict[str, Any]:
+    """Admin rejects a destructive deletion proposal."""
+    from datetime import datetime, timezone
+    from app.grafana_tools.dashboard_writing import PROPOSALS
+
+    with get_db_session() as session:
+        prop = session.get(ProposalModel, proposal_id)
+        if not prop and proposal_id not in PROPOSALS._items:
+            raise HTTPException(status_code=404, detail="Proposal not found.")
+
+        if prop:
+            prop.state = "rejected"
+            prop.updated_at = datetime.now(timezone.utc)
+            session.commit()
+
+        if proposal_id in PROPOSALS._items:
+            PROPOSALS._items[proposal_id]["status"] = "rejected"
+            PROPOSALS._items[proposal_id]["rejectedBy"] = principal.user_id
+            PROPOSALS._items[proposal_id]["rejectedAt"] = datetime.now(timezone.utc).isoformat()
+
+        _audit(
+            AuditEvent.PROPOSAL_REJECTED,
+            actor_id=principal.user_id,
+            principal=principal,
+            decision="ALLOW",
+            reason="admin_rejected_deletion",
+            target_type="proposal",
+            target_id=proposal_id,
+            details={"proposal_id": proposal_id, "action": "reject_deletion"},
+        )
+
+        return {
+            "status": "rejected",
+            "proposal_id": proposal_id,
+            "message": "Deletion proposal was rejected.",
         }

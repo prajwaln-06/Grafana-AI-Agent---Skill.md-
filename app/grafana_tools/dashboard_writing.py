@@ -1151,6 +1151,8 @@ def validate_ir(ir: dict) -> list[str]:
         errors.append("dashboard name is required")
     if not ir.get("panels") and ir.get("operation") != "remove":
         errors.append("at least one panel is required")
+    if ir.get("removeDashboard") or ir.get("removeFolder"):
+        return errors
     seen = set()
     for panel in ir.get("panels", []):
         if panel.get("id") in seen:

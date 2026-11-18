@@ -79,24 +79,62 @@ export type PanelIR = {
   query?: string;
   visualizationType?: string;
   unit?: string;
-  datasource?: string;
+  datasource?: string | Record<string, any>;
+  target?: {
+    label?: string;
+    value?: string;
+    [key: string]: any;
+  };
+  size?: {
+    w?: number;
+    h?: number;
+  };
+  layout?: {
+    x?: number;
+    y?: number;
+  };
+  visualizationConfig?: {
+    unit?: string;
+    min?: number;
+    max?: number;
+    [key: string]: any;
+  };
+  fieldConfig?: Record<string, any>;
   queryResult?: {
     kind?: string;
-    points?: Array<{ t: number; v: number }>;
+    status?: string;
+    error?: string;
+    value?: number;
+    points?: Array<{ t?: number; v?: number; timestamp?: number | string; value?: number | null }>;
+    series?: Array<{ labels?: Record<string, string>; points?: Array<{ timestamp: number | string; value: number | null }> }>;
     columns?: string[];
     rows?: any[][];
+    [key: string]: any;
   };
+  [key: string]: any;
 };
 
 export type DashboardIR = {
   name: string;
+  title?: string;
   description?: string;
-  datasource?: string;
+  datasource?: string | Record<string, any>;
+  dashboardUid?: string;
+  folderUid?: string;
+  operation?: string;
+  removeDashboard?: boolean;
+  removeFolder?: boolean;
+  resourceType?: string;
+  availableTargets?: string[];
   timeConfig?: {
+    from?: string;
+    to?: string;
     range?: string;
     refresh?: string;
+    [key: string]: any;
   };
   panels: PanelIR[];
+  [key: string]: any;
 };
 
 export type DashboardProposal = {
@@ -104,8 +142,15 @@ export type DashboardProposal = {
   status: "proposed" | "approved" | "rejected" | "executed" | string;
   version: number;
   approvalToken?: string;
+  operation?: string;
+  impact_class?: string;
+  requires_second_approver?: boolean;
+  proposer_id?: string;
+  proposer_role?: string;
+  target_resource?: Record<string, any>;
   ir: DashboardIR;
   errors?: any[];
+  [key: string]: any;
 };
 
 export type AdkStep = {

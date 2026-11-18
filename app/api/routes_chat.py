@@ -7,6 +7,8 @@ server-side coordinator that maintains persistent multi-turn context.
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
+import json
 import logging
 import re
 import secrets
@@ -533,6 +535,116 @@ async def unified_chat_endpoint(
 
     # B) Dashboard Mutation / Exploration (ADK + FastMCP)
     if is_dashboard_action:
+        # Check if this is a direct folder deletion request (e.g. "delete folder fid-payments" or "delete folder fld-payments")
+        folder_del_match = re.search(r"\b(?:delete|remove|drop)\s+(?:the\s+)?folder\s+['\"]?([A-Za-z0-9_.:-]+)['\"]?", text, re.I)
+        if not folder_del_match:
+            folder_del_match = re.search(r"\b(?:delete|remove|drop)\s+['\"]?([A-Za-z0-9_.:-]+)['\"]?\s+folder\b", text, re.I)
+
+        if folder_del_match:
+            target_folder = folder_del_match.group(1).strip()
+            # Normalize folder uid: support fid-payments -> fld-payments, fid-alerts -> fld-alerts, etc.
+            if target_folder.lower() in ("fid-payments", "fld-payments", "payments"):
+                target_folder = "fld-payments"
+            elif target_folder.lower() in ("fid-alerts", "fld-alerts", "alerts"):
+                target_folder = "fid-alerts"
+
+            effective_role = principal.get_role_for_folder(target_folder) or (principal.role or "").lower()
+            if effective_role == "observer":
+                return respond(ChatResponse(
+                    status="policy_denied",
+                    sessionId=session.session_id,
+                    intent="folder_deletion",
+                    agents=["Policy Module"],
+                    steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                    answer=f"🚫 **Access Denied (RBAC)**: Your assigned role on folder `{target_folder}` is **observer**. Observers cannot delete folders.",
+                ))
+            if effective_role == "operator":
+                return respond(ChatResponse(
+                    status="policy_denied",
+                    sessionId=session.session_id,
+                    intent="folder_deletion",
+                    agents=["Policy Module"],
+                    steps=[ChatStep(step=1, agent="Policy Module", action="evaluated RBAC permissions", result="DENIED")],
+                    answer=f"🚫 **Access Denied (RBAC)**: Role 'operator' lacks permission to delete folders. Folder deletion requires Maintainer or Admin.",
+                ))
+
+            # Create destructive folder deletion proposal
+            pid = f"prop_{secrets.token_hex(4)}"
+            ir = {
+                "operation": "delete",
+                "name": f"Folder {target_folder}",
+                "title": f"Folder {target_folder}",
+                "folderUid": target_folder,
+                "resourceType": "folder",
+                "removeFolder": True,
+            }
+            digest = hashlib.sha256(json.dumps(ir, sort_keys=True).encode()).hexdigest()
+            proposal_obj = {
+                "proposalId": pid,
+                "version": 1,
+                "status": "proposed",
+                "ir": ir,
+                "proposer_id": principal.user_id,
+                "proposer_role": principal.role,
+                "operation": "delete",
+                "impact_class": "destructive_delete",
+                "requires_second_approver": True,
+                "target_resource": {
+                    "folderUid": target_folder,
+                    "resourceType": "folder",
+                    "title": f"Folder {target_folder}",
+                },
+                "digest": digest,
+            }
+            PROPOSALS._items[pid] = proposal_obj
+
+            # Persist to database ProposalModel
+            from app.storage.database import get_db_session
+            from app.storage.models import ProposalModel
+            with get_db_session() as db_session:
+                prop_model = ProposalModel(
+                    proposal_id=pid,
+                    version=1,
+                    proposer_id=principal.user_id,
+                    operation="delete",
+                    impact_class="destructive_delete",
+                    target_resource={"folderUid": target_folder, "resourceType": "folder", "title": f"Folder {target_folder}"},
+                    canonical_content=ir,
+                    digest=digest,
+                    state="pending_approval",
+                    requires_second_approver=True,
+                    policy_version="1.0",
+                )
+                db_session.merge(prop_model)
+                db_session.commit()
+
+            if effective_role == "maintainer":
+                answer_text = (
+                    f"⚠️ **Deletion Request Escalated**: The request to delete folder **{target_folder}** "
+                    f"has been escalated to an administrator for review and approval. "
+                    f"It is now queued under **Pending Deletions** in the Admin Console."
+                )
+                step_action = "escalated deletion to administrator"
+                step_result = "ESCALATED_TO_ADMIN"
+            else:
+                answer_text = f"I have prepared a proposal to delete folder **{target_folder}**. Review and confirm the deletion below or approve it in the Admin Console."
+                step_action = "verified admin authorization"
+                step_result = "ALLOWED"
+
+            return respond(ChatResponse(
+                status="ok",
+                sessionId=session.session_id,
+                intent="folder_deletion",
+                agents=["ADK Agent", "Proposal Engine", "Policy Module"],
+                steps=[
+                    ChatStep(step=1, agent="Coordinator", action="classified intent", result="delete_folder"),
+                    ChatStep(step=2, agent="Policy Module", action=step_action, result=step_result),
+                ],
+                answer=answer_text,
+                proposalId=pid,
+                proposal=proposal_obj,
+            ))
+
         # Check if this is a mutation (create, update, remove)
         mutation_intent = resolve_dashboard_intent(request=text)
         intent_kind = mutation_intent.get("intent", "UNSPECIFIED")
@@ -632,8 +744,38 @@ async def unified_chat_endpoint(
                 dash_uid = ir_data.get("dashboardUid", "")
 
                 if is_delete:
-                    answer_text = f"I have prepared a proposal to delete the dashboard **{dash_name}**" + (f" (UID: `{dash_uid}`)" if dash_uid else "") + ". Please review and confirm the deletion below."
-                    action_result = f"deletion proposal for {dash_name}"
+                    # Persist dashboard deletion proposal to DB
+                    from app.storage.database import get_db_session
+                    from app.storage.models import ProposalModel
+                    with get_db_session() as db_session:
+                        existing = db_session.get(ProposalModel, pid)
+                        if not existing:
+                            prop_model = ProposalModel(
+                                proposal_id=pid,
+                                version=proposal_obj.get("version", 1),
+                                proposer_id=principal.user_id,
+                                operation="delete",
+                                impact_class="destructive_delete",
+                                target_resource=proposal_obj.get("target_resource") or {"dashboardUid": dash_uid, "folderUid": ir_data.get("folderUid")},
+                                canonical_content=ir_data,
+                                digest=proposal_obj.get("digest", ""),
+                                state="pending_approval",
+                                requires_second_approver=True,
+                                policy_version="1.0",
+                            )
+                            db_session.add(prop_model)
+                            db_session.commit()
+
+                    if (principal.role or "").lower() == "maintainer":
+                        answer_text = (
+                            f"⚠️ **Deletion Request Escalated**: The request to delete dashboard **{dash_name}**"
+                            + (f" (UID: `{dash_uid}`)" if dash_uid else "")
+                            + " has been escalated to an administrator for review and approval. It is now queued under **Pending Deletions** in the Admin Console."
+                        )
+                        action_result = f"escalated deletion of {dash_name} to admin"
+                    else:
+                        answer_text = f"I have prepared a proposal to delete the dashboard **{dash_name}**" + (f" (UID: `{dash_uid}`)" if dash_uid else "") + ". Please review and confirm the deletion below."
+                        action_result = f"deletion proposal for {dash_name}"
                 elif ir_data.get("operation") == "remove":
                     answer_text = f"I have prepared a proposal to remove panel(s) from **{dash_name}**. Review and modify it before applying."
                     action_result = f"panel removal for {dash_name}"
@@ -651,7 +793,12 @@ async def unified_chat_endpoint(
                     agents=["ADK Agent", "Proposal Engine", "MCP-Grafana"],
                     steps=[
                         ChatStep(step=1, agent="Coordinator", action="classified intent", result="delete_dashboard" if is_delete else intent_kind),
-                        ChatStep(step=2, agent="Proposal Engine", action="generated Dashboard IR", result=action_result),
+                        ChatStep(
+                            step=2,
+                            agent="Policy Module" if (is_delete and (principal.role or "").lower() == "maintainer") else "Proposal Engine",
+                            action="escalated deletion to administrator" if (is_delete and (principal.role or "").lower() == "maintainer") else "generated Dashboard IR",
+                            result="ESCALATED_TO_ADMIN" if (is_delete and (principal.role or "").lower() == "maintainer") else action_result,
+                        ),
                     ],
                     answer=answer_text,
                     proposalId=pid,

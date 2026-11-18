@@ -41,12 +41,41 @@ export type AdminUser = {
   };
 };
 
+export type PendingDeletionItem = {
+  proposal_id: string;
+  version: number;
+  title: string;
+  resource_type: "dashboard" | "folder" | string;
+  dashboard_uid?: string;
+  folder_uid?: string;
+  operation: string;
+  impact_class: string;
+  requires_second_approver: boolean;
+  state: string;
+  created_at?: string | null;
+  digest?: string;
+  proposer: {
+    user_id: string;
+    display_name?: string | null;
+    username?: string | null;
+    email?: string | null;
+    role?: string | null;
+  };
+};
+
 interface UserManagementModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: "users" | "pending_deletions";
 }
 
-export function UserManagementModal({ isOpen, onClose }: UserManagementModalProps) {
+export function UserManagementModal({ isOpen, onClose, initialTab = "users" }: UserManagementModalProps) {
+  const [activeTab, setActiveTab] = useState<"users" | "pending_deletions">(initialTab);
+  const [pendingDeletions, setPendingDeletions] = useState<PendingDeletionItem[]>([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<{ id: string; message: string; type: "success" | "error" } | null>(null);
+
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,10 +126,81 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
       });
   }
 
+  function loadPendingDeletions() {
+    setPendingLoading(true);
+    fetch("/api/v1/admin/pending-deletions", {
+      headers: { Accept: "application/json" },
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `HTTP ${res.status}: ${res.statusText}`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        setPendingDeletions(data.pending_deletions || []);
+        setPendingLoading(false);
+      })
+      .catch((err) => {
+        console.error("Failed to load pending deletions:", err);
+        setPendingLoading(false);
+      });
+  }
+
+  async function handleApproveDeletion(item: PendingDeletionItem) {
+    setActionLoading(item.proposal_id);
+    setActionNotice(null);
+    try {
+      const res = await fetch(`/api/v1/admin/pending-deletions/${item.proposal_id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}: ${res.statusText}`);
+      }
+      const data = await res.json();
+      setActionNotice({ id: item.proposal_id, message: data.message || `Deletion of ${item.title} approved and executed.`, type: "success" });
+      loadPendingDeletions();
+    } catch (err: any) {
+      setActionNotice({ id: item.proposal_id, message: err?.message || "Failed to approve deletion", type: "error" });
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  async function handleRejectDeletion(item: PendingDeletionItem) {
+    setActionLoading(item.proposal_id);
+    setActionNotice(null);
+    try {
+      const res = await fetch(`/api/v1/admin/pending-deletions/${item.proposal_id}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}: ${res.statusText}`);
+      }
+      const data = await res.json();
+      setActionNotice({ id: item.proposal_id, message: data.message || `Deletion of ${item.title} rejected.`, type: "success" });
+      loadPendingDeletions();
+    } catch (err: any) {
+      setActionNotice({ id: item.proposal_id, message: err?.message || "Failed to reject deletion", type: "error" });
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
   useEffect(() => {
     if (isOpen) {
+      if (initialTab) {
+        setActiveTab(initialTab);
+      }
       loadUsers();
+      loadPendingDeletions();
       setEditingUserId(null);
+      setActionNotice(null);
 
       fetch("/api/v1/admin/folders", {
         headers: { Accept: "application/json" },
@@ -113,7 +213,7 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
         })
         .catch(() => {});
     }
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   async function handleSaveAccess(user: AdminUser) {
     setSaving(true);
@@ -256,16 +356,68 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
   return createPortal(
     <div className="admin-modal-backdrop" onClick={onClose} role="dialog" aria-modal="true">
       <div className="admin-modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="admin-modal-header">
-          <div>
-            <h2 className="admin-modal-title">👥 Team & RBAC Users</h2>
-            <p className="muted small">
-              Managed identities, roles, and resource scopes from PostgreSQL User & Role Store
-            </p>
+        <div className="admin-modal-header" style={{ paddingBottom: 0 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", width: "100%" }}>
+            <div>
+              <h2 className="admin-modal-title">🛡️ Admin Console</h2>
+              <p className="muted small">
+                Team access control, RBAC scopes, and destructive operation governance
+              </p>
+            </div>
+            <button type="button" className="btn ghost small" onClick={onClose} aria-label="Close">
+              ✕
+            </button>
           </div>
-          <button type="button" className="btn ghost small" onClick={onClose} aria-label="Close">
-            ✕
-          </button>
+          <div style={{ display: "flex", gap: "10px", marginTop: "14px", borderBottom: "1px solid var(--border)", width: "100%" }}>
+            <button
+              type="button"
+              className={`btn ${activeTab === "users" ? "primary" : "ghost"} small`}
+              style={{
+                borderRadius: "6px 6px 0 0",
+                borderBottom: activeTab === "users" ? "2px solid var(--accent)" : "2px solid transparent",
+                marginBottom: "-1px",
+                fontWeight: 600,
+                fontSize: "13px",
+              }}
+              onClick={() => setActiveTab("users")}
+            >
+              👥 Team & RBAC Users ({users.length})
+            </button>
+            <button
+              type="button"
+              className={`btn ${activeTab === "pending_deletions" ? "primary" : "ghost"} small`}
+              style={{
+                borderRadius: "6px 6px 0 0",
+                borderBottom: activeTab === "pending_deletions" ? "2px solid var(--accent)" : "2px solid transparent",
+                marginBottom: "-1px",
+                fontWeight: 600,
+                fontSize: "13px",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+              }}
+              onClick={() => {
+                setActiveTab("pending_deletions");
+                loadPendingDeletions();
+              }}
+            >
+              <span>🗑️ Pending Deletions</span>
+              {pendingDeletions.length > 0 && (
+                <span
+                  style={{
+                    background: "#ef4444",
+                    color: "#fff",
+                    borderRadius: "10px",
+                    padding: "1px 7px",
+                    fontSize: "11px",
+                    fontWeight: 700,
+                  }}
+                >
+                  {pendingDeletions.length}
+                </span>
+              )}
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -275,11 +427,12 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
         )}
 
         <div className="admin-modal-body">
-          {loading && !users.length ? (
-            <div style={{ padding: "40px 0", textAlign: "center" }} className="muted">
-              Loading users from store…
-            </div>
-          ) : (
+          {activeTab === "users" && (
+            loading && !users.length ? (
+              <div style={{ padding: "40px 0", textAlign: "center" }} className="muted">
+                Loading users from store…
+              </div>
+            ) : (
             <div className="admin-table-wrap">
               <table className="admin-users-table">
                 <thead>
@@ -911,12 +1064,191 @@ export function UserManagementModal({ isOpen, onClose }: UserManagementModalProp
                 </tbody>
               </table>
             </div>
+          ))}
+
+          {activeTab === "pending_deletions" && (
+            <div style={{ padding: "16px 20px" }}>
+              {actionNotice && (
+                <div
+                  className={`alert ${actionNotice.type === "success" ? "success" : "error"}`}
+                  style={{ marginBottom: "16px" }}
+                >
+                  {actionNotice.message}
+                </div>
+              )}
+
+              {pendingLoading && !pendingDeletions.length ? (
+                <div style={{ padding: "40px 0", textAlign: "center" }} className="muted">
+                  Checking pending deletion requests…
+                </div>
+              ) : pendingDeletions.length === 0 ? (
+                <div
+                  style={{
+                    padding: "48px 20px",
+                    textAlign: "center",
+                    background: "rgba(255, 255, 255, 0.02)",
+                    borderRadius: "8px",
+                    border: "1px dashed var(--border)",
+                  }}
+                >
+                  <div style={{ fontSize: "32px", marginBottom: "12px" }}>✓</div>
+                  <h3 style={{ fontSize: "16px", fontWeight: 600, marginBottom: "6px" }}>No Pending Deletions</h3>
+                  <p className="muted small" style={{ maxWidth: "420px", margin: "0 auto" }}>
+                    There are currently no destructive deletion requests awaiting administrator approval.
+                    When maintainers request dashboard or folder deletions, they will be queued here for checks.
+                  </p>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                    <span className="small muted">
+                      {pendingDeletions.length} request{pendingDeletions.length === 1 ? "" : "s"} escalated for checks
+                    </span>
+                    <button
+                      type="button"
+                      className="btn ghost x-small"
+                      onClick={loadPendingDeletions}
+                      disabled={pendingLoading}
+                    >
+                      🔄 Refresh
+                    </button>
+                  </div>
+
+                  {pendingDeletions.map((item) => (
+                    <div
+                      key={item.proposal_id}
+                      style={{
+                        background: "rgba(255, 255, 255, 0.03)",
+                        border: "1px solid rgba(239, 68, 68, 0.25)",
+                        borderRadius: "8px",
+                        padding: "16px 18px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "12px",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+                            <span
+                              style={{
+                                background: item.resource_type === "folder" ? "#6366f1" : "#f59e0b",
+                                color: "#fff",
+                                padding: "2px 6px",
+                                borderRadius: "4px",
+                                fontSize: "10px",
+                                fontWeight: 700,
+                                textTransform: "uppercase",
+                              }}
+                            >
+                              {item.resource_type || "DASHBOARD"}
+                            </span>
+                            <span
+                              style={{
+                                background: "rgba(239, 68, 68, 0.15)",
+                                color: "#ef4444",
+                                border: "1px solid rgba(239, 68, 68, 0.3)",
+                                padding: "1px 6px",
+                                borderRadius: "4px",
+                                fontSize: "10px",
+                                fontWeight: 600,
+                              }}
+                            >
+                              DESTRUCTIVE DELETE
+                            </span>
+                            <span className="muted x-small">ID: <code>{item.proposal_id}</code></span>
+                          </div>
+
+                          <h4 style={{ fontSize: "15px", fontWeight: 600, margin: "2px 0 4px" }}>
+                            {item.title}
+                          </h4>
+
+                          <div className="small muted" style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
+                            {item.dashboard_uid && (
+                              <span>Dashboard UID: <code>{item.dashboard_uid}</code></span>
+                            )}
+                            {item.folder_uid && (
+                              <span>Folder: <code>{item.folder_uid}</code></span>
+                            )}
+                            {item.created_at && (
+                              <span>Requested: {new Date(item.created_at).toLocaleString()}</span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexShrink: 0 }}>
+                          <button
+                            type="button"
+                            className="btn primary small"
+                            style={{
+                              background: "#059669",
+                              borderColor: "#047857",
+                              color: "#fff",
+                              fontWeight: 600,
+                            }}
+                            disabled={actionLoading === item.proposal_id}
+                            onClick={() => handleApproveDeletion(item)}
+                          >
+                            {actionLoading === item.proposal_id ? "Processing…" : "✓ Approve"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn danger small"
+                            style={{
+                              background: "rgba(239, 68, 68, 0.15)",
+                              color: "#ef4444",
+                              borderColor: "rgba(239, 68, 68, 0.4)",
+                            }}
+                            disabled={actionLoading === item.proposal_id}
+                            onClick={() => handleRejectDeletion(item)}
+                          >
+                            {actionLoading === item.proposal_id ? "Processing…" : "✕ Reject"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          paddingTop: "10px",
+                          borderTop: "1px solid rgba(255, 255, 255, 0.05)",
+                          fontSize: "12px",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span className="muted">Proposer:</span>
+                          <strong>{item.proposer.display_name || item.proposer.username || item.proposer.user_id}</strong>
+                          {item.proposer.username && (
+                            <span className="muted">(@{item.proposer.username})</span>
+                          )}
+                          <span
+                            className="admin-badge role-maintainer"
+                            style={{ fontSize: "10px", padding: "1px 5px", marginLeft: "4px" }}
+                          >
+                            {(item.proposer.role || "maintainer").toUpperCase()}
+                          </span>
+                        </div>
+                        <span className="muted x-small" title={item.digest}>
+                          Digest: <code>{(item.digest || "").substring(0, 12)}…</code>
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
 
         <div className="admin-modal-footer">
           <span className="muted small">
-            Endpoint: <code>/api/v1/admin/users</code> • Total: {users.length} registered
+            {activeTab === "users" ? (
+              <>Endpoint: <code>/api/v1/admin/users</code> • Total: {users.length} registered</>
+            ) : (
+              <>Endpoint: <code>/api/v1/admin/pending-deletions</code> • Total: {pendingDeletions.length} pending check{pendingDeletions.length === 1 ? "" : "s"}</>
+            )}
           </span>
           <button type="button" className="btn secondary small" onClick={onClose}>
             Close

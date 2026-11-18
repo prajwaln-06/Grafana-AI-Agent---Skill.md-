@@ -22,7 +22,18 @@ export function ProfileMenu() {
   const [details, setDetails] = useState<Principal | null>(principal);
   const [loading, setLoading] = useState(false);
   const [showUsersModal, setShowUsersModal] = useState(false);
+  const [adminModalTab, setAdminModalTab] = useState<"users" | "pending_deletions">("users");
+  const [pendingCount, setPendingCount] = useState<number>(0);
   const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function onOpenDeletions() {
+      setAdminModalTab("pending_deletions");
+      setShowUsersModal(true);
+    }
+    window.addEventListener("grafana-ai:open-admin-pending-deletions", onOpenDeletions);
+    return () => window.removeEventListener("grafana-ai:open-admin-pending-deletions", onOpenDeletions);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -54,6 +65,16 @@ export function ProfileMenu() {
       setDetails(resolved);
       setLoading(false);
     });
+
+    fetch("/api/v1/admin/pending-deletions", {
+      headers: { Accept: "application/json" },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && typeof d?.count === "number") setPendingCount(d.count);
+      })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
     };
@@ -142,18 +163,40 @@ export function ProfileMenu() {
             )}
 
             {isAdmin && (
-              <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+              <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: "6px" }}>
                 <button
                   type="button"
                   className="btn secondary small"
                   style={{ width: "100%", justifyContent: "center" }}
                   onClick={() => {
                     setOpen(false);
+                    setAdminModalTab("users");
                     setShowUsersModal(true);
                   }}
                 >
-                  👥 Manage Team & Users
+                  🛡️ Admin Console & Users
                 </button>
+                {pendingCount > 0 && (
+                  <button
+                    type="button"
+                    className="btn small"
+                    style={{
+                      width: "100%",
+                      justifyContent: "center",
+                      background: "rgba(239, 68, 68, 0.15)",
+                      color: "#ef4444",
+                      borderColor: "rgba(239, 68, 68, 0.4)",
+                      fontWeight: 600,
+                    }}
+                    onClick={() => {
+                      setOpen(false);
+                      setAdminModalTab("pending_deletions");
+                      setShowUsersModal(true);
+                    }}
+                  >
+                    🗑️ Pending Deletions ({pendingCount})
+                  </button>
+                )}
               </div>
             )}
 
@@ -195,6 +238,7 @@ export function ProfileMenu() {
       <UserManagementModal
         isOpen={showUsersModal}
         onClose={() => setShowUsersModal(false)}
+        initialTab={adminModalTab}
       />
     </>
   );

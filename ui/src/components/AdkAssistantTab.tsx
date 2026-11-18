@@ -639,7 +639,10 @@ function MessageBubble({
           )}
 
           {response.proposal && (
-            <ProposalCard proposal={response.proposal} />
+            <ProposalCard
+              key={response.proposal.proposalId || response.sessionId || message.id}
+              proposal={response.proposal}
+            />
           )}
 
           {response.alertRule && (

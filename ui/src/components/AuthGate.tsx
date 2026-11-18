@@ -138,6 +138,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
   }, []);
 
+  // Re-resolve identity whenever user impersonation / act-as changes
+  useEffect(() => {
+    function onActAsChanged() {
+      void resolve();
+    }
+    window.addEventListener("grafana-ai:act-as-changed", onActAsChanged);
+    return () => window.removeEventListener("grafana-ai:act-as-changed", onActAsChanged);
+  }, [resolve]);
+
   const endSession = useCallback(async () => {
     const res = await signOut(config);
     if (!res.ok) {
