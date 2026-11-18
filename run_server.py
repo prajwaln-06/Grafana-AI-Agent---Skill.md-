@@ -189,6 +189,8 @@ async def opensearch_status():
     info["field_catalogs"] = os_runtime.field_cache_snapshots()
     info["result_cache"] = os_runtime.result_cache_snapshot(settings)
     info["query_plan_cache"] = os_runtime.plan_cache_snapshot(settings)
+    from app import prometheus_plan_cache
+    info["prometheus_query_plan_cache"] = prometheus_plan_cache.snapshot(settings)
     return info
 
 
@@ -204,6 +206,10 @@ async def reload_skill():
         raise HTTPException(status_code=422, detail=f"Failed to reload skill: {str(e)}")
         
     skill_index = root_agent._get_skill_index()
+    # Stored Prometheus plans were validated against the previous skill text/catalog; revalidation
+    # would catch any change, but a reload is an explicit "start over", so drop them now.
+    from app import prometheus_plan_cache
+    prometheus_plan_cache.reset()
     # The OpenSearch index registry is cached for the life of the process; reload
     # it too, so an edited index_registry.json takes effect without a restart. A
     # broken registry is reported here (and every OpenSearch request then fails

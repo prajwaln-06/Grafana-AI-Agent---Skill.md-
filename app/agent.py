@@ -11,6 +11,7 @@ from app.catalog import runtime as catalog_runtime
 from app.pipeline import ALREADY_EXECUTED_MARKER, PipelineContext, run_pipeline
 from app.config import get_settings
 from app import executor
+from app import prometheus_plan_cache as prom_plan_cache
 from app.opensearch_catalog import plan_cache as os_plan_cache
 from app.opensearch_catalog import runtime as os_runtime
 from app.skill_index import SkillIndex
@@ -192,10 +193,55 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                     )
                     return
 
+        # 3d. Prometheus QUERY-PLAN cache (app/prometheus_plan_cache.py). Reached only after the
+        # OpenSearch caches missed, only for a fresh question and only when PROMETHEUS_QUERY_PLAN_CACHE_
+        # ENABLED is set (otherwise nothing below runs and responses are exactly as before). A hit
+        # skips the Router/Generator LLM calls but NOT validation or execution: the stored plan has
+        # been re-proved (fingerprints + the real validator against the current metric directory,
+        # live labels and catalog status) and Prometheus is queried again NOW, so the data is fresh;
+        # its relative window ("now-1h") is evaluated at execution time. Nothing but the plan is
+        # cached -- never a result. A rejected plan is evicted and the normal pipeline below runs;
+        # the answer carries `execution.metadata.query_plan_cache` (`cache: "prometheus"`).
+        prom_invalidation: str | None = None
+        prom_baseline = None
+        if fresh_question and question.strip() and prom_plan_cache.enabled(settings):
+            prom_lookup = await asyncio.to_thread(
+                prom_plan_cache.lookup, question, cache_scope, settings, skill_index)
+            prom_invalidation = prom_lookup.invalidation_reason
+            if prom_lookup.hit is not None:
+                prom_hit = prom_lookup.hit
+                executed = await asyncio.to_thread(executor.execute_contract, prom_hit.contract, settings)
+                ex_block = executed.get("execution") if isinstance(executed, dict) else None
+                if not isinstance(ex_block, dict) or ex_block.get("execution_status") == "not_executed":
+                    # never serve a plan the executor would not run: drop it and run the pipeline
+                    await asyncio.to_thread(prom_plan_cache.invalidate, settings, prom_hit.entry_id)
+                    prom_invalidation = "the executor did not run the stored plan"
+                else:
+                    prom_plan_cache.annotate(executed, prom_plan_cache.hit_info(prom_hit))
+                    yield Event(
+                        invocation_id=ctx.invocation_id,
+                        author=self.name,
+                        message=json.dumps({"result": executed, "session_id": None}),
+                        state={
+                            "previous_question": None,
+                            "previous_result": None,
+                            "pending_alert_proposal": None,
+                        }
+                    )
+                    return
+            # Miss: read the catalog snapshot ONCE, before the pipeline starts, and hand that very
+            # snapshot to the pipeline below. The plan it generates is only cached if the catalog now in
+            # force still agrees with it (a refresh landing mid-request must not be baked into the
+            # plan's fingerprints). Only when the cache is enabled; disabled = the call is unchanged.
+            prom_baseline = prom_plan_cache.capture_baseline(settings)
+
         # 4. Run the pipeline
+        pipeline_kwargs: dict = {}
+        if prom_baseline is not None and prom_baseline.catalog is not None:
+            pipeline_kwargs["catalog"] = prom_baseline.catalog
         try:
             contract = await asyncio.wait_for(
-                run_pipeline(question, skill_index, settings, context=pipeline_context),
+                run_pipeline(question, skill_index, settings, context=pipeline_context, **pipeline_kwargs),
                 timeout=settings.pipeline_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -281,6 +327,13 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                 os_runtime.store_validated_plan, question, cache_scope, executed, settings, skill_index)
         if plan_invalidation:
             os_plan_cache.annotate(executed, {"hit": False, "invalidation_reason": plan_invalidation})
+        # Prometheus plan cache: remember the validated PLAN of a successful, eligible single Prometheus
+        # execution and say what happened (miss / stored / why not / why a matching plan was rejected).
+        # Not for a dependency-resolved compound question. A no-op while the cache is disabled.
+        if fresh_question and not already_executed and prom_plan_cache.enabled(settings):
+            await asyncio.to_thread(
+                prom_plan_cache.record_miss, question, cache_scope, executed, settings, skill_index,
+                prom_invalidation, prom_baseline)
         yield Event(
             invocation_id=ctx.invocation_id,
             author=self.name,

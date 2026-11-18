@@ -135,6 +135,42 @@ class Settings(BaseSettings):
         description="Capacity of the plan cache. When full the least recently used plan is evicted. "
                     "Plans are valid while their fingerprints and the guard say so, so there is no TTL.")
 
+    # --- Prometheus QUERY-PLAN cache (app/prometheus_plan_cache.py) ---
+    # The Prometheus counterpart of the OpenSearch plan cache above. It stores validated PromQL plans
+    # (never results): an identical or equivalent question skips the Router/Generator LLM calls but is
+    # re-validated against the CURRENT catalog / live labels / config / skill text by the real validator
+    # and EXECUTED AGAIN against Prometheus. Entirely independent of the OpenSearch caches: its own
+    # instance, its own switches and its own aliases (nothing is shared with OPENSEARCH_*).
+    prometheus_query_plan_cache_enabled: bool = Field(
+        default=False,
+        description="Reuse a validated PromQL plan for an identical or equivalent question, skipping the "
+                    "Router/Generator LLM calls but always re-validating and re-executing it (Prometheus "
+                    "is queried again on every hit; results are never cached). In memory only. False (the "
+                    "default: opt-in, so existing behaviour is unchanged) = every question runs the full "
+                    "pipeline and responses carry no query_plan_cache metadata. Independent of "
+                    "OPENSEARCH_QUERY_PLAN_CACHE_ENABLED and OPENSEARCH_RESULT_CACHE_ENABLED.")
+    prometheus_query_plan_cache_max_entries: int = Field(
+        default=500, ge=1, le=10000,
+        description="Capacity of the Prometheus plan cache. When full the least recently used plan is "
+                    "evicted. Plans stay valid while their fingerprints and the validator say so, so "
+                    "there is deliberately no TTL.")
+    prometheus_query_plan_cache_semantic_enabled: bool = Field(
+        default=True,
+        description="Allow a DIFFERENTLY WORDED question to reuse a Prometheus plan. Deterministic "
+                    "rule-based matching (the OpenSearch result cache's matcher), not embeddings: the "
+                    "two questions must agree in operation, entities, concepts, literals, time window "
+                    "and every leftover word, and the catalog must still point the new wording at the "
+                    "plan's metrics and reference. False = identical wording only. Separate from "
+                    "OPENSEARCH_RESULT_CACHE_SEMANTIC_ENABLED.")
+    prometheus_query_plan_cache_aliases: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description="Operator-declared synonyms per exporter family (the directory name under "
+                    "skills/references, e.g. \"node-exporter\"), e.g. "
+                    "{\"node-exporter\": {\"usage\": \"utilization\"}} to assert that for that exporter "
+                    "'usage' and 'utilization' mean the same thing. Empty by default: no equivalence is "
+                    "assumed that was not declared. Applied only to plans of that exporter. Separate from "
+                    "OPENSEARCH_RESULT_CACHE_ALIASES (which are keyed by OpenSearch index family).")
+
     prometheus_timeout_seconds: float = Field(default=15.0)
     opensearch_timeout_seconds: float = Field(default=15.0)
 
@@ -399,7 +435,7 @@ class Settings(BaseSettings):
                     "request.",
     )
 
-    @field_validator("opensearch_result_cache_aliases")
+    @field_validator("opensearch_result_cache_aliases", "prometheus_query_plan_cache_aliases")
     @classmethod
     def _check_result_cache_aliases(cls, value: dict) -> dict:
         for pattern_id, words in value.items():

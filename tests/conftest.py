@@ -57,15 +57,18 @@ def _reset_process_wide_caches():
     caches are process-wide by design (that is the point of a cache); tests must not
     see each other's entries."""
     from app import label_discovery, skill_index
+    from app import prometheus_plan_cache
     from app.opensearch_catalog import runtime as os_runtime
     label_discovery.clear_cache()
     label_discovery.configure(ttl_seconds=300.0, max_workers=8)
     with skill_index._text_cache_lock:
         skill_index._text_cache.clear()
     os_runtime.reset()
+    prometheus_plan_cache.reset()
     yield
     label_discovery.clear_cache()
     os_runtime.reset()
+    prometheus_plan_cache.reset()
 
 
 # ---- OpenSearch helpers (synthetic mapping fixtures; see tests/fixtures/opensearch/README.md) ----
