@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     vertex_project: str | None = Field(default=None, description="GCP project for Vertex AI (ADC auth).")
     vertex_location: str | None = Field(default=None, description="Vertex AI location; 'global' if unset.")
     vertex_api_key: str | None = Field(default=None, description="Vertex AI express-mode API key.")
-    gemini_model: str = Field(default="gemini-3.5-flash-lite")
+    gemini_model: str = Field(default="gemini-3.7-flash")
 
     # --- Skill package ---
     skills_root: Path = Field(default=Path("skills"),

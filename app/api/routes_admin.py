@@ -17,6 +17,7 @@ from sqlalchemy.orm import joinedload
 
 from app.auth.audit import AuditEvent, record_denial, record_event
 from app.auth.dependencies import require_admin_principal
+from app.auth.policy import VALID_ROLES, VALID_STATUSES
 from app.auth.principal import Principal
 from app.catalog.runtime import reload_structured_catalog
 from app.config import get_settings
@@ -376,14 +377,14 @@ async def update_user_access(
     principal: Principal = Depends(require_admin_principal),
 ) -> dict[str, Any]:
     """Update user role, status, and scopes with strict administrative guardrails (Section 5.3 & 5.4)."""
-    valid_roles = {"admin", "maintainer", "operator", "observer"}
+    valid_roles = set(VALID_ROLES)
     if update.role is not None and update.role not in valid_roles:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid role. Must be one of: {sorted(valid_roles)}",
         )
 
-    valid_statuses = {"active", "pending", "deactivated"}
+    valid_statuses = set(VALID_STATUSES)
     if update.status is not None and update.status not in valid_statuses:
         raise HTTPException(
             status_code=400,

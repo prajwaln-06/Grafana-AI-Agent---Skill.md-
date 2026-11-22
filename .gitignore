@@ -4,10 +4,14 @@
 # (.env.example, .env.test.example, grafana_ai/.env.example) are tracked.
 #
 # The pattern ".env" has no slash in it, so it already matches at every
-# directory level (ui/.env, grafana_ai/.env, ...). The explicit entries below
-# name the other local override spellings. Note that ".env.*" is deliberately
-# NOT used: it would also match the tracked .env.example templates.
+# directory level (ui/.env, grafana_ai/.env, ...). ".env.*" catches every
+# other local override spelling (.env.local, .env.test, .env.staging, ...) at
+# every level too; the "!" lines re-include the tracked templates, which are
+# the only ".env.*" files that belong in version control.
 .env
+.env.*
+!.env.example
+!.env.*.example
 .env.local
 .env.*.local
 .env.test
@@ -61,8 +65,21 @@ __pypackages__/
 pip-wheel-metadata/
 build/
 dist/
+*.whl
+*.egg
+.eggs/
 *.pid
 *.pid.lock
+
+# --- Command line client (agent-cli) ---------------------------------------
+# `pip install -e .` / `pip wheel .` regenerates the packaging metadata of
+# the `agent-cli` package in the repository root.
+agent_cli.egg-info/
+cli/__pycache__/
+
+# --- Local tooling state ---------------------------------------------------
+# Editor / agent session state, never part of the project.
+.claude/
 
 # --- Node / frontend --------------------------------------------------------
 node_modules/
@@ -84,17 +101,31 @@ pnpm-debug.log*
 app_data/
 .adk/
 app/.adk/
+# The ADK web server runs with agents_dir="." and stores per-agent session,
+# artifact and memory state in "<agent>/.adk/" -- match that at any depth.
+*/.adk/
 data/
 .cache/
 .ipynb_checkpoints/
 
 # Local SQLite databases and their sidecar files. The tracked provisioning
 # data (grafana/dashboards/*.json, dataset/*.csv) is deliberately not matched.
+#
+# "*.db" covers the RBAC User & Role Store in every location it can end up:
+# the app_data/ fallback (sqlite:///./app_data/rbac.db), a DATABASE_URL that
+# points somewhere else in the tree, and the per-agent ADK session store.
+*.db
 *.sqlite
 *.sqlite3
 *.db-journal
 *.db-wal
 *.db-shm
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
 
 # --- Generated audit exports and test output --------------------------------
 audit_export*

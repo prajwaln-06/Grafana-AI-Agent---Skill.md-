@@ -4,6 +4,12 @@ An intelligent, production-ready AI assistant that translates natural language i
 
 Built on **Google ADK**, **FastMCP (Model Context Protocol)**, **FastAPI**, **React 18 + Vite**, and the **SKILL.md v1.4 Observability Specification**.
 
+Ships with **role-based access control** (OIDC identity → User & Role Store → server-side Policy Module → append-only audit log) and the **`agent-cli`** host-side administration client for adding users.
+
+> **Looking for the admin instructions?** Jump to
+> **[Adding a New User (Administrators)](#adding-a-new-user-administrators)**
+> and **[The `agent-cli` Command Line Client](#the-agent-cli-command-line-client)**.
+
 ---
 
 ## ⚡ Quick Start (1-Command Run)
@@ -45,6 +51,14 @@ OpenSearch. To stop the stack again: `docker compose down`.
 > alternative to `./start.sh`. It uses host networking so the `localhost`
 > URLs in `.env` keep working, and listens on host port `8000` — while the
 > local backend from `./start.sh` uses `8008`. Run one or the other, not both.
+
+### 4. (Optional) Install the `agent-cli` Administration Client
+```bash
+pip install -e .
+agent-cli --help
+```
+* The CLI adds accounts to the same User & Role Store the service uses — see
+  **[The `agent-cli` Command Line Client](#the-agent-cli-command-line-client)**.
 
 ### 🛑 To Stop Everything
 ```bash
@@ -131,11 +145,21 @@ npm run dev
 
 ## 🧪 Testing & Verification
 
-### Run Backend Unit Tests (205 Tests)
+### Run Backend Unit Tests
 ```bash
 pytest tests/
 ```
-* All 205 tests are deterministic and run in under 3 seconds with zero external dependencies.
+* The suite is deterministic and has no external dependencies. The current
+  run is **1015 passed, 3 skipped, 6 failed** — the six failures are all in
+  `tests/test_concept_catalog.py` and are pre-existing (dashboard concept
+  mapping), unrelated to the RBAC work.
+
+### Test the CLI
+```bash
+pytest tests/test_cli_users_add.py
+```
+* Covers the argument validation, the duplicate check, the audit records, the
+  `authz_version` bump and the administrative guardrails.
 
 ### Build Frontend Production Bundle
 ```bash
@@ -151,13 +175,29 @@ cd ui && npm run build
 ├── start.sh                 # 1-click startup script (Backend + Frontend)
 ├── stop.sh                  # 1-click stop script
 ├── run_server.py            # Main entrypoint launching the unified API Gateway
+├── pyproject.toml           # Package definition of the `agent-cli` console script
 ├── .env.example             # Complete environment variables template
 ├── app/
 │   ├── api/
 │   │   ├── main.py          # FastAPI application & router registry
 │   │   ├── routes_chat.py   # Unified chat gateway & multi-turn coordinator
 │   │   ├── routes_query.py  # Telemetry query endpoint (/api/v1/query)
-│   │   └── routes_proposals.py # Dashboard proposal lifecycle
+│   │   ├── routes_proposals.py # Dashboard proposal lifecycle
+│   │   ├── routes_admin.py  # Administrative endpoints (users, scopes, audit log)
+│   │   └── routes_auth.py   # OIDC login, callback, whoami, logout
+│   ├── auth/
+│   │   ├── policy.py        # Central Policy Module: roles, scopes, impact classes
+│   │   ├── principal.py     # The verified identity (issuer, subject, role, scopes)
+│   │   ├── dependencies.py  # Session boundary + require_principal / require_admin_principal
+│   │   ├── resource_scope.py# Dashboard / folder scope enforcement
+│   │   ├── environment.py   # Environment scope resolution & catalogue
+│   │   └── audit.py         # Audit event vocabulary & recorder
+│   ├── storage/
+│   │   ├── database.py      # Engine & session factory for the User & Role Store
+│   │   ├── models.py        # users / user_scopes / audit_log / proposals tables
+│   │   ├── user_store.py    # User & Role Store repository + admin guardrails
+│   │   ├── audit_store.py   # Append-only audit log
+│   │   └── seed.py          # Idempotent demo data seeding
 │   ├── pipeline.py          # Router -> Generator -> Validator -> Executor pipeline
 │   ├── label_discovery.py   # Live Prometheus runtime label harvester
 │   ├── validator.py         # Deterministic schema & PromQL validator
@@ -165,6 +205,9 @@ cd ui && npm run build
 │   ├── catalog/             # Structured Prometheus metric catalog (catalog.json + retrieval/runtime)
 │   ├── executor.py          # Prometheus / Loki / OpenSearch execution engine
 │   └── grafana_tools/       # FastMCP Grafana dashboard authoring & compilation
+├── cli/                     # `agent-cli` — host-side administration client
+│   ├── main.py              # argparse front end (admin -> users -> add)
+│   └── users.py             # Validation + the add_user() business operation
 ├── skills/
 │   ├── SKILL.md             # Observability Query Builder specification (v1.4)
 │   └── references/          # Domain reference guides (Node Exporter, DCGM, PromQL)
@@ -175,6 +218,7 @@ cd ui && npm run build
     │   └── components/
     │       ├── AdkAssistantTab.tsx   # Conversational chat UI & metrics rail
     │       ├── ProposalCard.tsx      # Interactive Grafana proposal card
+    │       ├── UserManagementModal.tsx # Admin UI: users, roles, scopes, pending deletions
     │       └── TimeSeriesChart.tsx   # Recharts visualization engine (Line, Gauge, Bar)
     └── package.json
 ```
@@ -189,7 +233,7 @@ cd ui && npm run build
 | `GEMINI_API_KEY` | *(Required for `gemini_api`)* | Gemini Developer API key; never sent to Vertex AI |
 | `VERTEX_PROJECT` / `VERTEX_LOCATION` | *(none)* / `global` | Vertex AI project (ADC auth); only with `LLM_PROVIDER=vertex` |
 | `VERTEX_API_KEY` | *(none)* | Vertex express-mode key (alternative to `VERTEX_PROJECT`) |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Model used for Router and Generator passes |
+| `GEMINI_MODEL` | `gemini-3.7-flash` | Model used for Router and Generator passes (and for the ADK agent — both paths use the same setting) |
 | `PROMETHEUS_URL` | `http://localhost:9090` | Prometheus HTTP endpoint |
 | `LOKI_URL` | `http://localhost:3100` | Loki HTTP endpoint |
 | `OPENSEARCH_URL` | `http://localhost:9200` | OpenSearch REST endpoint (HTTP, not the legacy transport port) |
@@ -216,11 +260,8 @@ cd ui && npm run build
 | `AUTHENTIK_SESSION_COOKIE_SECURE` | `false` | `Secure` flag of the session cookie (set to `true` behind HTTPS) |
 | `AUTHENTIK_ENROLLMENT_FLOW` | `default-enrollment-flow` | Slug of the Authentik **enrollment** flow the *Create account* link opens |
 | `AUTHENTIK_PASSWORD_CHANGE_FLOW` | `default-password-change` | Slug of the Authentik flow the *Change password* action opens |
-
-> **Known issue (deferred):** model-name defaults are inconsistent. `Settings.gemini_model` defaults to
-> `gemini-3.5-flash-lite`, `.env.example` sets `GEMINI_MODEL=gemini-3.7-flash`, and the ADK agent
-> (`app/adk_agent.py`) silently remaps `gemini-3.7-flash` to `gemini-2.5-flash`, so the ADK path and the
-> direct Router/Generator client can run different models. To be resolved separately.
+| `DATABASE_URL` | `postgresql+psycopg://postgres:postgres@localhost:5432/grafana_ai` | Connection string of the **User & Role Store** (RBAC). Falls back to local SQLite at `sqlite:///./app_data/rbac.db` when unset or unreachable |
+| `DATABASE_AUTO_SEED` | `true` | Seed the demo accounts, proposals and audit records into an empty User & Role Store. Idempotent and never overwrites an existing record |
 
 ---
 
@@ -305,17 +346,19 @@ What the backend does with the provider's answer:
 | `/` and the UI assets | Public — so that the branded login screen can render for a visitor without a session |
 | `/api/auth/whoami`, `/api/auth/logout` | Require an authenticated identity |
 | `/api/v1/capabilities` | Requires an authenticated identity |
-| `/api/chat`, `/api/query`, `/api/v1/query`, `/api/catalog`, `/api/labels`, `/api/search`, `/api/proposals*`, `/api/conversations*`, `/api/alerts*`, `/api/alert-proposals*`, `/api/v1/alerts/confirm`, `/api/adk/*`, `/api/v1/admin/*` | Requires an authenticated identity |
+| `/api/chat`, `/api/query`, `/api/v1/query`, `/api/catalog`, `/api/labels`, `/api/search`, `/api/proposals*`, `/api/conversations*`, `/api/alerts*`, `/api/alert-proposals*`, `/api/v1/alerts/confirm`, `/api/adk/*` | Requires an authenticated identity |
+| `/api/v1/admin/*` | Requires an authenticated **administrator** (role `admin`) — see [Authorization (RBAC)](#authorization-rbac) |
 
 An unauthenticated API call is answered with `401`, never with data. No
 identity header sent by the browser is ever believed.
 
 The identity is published on `request.state.principal` (and returned by
-`/api/auth/whoami`) as the stable `(issuer, subject)` pair, so a later
-authorization layer can build on it without changing authentication.
-Authentik's group and entitlement claims are **not** read by the
-application: Authentik verifies identity, it does not hand the application
-its privileges.
+`/api/auth/whoami`) as the stable `(issuer, subject)` pair, and the
+authorization layer described in [Authorization (RBAC)](#authorization-rbac)
+builds on it without changing authentication. Authentik's group and
+entitlement claims are **not** read by the application: Authentik verifies
+identity, it does not hand the application its privileges — the role, the
+status and the scopes come from the application's own User & Role Store.
 
 ### Signing in, signing up and signing out
 
@@ -362,9 +405,370 @@ provider is being set up. It is a development convenience, **not** a
 security control: the backend logs a warning at startup, and the setting
 must be flipped to `true` before the service is reachable by anyone else.
 
-### Authorization (RBAC) is out of scope
+### Authorization (RBAC)
 
-A successful login establishes *identity only*. It does not enforce
-least-privilege authorization: every authenticated user currently has the
-same access to every endpoint. Roles, permissions and the authorization UI
-are a separate piece of work.
+A successful login establishes *identity only*. **Authorization is a separate,
+server-side layer** built on top of it: the **User & Role Store**, the
+**Central Policy Module** and the **Audit Log**.
+
+The design is specified in **[RBAC_Grafana_ADK_Final (1).md](RBAC_Grafana_ADK_Final%20(1).md)**;
+the implementation lives in `app/auth/` (policy, scopes, environments) and
+`app/storage/` (the store itself).
+
+```
+Authentik  ──identity (issuer, subject)──▶  User & Role Store
+                                                 │  role, status, scopes
+                                                 ▼
+                                          Principal  ──▶  Policy Module
+                                                                │
+                                            allow / deny ──────┴──▶  Audit Log
+```
+
+#### The User & Role Store
+
+The store is a relational table set (PostgreSQL in the compose stack, SQLite
+at `app_data/rbac.db` as a fallback) holding three things:
+
+| Table | Holds |
+|---|---|
+| `users` | `user_id`, `issuer`, `subject`, `email`, `username`, `display_name`, `status`, `role`, `authz_version`, `created_at`, `last_seen_at` |
+| `user_scopes` | The four scope lists per user: `allowed_folder_uids`, `allowed_dashboard_uids`, `denied_dashboard_uids`, `allowed_environments`, plus `role_grants` |
+| `proposals` / `approvals` | Dashboard and alert proposals, their impact class, their state and the approval tokens |
+| `audit_logs` | Append-only record of every identity, role, scope and proposal event |
+
+The `(issuer, subject)` pair is the stable identity key — the same key Authentik
+asserts. The email address and the login name are **profile fields only**;
+they never identify anybody.
+
+#### Roles
+
+Four application roles, defined once in `app/auth/policy.py` (`VALID_ROLES`):
+
+| Role | Dashboards & panels | Alert rules | PromQL / queries | Administration |
+|---|---|---|---|---|
+| **admin** | create, edit, approve, execute | propose, approve, execute | allowed (bounded) | full — role, status and scope management |
+| **maintainer** | create, edit, approve, execute | — (denied) | allowed | — |
+| **operator** | — (denied) | propose, approve, execute | allowed | — |
+| **observer** | read-only (dashboards & catalog) | — (denied) | **denied** | — |
+
+The boundaries are enforced in `app/auth/policy.py`, not in the UI:
+
+* `authorize_dashboard_read` / `authorize_dashboard_propose` / `authorize_dashboard_approve` / `authorize_dashboard_execute`
+* `authorize_alert_propose` / `authorize_alert_approve` / `authorize_alert_execute`
+* `authorize_promql` — observers may not execute Prometheus queries at all
+* `authorize_proposal_rejection`, `authorize_alert_rejection`
+
+Every decision returns a `PolicyDecision` with an `allowed` flag, a
+human-readable `reason`, an `impact_class` and a `requires_second_approver`
+flag. A denial is a `403` with the reason attached.
+
+#### Account statuses
+
+Three statuses (`VALID_STATUSES`): `active`, `pending`, `deactivated`.
+
+* An **unknown identity that signs in for the first time** is auto-registered
+  as `pending`, with **no role and no scopes** (`UserStore.create_pending_user`,
+  `app/auth/dependencies.py`). It can authenticate, but every protected
+  endpoint answers `403 — Account pending activation by an administrator.`
+  until an administrator activates it.
+* `deactivated` accounts are refused the same way.
+* A `pending` account may also be **linked** to a real identity on first
+  sign-in: if a pre-seeded record carries the placeholder subject prefix
+  `ak_sub_` and the sign-in matches on email or username, the record is
+  re-keyed to the real `(issuer, subject)` instead of creating a duplicate.
+
+#### Resource scope
+
+Every account carries four scope lists, evaluated by `is_dashboard_in_scope`
+(`app/auth/policy.py`) with this precedence:
+
+1. **Explicit deny** — a UID in `denied_dashboard_uids` is refused, and the
+   deny wins over every allowance that the scope evaluation would otherwise
+   grant (including for an administrator, on the read path).
+2. **Role grants** — `role_grants` tie a *role* to specific folders and
+   dashboards, so one account can be a maintainer in one folder and an
+   observer in another. `Principal.get_role_for_folder()` /
+   `get_role_for_dashboard()` resolve the effective role per resource.
+3. **Allowed dashboards** — `allowed_dashboard_uids` grants specific dashboards.
+4. **Allowed folders** — `allowed_folder_uids` grants a whole folder; `*`
+   grants every folder.
+
+Anything unknown **fails closed**: a missing dashboard UID or folder UID never
+grants access on its own.
+
+An **administrator** keeps global access. The folder and dashboard scope
+checks are not applied to an administrator's mutations
+(`authorize_dashboard_propose` / `authorize_dashboard_execute`), and the
+environment check is bypassed for the admin role.
+
+The **environment** is the fourth scope dimension
+(`allowed_environments`, `app/auth/environment.py`). A requested environment
+is validated against the deployment catalogue (server-side configuration plus
+the environments found in the store) **and** against the principal's own
+permitted list. Administrators bypass the environment check. The environment
+is resolved *before* Prometheus or Grafana is touched, so a rejected operation
+never reaches the query executor or a Grafana write.
+
+#### Separation of duties and impact classification
+
+A proposal's impact class is **recomputed server-side from its own operation**
+(`classify_impact`), never trusted from a client-supplied field. A payload
+that downgrades a destructive operation still gets the destructive
+classification.
+
+* `routine_edit` — one approver is enough.
+* `destructive_delete` — a **second, independent approver** is required: a
+  proposer may never approve their own destructive change, and never reject
+  their own proposal either.
+
+`revalidate_proposal_for_execution()` re-checks the approval state, the impact
+classification, the second-approver requirement and the approver's active
+status **immediately before execution** — an approval granted earlier is
+never trusted on its own.
+
+#### The Audit Log
+
+Every identity event, role change, status change, scope change, proposal
+transition and administrative refusal is recorded in the append-only
+`audit_logs` table. The change and its audit record are written **in the same
+transaction**: if the audit records cannot be written, the change does not
+happen. Sensitive values are redacted before they are stored.
+
+Recorded event types include `first_sign_in`, `user_role_changed`,
+`user_status_changed`, `user_scope_changed`, `user_access_modified`,
+`proposal_created`, `proposal_modified`, `proposal_approved`,
+`proposal_rejected`, `proposal_executed`, `proposal_execution_failed`,
+`proposal_access_denied`, `alert_proposed`, `alert_approved`,
+`alert_rejected`, `alert_executed`, `alert_execution_failed`,
+`dashboard_created`, `dashboard_updated`, `dashboard_deleted`,
+`panel_created`, `panel_updated`, `panel_deleted`,
+`dashboard_access_denied`, `scope_violation`, `authentication_failed`,
+`authentication_succeeded`, `logout`, `admin_users_listed`,
+`admin_folders_listed`, `admin_access_denied`, `admin_audit_log_viewed`,
+`admin_seed_audit_viewed`, `admin_skill_reloaded` and
+`admin_skill_reload_failed`.
+
+#### Administrative endpoints
+
+All of these require the **admin** role, checked server-side by the
+`require_admin_principal` dependency (`app/auth/dependencies.py`) — hiding a
+button in the UI is not a control.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/admin/users` | List every account with its role, status, `authz_version` and scopes |
+| `GET /api/v1/admin/folders` | The Grafana folder inventory, used to assign folder scopes |
+| `PUT /api/v1/admin/users/{user_id}/access` | Set a user's role, status and scopes |
+| `GET /api/v1/admin/audit-log` | Read the audit log |
+| `GET /api/v1/admin/seed-audit` | Report demo accounts whose Grafana UID references are stale (it only *reports*; it never repairs a reference) |
+| `GET /api/v1/admin/pending-deletions` | List destructive proposals awaiting an administrator decision |
+| `POST /api/v1/admin/pending-deletions/{proposal_id}/approve` \| `/reject` | Approve or reject a destructive proposal |
+| `POST /api/v1/admin/reload-skill` | Re-parse `SKILL.md` without restarting the service |
+
+The `PUT .../access` endpoint applies the same guardrails as the CLI:
+
+* **No self-privilege change** — an administrator cannot modify their own
+  role, status or scopes.
+* **Last-administrator protection** — the last active administrator cannot
+  be demoted or deactivated.
+* Every change bumps the target's `authz_version` counter, which is how an
+  open session learns that its permissions changed.
+
+#### Development mode
+
+With `AUTHENTIK_ENABLED=false` the API is completely open: no identity is
+established and every caller is granted the unrestricted development
+principal. This is described under
+[Development mode](#development-mode) above — it is a local convenience,
+never a security control.
+
+---
+
+## Adding a New User (Administrators)
+
+There are **two** ways to give a person access, and they write to the same
+store through the same application logic.
+
+### The identity comes from Authentik first
+
+The application never creates passwords. A person becomes a *known* identity
+by signing in through Authentik's own **enrollment flow** — the *Create
+account* link on the login screen — which asks for the email address and the
+password **on the Authentik server**. The application only ever sees the
+resulting `(issuer, subject)` pair.
+
+The first time that identity signs in, it is auto-registered as **`pending`**
+with no role and no scopes. Until an administrator activates it, every
+protected endpoint answers `403 — Account pending activation by an
+administrator.`
+
+### Option 1 — the Admin UI (interactive)
+
+1. Sign in as an **administrator** (the profile menu shows the admin badge).
+2. Open the profile menu and click **🛡️ Admin Console & Users** (the *User
+   Management* modal). A **🗑️ Pending Deletions** button appears next to it
+   when destructive proposals are waiting.
+3. Find the account in the list — a `pending` account is shown with a
+   *pending* badge and no role.
+4. Set the **role** and the **status** (`active`) and edit the **scopes**:
+   the allowed folders (picked from the live Grafana folder list), the
+   allowed dashboard UIDs, the permitted environments, and the per-folder
+   **role grants**. (The UI preserves the existing *denied* dashboard list; it
+   does not edit it.)
+5. Save. The change is audited against you and the account's
+   `authz_version` is bumped immediately.
+
+The same modal has a **Pending Deletions** tab where an administrator approves
+or rejects destructive proposals.
+
+### Option 2 — the `agent-cli` (scriptable)
+
+`agent-cli admin users add` is the **host-side management command** for the
+same store. It runs on the host, against the same database the service uses,
+and applies the application's own user-creation and user-management logic — so
+the audit log, the `authz_version` counter and the administrative guardrails
+are exactly the ones the service enforces.
+
+#### Installation
+
+The CLI ships as the `agent-cli` console script of this repo:
+
+```bash
+# from the repository root, inside the project's virtual environment
+pip install -e .
+agent-cli --help
+```
+
+It reads the same `.env` as the service, so `DATABASE_URL` must point at the
+same User & Role Store. Because the `.env` path is relative, run the command
+**from the repository root**. To run it against another database, override
+the variable for the single invocation:
+
+```bash
+DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/grafana_ai" \
+  agent-cli admin users add ...
+```
+
+#### Usage
+
+```bash
+agent-cli admin users add --subject <subject> [options]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--subject` | **Required.** The Authentik subject of the account (`sub` from the ID token). Must not contain whitespace |
+| `--issuer` | The Authentik issuer. Defaults to the configured one (`http://localhost:9000/application/o/grafana-ai-agent/`) |
+| `--username` | Login name — a profile field, it never identifies anybody |
+| `--name` | Display name — a profile field |
+| `--email` | Email address — informational only |
+| `--admin` | The administrator the change is **audited against**. Required whenever a role, a status other than `pending` or a scope is assigned; the referenced account must exist and be an *active administrator* |
+| `--role` | One of `admin`, `maintainer`, `operator`, `observer`. Assigning a role activates the account |
+| `--status` | One of `active`, `pending`, `deactivated`. Default: `pending` |
+| `--allow-folder` | A Grafana folder UID the account may use. Repeatable; one UID per flag |
+| `--allow-dashboard` | A Grafana dashboard UID the account may use. Repeatable |
+| `--deny-dashboard` | A Grafana dashboard UID the account may **never** use. Repeatable |
+| `--allow-env` | An environment name the account may query. Repeatable |
+| `--json` | Print the created account as JSON |
+
+`--allow-folder`, `--allow-dashboard` and `--allow-env` also accept the
+wildcard `*`.
+
+#### Examples
+
+```bash
+# 1. Create a pending account (no role, no scopes) — the account can sign in
+#    but has no privileges until an administrator activates it.
+agent-cli admin users add --subject 6f1c9b04-2a7e-4c31-9d55-1b0f8e7a3d21 \
+    --username morgan.lee --name "Morgan Lee (New Hire)" --email newhire@example.com
+
+# 2. Create an active maintainer with a folder scope, audited against an
+#    administrator.
+agent-cli admin users add --subject b3d5e8f2-77c4-4a19-b0e6-9c2a5d4f6e83 \
+    --username alex.rivera --name "Alex Rivera (Maintainer)" --email maintainer@example.com \
+    --admin usr_admin_01 --role maintainer --allow-folder fld-payments \
+    --allow-dashboard dash-checkout-slo --allow-env staging
+
+# 3. Create an operator for the alerting folder only.
+agent-cli admin users add --subject c9a1d4b7-3e58-4f26-8c0d-7b2e9a5f1c64 \
+    --username sam.chen --name "Sam Chen (On-Call SRE)" --email operator@example.com \
+    --admin usr_admin_01 --role operator --allow-folder fld-alerts \
+    --allow-env staging --allow-env production
+
+# 4. Machine-readable output for a provisioning script.
+agent-cli admin users add --subject d5e7f9a1-4b6c-4d38-9e2f-8c3a1b7d5e90 \
+    --username alice --admin usr_admin_01 --role observer --json
+```
+
+Example output:
+
+```text
+[200 OK] Created user usr_342d9df539e0 status=active role=maintainer authz_version=2
+        Folders:       fld-payments
+        Dashboards:    dash-checkout-slo
+        Denied:        -
+        Environments:  staging
+```
+
+#### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | The account was created |
+| `1` | Invalid input or a refused administrative change (e.g. `--admin` missing, the administrator is not active, a self-privilege change, the last active administrator) |
+| `3` | An account with the same `(issuer, subject)` already exists |
+
+#### Notes and limitations
+
+* **The subject is the Authentik `sub`** — the `sub` claim of the person's ID
+  token, a UUID in a stock Authentik deployment. The subject of a *pre-seeded*
+  demo record is the placeholder `ak_sub_…`; when such a record signs in for
+  the first time it is linked to the real identity by email or username.
+  Creating a *new* record with a placeholder subject gives you a second,
+  separate account.
+* **How to find the subject.** Sign the person in once and read
+  `GET /api/auth/whoami` — it reports the `subject` of the current session.
+  Before that, an administrator can read it from the Authentik admin
+  interface.
+* **Scope flags are one value per flag.** `--allow-folder a,b` is rejected —
+  repeat the flag instead.
+* **The CLI does not create Authentik accounts and does not set passwords.**
+  The person still has to sign in through Authentik once.
+* The CLI cannot change an *existing* account; use the Admin UI
+  (`PUT /api/v1/admin/users/{user_id}/access`) for role, status and scope
+  changes on accounts that are already there.
+
+### Then verify the new user
+
+1. The person signs in at `http://localhost:5173` with **Create account** (if
+   they do not have an Authentik account yet) and then **Login with Authentik**.
+2. The first sign-in creates the `pending` account (or links the one you
+   created with the CLI, if the identity matches).
+3. `GET /api/auth/whoami` reports the resolved `role`, `status` and `scopes`
+   for that session.
+4. An administrator can inspect the change in `GET /api/v1/admin/audit-log`.
+
+---
+
+## The `agent-cli` Command Line Client
+
+The CLI is deliberately **not** a subcommand of the user-facing API client. It
+is a host-side management tool that talks to the User & Role Store directly:
+
+```
+cli/
+├── __main__.py     # python -m cli
+├── main.py         # argparse front end -> the `agent-cli` console script
+└── users.py        # validation + the add_user() business operation
+```
+
+* `cli/main.py` builds the argument parser (`admin` → `users` → `add`) and
+  maps the outcome onto the exit codes above.
+* `cli/users.py` validates every argument, then delegates to
+  `UserStore.create_pending_user()` and `UserStore.update_user_access()` —
+  the very same store methods the Admin UI endpoint calls. The CLI contains
+  no privileged path of its own: it cannot bypass the guardrails, because it
+  does not implement them.
+* The command never touches Grafana directly. Folder and dashboard UIDs are
+  validated for syntax; whether they exist in Grafana is checked by the Admin
+  UI's folder picker and reported by `GET /api/v1/admin/seed-audit`.

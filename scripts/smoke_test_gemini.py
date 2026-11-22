@@ -47,7 +47,7 @@ def main() -> int:
     # June 1, 2026 -- this script would 404 immediately if GEMINI_MODEL
     # wasn't set in the environment, with no clue that the *default*
     # itself was the problem. Keep these two defaults in sync.
-    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.7-flash")
     if not api_key or api_key.startswith("replace-with"):
         print("GEMINI_API_KEY is not set (or still the .env.example placeholder). "
               "Set it in your environment or .env file.")

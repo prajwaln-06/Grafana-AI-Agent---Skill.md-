@@ -23,6 +23,12 @@ from app.auth.principal import Principal
 
 logger = logging.getLogger(__name__)
 
+#: The application roles the Policy Module recognises (section 7).
+VALID_ROLES: tuple[str, ...] = ("admin", "maintainer", "operator", "observer")
+
+#: The account statuses the User & Role Store recognises (section 5.2).
+VALID_STATUSES: tuple[str, ...] = ("active", "pending", "deactivated")
+
 
 @dataclass(frozen=True)
 class PolicyDecision:

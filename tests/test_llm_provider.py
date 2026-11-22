@@ -138,6 +138,6 @@ def test_vertex_never_receives_ai_studio_key(polluted_env):
 def test_adk_gemini_model_gets_same_kwargs(polluted_env):
     from google.adk.models.google_llm import Gemini
     kw = build_client_kwargs(_s())
-    m = Gemini(model="gemini-2.5-flash", client_kwargs=kw)
+    m = Gemini(model="gemini-3.7-flash", client_kwargs=kw)
     assert m.client_kwargs == kw
     assert m.api_client.vertexai is False
