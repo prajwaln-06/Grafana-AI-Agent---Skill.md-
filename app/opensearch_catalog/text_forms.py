@@ -39,6 +39,7 @@ Rules (kept deliberately simple and predictable):
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from functools import lru_cache
 from itertools import product
 
@@ -49,6 +50,12 @@ _MIN_WORD_LEN = 4
 _VOWELS = "aeiou"
 _WORD_RE = re.compile(r"^[A-Za-z]+$")
 _SPLIT_RE = re.compile(r"(\s+)")
+_SEARCH_SPLIT_RE = re.compile(r"[\s,;!?()\[\]{}\"“”]+")
+_SEARCH_STOP_WORDS = frozenset({
+    "a", "am", "an", "and", "are", "as", "at", "be", "been", "being", "by", "do", "does",
+    "for", "from", "had", "has", "have", "in", "is", "it", "of", "on", "or", "that", "the",
+    "these", "this", "those", "to", "was", "were", "which", "who", "with",
+})
 
 # Words that look inflected but are not (or whose variants would only add noise).
 _STOP = frozenset({
@@ -216,24 +223,49 @@ def is_variant_group(texts: list[str], cap: int = DEFAULT_MAX_VARIANTS) -> bool:
     return any(phrase_variants(t, cap) == target for t in texts)
 
 
-def text_search_phrases(node) -> list[str]:
-    """Every match/match_phrase search text in a DSL body (for user-facing notes)."""
-    found: list[str] = []
+def threshold_keywords(text: str) -> tuple[str, ...]:
+    """Clean an unordered search before OpenSearch applies its field analyzer."""
+    words: dict[str, str] = {}
+    for part in _SEARCH_SPLIT_RE.split(text):
+        word = part.strip(".'‘’")
+        if word.endswith(":") and not word.endswith("::"):
+            word = word.rstrip(".:'‘’")
+        key = word.casefold()
+        if key in _SEARCH_STOP_WORDS or not any(c.isalnum() for c in word):
+            continue
+        words.setdefault(key, word)
+    return tuple(words.values())
 
-    def walk(n):
-        if isinstance(n, dict):
-            for kind in ("match", "match_phrase"):
-                leaf = n.get(kind)
-                if isinstance(leaf, dict) and len(leaf) == 1:
-                    (val,) = leaf.values()
-                    t = val.get("query") if isinstance(val, dict) else val
-                    if isinstance(t, str) and t not in found:
-                        found.append(t)
-            for v in n.values():
-                walk(v)
-        elif isinstance(n, list):
-            for v in n:
-                walk(v)
 
-    walk(node)
-    return found
+def _query_objects(node: object) -> Iterator[dict]:
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _query_objects(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _query_objects(value)
+
+
+def text_searches(node: object) -> Iterator[tuple[str, str, int | None]]:
+    """Yield the operator, search text, and term minimum from each text clause."""
+    for obj in _query_objects(node):
+        for kind in ("match", "match_phrase"):
+            field = obj.get(kind)
+            if isinstance(field, dict) and len(field) == 1:
+                (value,) = field.values()
+                if isinstance(value, str):
+                    yield kind, value, None
+                elif isinstance(value, dict) and isinstance(value.get("query"), str):
+                    yield kind, value["query"], value.get("minimum_should_match")
+
+
+def multi_signal_minima(node: object) -> set[int]:
+    """Boolean minima above one. Variant and severity alternatives typically use one."""
+    minima = set()
+    for obj in _query_objects(node):
+        group = obj.get("bool")
+        minimum = group.get("minimum_should_match") if isinstance(group, dict) else None
+        if type(minimum) is int and minimum > 1:
+            minima.add(minimum)
+    return minima

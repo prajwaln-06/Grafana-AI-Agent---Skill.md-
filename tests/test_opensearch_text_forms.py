@@ -14,7 +14,7 @@ import pytest
 from app import executor, opensearch_client
 from app.opensearch_catalog import canonical, guard
 from app.opensearch_catalog.context import Limits
-from app.opensearch_catalog.text_forms import is_variant_group, phrase_variants, word_forms
+from app.opensearch_catalog.text_forms import is_variant_group, phrase_variants, threshold_keywords, word_forms
 
 W = {"range": {"@timestamp": {"gte": "now-24h", "lte": "now"}}}
 HOST = {"term": {"host.keyword": "leif-login03-bmc"}}
@@ -102,6 +102,82 @@ def test_match_keeps_its_operator_in_every_variant(os_ctx):
     assert check(os_ctx, "ilo_events", copy.deepcopy(r.query)).query == r.query
 
 
+def threshold_rows(text, minimum=2, **options):
+    q = ilo_rows("x")
+    q["query"]["bool"]["filter"][2] = {"match": {"Message": {
+        "query": text, "minimum_should_match": minimum, **options,
+    }}}
+    return q
+
+
+def test_threshold_keywords_drop_standalone_stop_words_and_repetitions():
+    assert threshold_keywords("The, is: NOT the! IPMI, IPMI ::1 x1000c3r1 172.24.0.1 link-is-down fan.:.") == (
+        "NOT", "IPMI", "::1", "x1000c3r1", "172.24.0.1", "link-is-down", "fan",
+    )
+
+
+def test_thresholded_match_cleans_words_and_rechecks_every_variant(os_ctx):
+    q = threshold_rows("The System is Overheated, System.", operator="or")
+    r = check(os_ctx, "ilo_events", q)
+    assert r.ok, r.reason
+    group = r.query["query"]["bool"]["filter"][2]["bool"]
+    assert group["minimum_should_match"] == 1
+    assert [clause["match"]["Message"] for clause in group["should"]] == [
+        {"query": text, "operator": "or", "minimum_should_match": 2} for text in OVERHEAT
+    ]
+    assert any("removed common words" in note for note in r.applied)
+    again = check(os_ctx, "ilo_events", r.query)
+    assert again.ok and again.query == r.query
+
+
+@pytest.mark.parametrize("text,minimum", [("the IS, a!", 1), ("the fan FAN: is", 2), ("fan", 2),
+                                         ("fan IPMI", True), ("fan IPMI", "2"), ("fan IPMI", 2.0),
+                                         ("fan IPMI", 0), ("fan IPMI", 11)])
+def test_invalid_term_minimum_is_rejected(os_ctx, text, minimum):
+    r = check(os_ctx, "ilo_events", threshold_rows(text, minimum))
+    assert not r.ok and r.code == guard.CODE_BAD_VALUE
+
+
+def test_threshold_requires_or_and_leaves_plain_and_phrase_search_intact(os_ctx):
+    invalid = check(os_ctx, "ilo_events", threshold_rows("the fan is down", operator="and"))
+    assert not invalid.ok and invalid.code == guard.CODE_BAD_VALUE
+    phrase = ilo_rows("the fan is off")
+    plain = copy.deepcopy(phrase)
+    plain["query"]["bool"]["filter"][2] = {"match": {"Message": "the fan is off"}}
+    for original in (phrase, plain):
+        r = check(os_ctx, "ilo_events", original)
+        assert r.ok and r.query["query"] == original["query"]
+    phrase["query"]["bool"]["filter"][2]["match_phrase"]["Message"] = {
+        "query": "the fan is off", "minimum_should_match": 2,
+    }
+    assert not check(os_ctx, "ilo_events", phrase).ok
+
+
+def test_threshold_keeps_cleaned_text_when_expansion_exceeds_the_budget(os_ctx):
+    r = check(os_ctx, "ilo_events", threshold_rows("the System is Overheated"), limits=Limits(max_clauses=6))
+    assert r.ok, r.reason
+    assert r.query["query"]["bool"]["filter"][2] == {"match": {"Message": {
+        "query": "System Overheated", "minimum_should_match": 2,
+    }}}
+
+
+@pytest.mark.parametrize("minimum,phrases,accepted", [
+    (0, [], True), (1, [], False), (1, ["IPMI"], True), (2, ["IPMI", "RMCP"], True),
+    (3, ["IPMI", "RMCP"], False), (2, ["IPMI", "IPMI"], False),
+    (2, ["System Overheated", "System Overheating"], False),
+])
+def test_boolean_minimum_is_bounded_by_distinct_explicit_branches(os_ctx, minimum, phrases, accepted):
+    q = {"query": {"bool": {"filter": [W], "minimum_should_match": minimum}}}
+    if phrases:
+        q["query"]["bool"]["should"] = [{"match_phrase": {"Message": phrase}} for phrase in phrases]
+    r = check(os_ctx, "ilo_events", q)
+    assert r.ok is accepted
+    if accepted:
+        assert r.query["query"]["bool"]["minimum_should_match"] == minimum
+    else:
+        assert r.code == guard.CODE_BAD_VALUE
+
+
 def test_phrase_without_variants_is_unchanged(os_ctx):
     r = check(os_ctx, "ilo_events", ilo_rows("IPMI"))
     assert r.ok and r.query["query"]["bool"]["filter"][2] == {"match_phrase": {"Message": "IPMI"}}
@@ -180,3 +256,10 @@ def test_empty_result_without_text_search_has_no_note(settings, os_field_cache, 
     q = {"size": 20, "query": {"bool": {"filter": [W, HOST]}}}
     ex, _ = _run(settings, os_ctx, q, EMPTY)
     assert ex["execution_status"] == "empty_result" and "text_search_note" not in ex["metadata"]
+
+
+def test_empty_threshold_note_describes_the_cleaned_unordered_search(settings, os_field_cache, os_ctx):
+    ex, _ = _run(settings, os_ctx, threshold_rows("the fan is off"), EMPTY)
+    note = ex["metadata"]["text_search_note"]
+    assert "at least 2 analyzed terms from 'fan off'" in note
+    assert "ordered phrase" not in note

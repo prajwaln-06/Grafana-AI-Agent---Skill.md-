@@ -114,6 +114,7 @@ _WINDOW_UNITS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400}
 _INTERVAL_RE = re.compile(r"^([1-9][0-9]*)(s|m|h|d)$")
 _TIMEOUT_RE = re.compile(r"^([1-9][0-9]*)(ms|s)$")
 _AGG_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,40}$")
+_MAX_MINIMUM_SHOULD_MATCH = 10
 
 
 class GuardError(Exception):
@@ -428,8 +429,15 @@ class _Checker:
             out[key] = checked if isinstance(val, list) else checked[0]
         if "minimum_should_match" in body:
             m = body["minimum_should_match"]
-            if isinstance(m, bool) or not isinstance(m, int) or m < 0 or m > 10:
-                _fail(CODE_BAD_VALUE, f"{where}: minimum_should_match must be a small integer")
+            if type(m) is not int or not 0 <= m <= _MAX_MINIMUM_SHOULD_MATCH:
+                _fail(CODE_BAD_VALUE, f"{where}: minimum_should_match must be an integer from 0 to "
+                                      f"{_MAX_MINIMUM_SHOULD_MATCH}")
+            should = out.get("should", [])
+            branches = should if isinstance(should, list) else [should]
+            if m > len(branches):
+                _fail(CODE_BAD_VALUE, f"{where}: minimum_should_match {m} exceeds the {len(branches)} should clauses")
+            if m > 1 and len({json.dumps(branch, sort_keys=True) for branch in branches}) != len(branches):
+                _fail(CODE_BAD_VALUE, f"{where}: use distinct should clauses for minimum_should_match above 1")
             out["minimum_should_match"] = m
         return out
 
@@ -533,7 +541,7 @@ class _Checker:
                   f"{list(self.entry.role_paths('text'))}; use term/terms for exact values")
         text = val
         if isinstance(val, dict):
-            allowed = {"query"} | ({"operator"} if kind == "match" else set())
+            allowed = {"query"} | ({"operator", "minimum_should_match"} if kind == "match" else set())
             if "query" not in val or set(val) - allowed:
                 _fail(CODE_BAD_CLAUSE, f"{where}: only {sorted(allowed)} are allowed")
             if "operator" in val and val["operator"] not in ("and", "or"):
@@ -541,6 +549,22 @@ class _Checker:
             text = val["query"]
         if not isinstance(text, str) or not text.strip() or len(text) > self.limits.max_text_chars:
             _fail(CODE_BAD_VALUE, f"{where}: search text must be 1-{self.limits.max_text_chars} characters")
+        if isinstance(val, dict) and "minimum_should_match" in val:
+            minimum = val["minimum_should_match"]
+            if type(minimum) is not int or not 1 <= minimum <= _MAX_MINIMUM_SHOULD_MATCH:
+                _fail(CODE_BAD_VALUE, f"{where}: match minimum_should_match must be an integer from 1 to "
+                                      f"{_MAX_MINIMUM_SHOULD_MATCH}")
+            if val.get("operator", "or") != "or":
+                _fail(CODE_BAD_VALUE, f"{where}: match minimum_should_match requires operator 'or'")
+            keywords = text_forms.threshold_keywords(text)
+            if len(keywords) < minimum:
+                _fail(CODE_BAD_VALUE, f"{where}: after removing common and repeated words, only {len(keywords)} "
+                                      f"distinct search words remain for minimum_should_match {minimum}")
+            cleaned = " ".join(keywords)
+            if cleaned != text:
+                self.applied.append(f"{where}: removed common words, repeated words, or separators before "
+                                    "applying minimum_should_match")
+                val = {**val, "query": cleaned}
         return {path: val}
 
     # -- word-form tolerance for free-text search (text_forms.py) -------------------------------------------
@@ -561,6 +585,12 @@ class _Checker:
         variants = text_forms.phrase_variants(text)
         if len(variants) < 2:
             return {kind: leaf}
+        if isinstance(val, dict) and "minimum_should_match" in val and any(
+            " ".join(text_forms.threshold_keywords(v)) != v for v in variants
+        ):
+            self.warnings.append(f"{where}: word-form expansion would repeat or remove search words; "
+                                 "the cleaned words and minimum_should_match were kept")
+            return {kind: leaf}
         if (depth > self.limits.max_bool_depth
                 or self.clauses + len(variants) > self.limits.max_clauses
                 or any(len(v) > self.limits.max_text_chars for v in variants)):
@@ -580,7 +610,7 @@ class _Checker:
         validated as an ordinary text clause and the group is kept as is. None
         when `body` is not exactly such a group (it is then an ordinary bool)."""
         if not isinstance(body, dict) or set(body) != {"should", "minimum_should_match"} \
-                or body["minimum_should_match"] != 1 or isinstance(body["minimum_should_match"], bool):
+                or type(body["minimum_should_match"]) is not int or body["minimum_should_match"] != 1:
             return None
         items = body["should"]
         if not isinstance(items, list) or len(items) < 2:
@@ -594,7 +624,12 @@ class _Checker:
                 return None
             (p, v), = leaf.items()
             if isinstance(v, dict):
-                if not all(isinstance(x, str) for x in v.values()):
+                if not isinstance(v.get("query"), str) or not all(
+                    type(value) is int if key == "minimum_should_match" else isinstance(value, str)
+                    for key, value in v.items()
+                ):
+                    return None
+                if "minimum_should_match" in v and " ".join(text_forms.threshold_keywords(v["query"])) != v["query"]:
                     return None
                 shapes.add(tuple(sorted((a, b) for a, b in v.items() if a != "query")))
                 texts.append(v.get("query"))

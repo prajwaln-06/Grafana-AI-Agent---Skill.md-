@@ -177,6 +177,16 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "- Text search: write the user's own words in ONE match/match_phrase; do not guess the tense or plural the "
         "stored message uses and do not list variants yourself. The system also matches the other word forms "
         "(overheated/overheating/overheats/overheat) and records it.",
+        "- For an explicit minimum of named signals in the same document, place a nested bool inside the top-level "
+        "filter, with one should branch per distinct signal and integer minimum_should_match (1 for any of them). "
+        "Keep time, entity, severity, and any mandatory conditions in required filters. Keep whole named phrases "
+        "in match_phrase and structured values in exact filters. A bool with filter or must defaults to zero required "
+        "should branches when the minimum is omitted.",
+        "- For an explicit minimum of unordered message terms, use match on the confirmed text field with "
+        "{\"query\": \"<user's keywords>\", \"operator\": \"or\", \"minimum_should_match\": <integer 1-10>} as the field options. "
+        "The system removes common words such as 'the' and 'is' and collapses repeated words before search. "
+        "Ask for more distinct terms if the search text provides fewer than the requested minimum. Preserve quoted "
+        "phrases and negation with phrase or Boolean filters. State what minimum the query applies.",
         "- Row queries: omit `aggs`; `size` <= %d (default %d); rows come back newest first. To only COUNT matching documents, use `size` 0 with no `aggs` (and `track_total_hits`: true); the count is in the result metadata." % (lim.max_hits_size, lim.default_hits_size),
         "- Aggregation queries: `size` 0 and exactly ONE top-level aggregation (terms, date_histogram, filters, "
         "cardinality, min, max, avg, sum, value_count), at most %d levels deep. To group by TWO fields (for example "

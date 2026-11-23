@@ -8,10 +8,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app import llm_client, pipeline, validator
+from app import executor, llm_client, pipeline, validator
 from app.opensearch_catalog import canonical, runtime
 from app.opensearch_catalog.context import error_context
 from app.opensearch_catalog.field_catalog import FieldCatalogCache
+from tests.os_fixtures import FakeCluster
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "opensearch"
 CTL_REF = "references/opensearch-logs/controller-log.md"
@@ -190,6 +191,26 @@ def test_end_to_end_valid_query_is_canonicalised(skill_index, settings, fixture_
     out = _pipeline(skill_index, settings, {"mode": "single", **entry(q)})
     assert out["status"] == "ok", out
     assert out["index"] == "controllerlog-*" and "named_condition" not in json.dumps(out["query"])
+
+
+@pytest.mark.parametrize("minimum,expected", [(2, "empty_result"), (3, None)])
+def test_threshold_query_passes_cleaned_words_to_opensearch(skill_index, settings, fixture_cache, monkeypatch,
+                                                          minimum, expected):
+    cluster = FakeCluster().install(monkeypatch)
+    q = {"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [W, {"match": {"Body": {
+        "query": "the fan is off", "minimum_should_match": minimum,
+    }}}]}}}
+    contract = _pipeline(skill_index, settings, {"mode": "single", **entry(q)})
+    executed = executor.execute_contract(contract, settings)
+    if expected is None:
+        assert contract["status"] != "ok" and not cluster.searches
+    else:
+        assert executed["execution"]["execution_status"] == expected
+        (index, sent), = cluster.searches
+        assert index == "controllerlog-*"
+        assert sent["query"]["bool"]["filter"] == [W, {"match": {"Body": {
+            "query": "fan off", "minimum_should_match": minimum,
+        }}}]
 
 
 def test_end_to_end_llm_written_index_is_rejected(skill_index, settings, fixture_cache):

@@ -123,6 +123,40 @@ def cache_info(result):
     return [b["execution"]["metadata"]["result_cache"] for b in blocks]
 
 
+def test_both_caches_reuse_threshold_queries_by_exact_wording_only(cache_settings, cluster):
+    settings = cache_settings.model_copy(update={"opensearch_query_plan_cache_enabled": True})
+    cluster.handler = lambda *args: hits_body([{"Body": "fan off"}])
+    entry = rows_entry()
+    entry["query"]["query"]["bool"]["filter"].append({"match": {"Body": {
+        "query": "the fan is off", "minimum_should_match": 2,
+    }}})
+    executed = execute(settings, entry)
+    question = "Show controller fan logs"
+    paraphrase = "List controller fan logs"
+    assert query_cache.equivalent(query_cache.build_signature(question), query_cache.build_signature(paraphrase))
+    assert store(settings, question, executed) == ""
+    assert runtime.store_validated_plan(question, SCOPE, executed, settings, None) == ""
+    assert lookup(settings, question) is not None
+    assert runtime.lookup_cached_plan(question, SCOPE, settings, None).hit is not None
+    assert lookup(settings, paraphrase) is None
+    assert runtime.lookup_cached_plan(paraphrase, SCOPE, settings, None).hit is None
+
+
+def test_explicit_minimum_bypasses_semantic_lookups_in_both_caches(monkeypatch, cache_settings, cluster):
+    settings = cache_settings.model_copy(update={"opensearch_query_plan_cache_enabled": True})
+    cluster.handler = lambda *args: hits_body([{"Body": "fan off"}])
+    executed = execute(settings, rows_entry())
+    assert store(settings, "Show controller fan logs", executed) == ""
+    assert runtime.store_validated_plan("Show controller fan logs", SCOPE, executed, settings, None) == ""
+    compared = []
+    monkeypatch.setattr(query_cache, "equivalent", lambda *args: compared.append(args) or True)
+    question = "Show controller logs with at least two clues"
+    assert query_cache.build_signature(question).understood
+    assert lookup(settings, question) is None
+    assert runtime.lookup_cached_plan(question, SCOPE, settings, None).hit is None
+    assert not compared
+
+
 class AgentRun:
     """Drives app.agent exactly as the ADK runner does, with a counting Router/Generator stub."""
 

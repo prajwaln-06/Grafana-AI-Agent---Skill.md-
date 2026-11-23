@@ -122,6 +122,24 @@ query shapes in the relevant domain file and the DSL mechanics in
 | `trend` | "Error volume over time" | time series |
 | `distinct` | "How many different ports are affected?" | bucketed or approximate count |
 
+### Minimum-match text searches
+
+For an explicit request to match at least N named clues in one log entry, use
+one `should` branch per clue in a nested `bool` under the query's `filter`.
+Set that group's `minimum_should_match` to N, or to `1` for a request to match
+any clue. Keep the time range and mandatory fields in required filters. A
+`bool` with `filter` or `must` makes its `should` branches optional when the
+minimum is omitted.
+
+For an explicit minimum of unordered terms in one message, use `match` on the
+confirmed text field with a `query` string, `operator: "or"`, and integer
+`minimum_should_match` from `1` to `10`. The guard removes standalone common
+English words such as `the` and `is` and collapses repetitions before running
+the search. Ask for more distinct terms if too few remain. Use `match_phrase`
+for quoted wording and required filters for exact identifiers and exclusions.
+
+### Multi-step analyses
+
 Some questions cannot be answered by one query. For those, write the ordinary
 query for the family and add an `analysis` object (and, optionally, the same
 name as `intent`); the system then runs the follow-up queries itself, checks

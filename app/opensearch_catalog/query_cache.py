@@ -65,7 +65,7 @@ from app.opensearch_catalog import guard
 from app.opensearch_catalog.context import Limits, OpenSearchContext, PatternContext
 from app.opensearch_catalog.field_catalog import PatternFieldView, build_field_view
 from app.opensearch_catalog.registry import IndexRegistry, parse_short_duration_seconds
-from app.opensearch_catalog.text_forms import word_forms
+from app.opensearch_catalog.text_forms import multi_signal_minima, text_searches, word_forms
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,14 @@ MIN_EFFECTIVE_TTL_SECONDS = 5.0
 
 # analysis type <-> the concept a question must carry for Level-2 reuse (others: exact wording only)
 _ANALYSIS_CONCEPT = {"absence": "ABSENT", "recurrence": "RECURRING"}
+_MINIMUM_LANGUAGE = re.compile(
+    r"\b(?:at\s+least|at\s+minimum|minimum\s+of|minimum[_ ]should[_ ]match|"
+    r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:or\s+more|(?:out\s+)?of))\b", re.I
+)
+
+
+def asks_for_minimum(question: str) -> bool:
+    return bool(_MINIMUM_LANGUAGE.search(unicodedata.normalize("NFKC", question)))
 
 
 # =====================================================================================================
@@ -715,6 +723,11 @@ def _semantic_consistency(question: str, parts: tuple[PartFacts, ...], registry:
     if len(parts) != 1:
         return False, "multi-part result: exact wording only"
     part = parts[0]
+    query = json.loads(part.query_json)
+    if asks_for_minimum(question) or multi_signal_minima(query) or any(
+        minimum is not None for _, _, minimum in text_searches(query)
+    ):
+        return False, "minimum-match search: exact wording only"
     sig = build_signature(question, alias_items_for(aliases, [part.pattern_id]))
     if not sig.understood:
         return False, "question not fully understood: " + ", ".join(sig.reasons)
@@ -917,7 +930,7 @@ class ResultCache:
             if self._accept(e, revalidate):
                 return self._hit(e, "exact")
 
-        if not (self.semantic_enabled and sig.understood):
+        if not (self.semantic_enabled and sig.understood) or asks_for_minimum(question):
             return None
         tried = {e.entry_id for e in exact}
         matches: list[CacheEntry] = []

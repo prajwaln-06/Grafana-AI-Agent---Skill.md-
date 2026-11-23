@@ -328,19 +328,27 @@ def _text_search_note(query: dict) -> str | None:
     """For a free-text search that matched nothing: say plainly what was searched and
     why a document describing the same thing may still exist, so an empty answer is
     never mistaken for "it did not happen". None when the query has no text search."""
-    from app.opensearch_catalog.text_forms import phrase_variants, text_search_phrases
+    from app.opensearch_catalog.text_forms import multi_signal_minima, phrase_variants, text_searches
 
-    shown: list[str] = []
-    for p in text_search_phrases(query):
-        if not any(p in phrase_variants(s) for s in shown):
-            shown.append(p)
+    shown: list[tuple[str, str, int | None]] = []
+    for kind, text, minimum in text_searches(query):
+        if not any(kind == k and minimum == n and text in phrase_variants(s) for k, s, n in shown):
+            shown.append((kind, text, minimum))
     if not shown:
         return None
-    searched = ", ".join(repr(s) for s in shown)
-    return (f"No document in this window contains the searched text {searched}, including its other "
-            f"tenses and plurals. Text search matches whole words in the given order, so a message that "
-            f"describes the same thing in different words is not found: try other or fewer words, or a "
-            f"wider time window, before concluding that nothing happened.")
+    searches = []
+    for kind, text, minimum in shown:
+        if minimum is not None:
+            searches.append(f"at least {minimum} analyzed terms from {text!r}")
+        elif kind == "match_phrase":
+            searches.append(f"the ordered phrase {text!r}")
+        else:
+            searches.append(f"analyzed terms from {text!r}")
+    minima = ", ".join(str(n) for n in sorted(multi_signal_minima(query)))
+    group_note = f" The required minimum signal counts for Boolean groups were {minima}." if minima else ""
+    return (f"No document met the search conditions in this window. The text search used {', '.join(searches)}."
+            f"{group_note} Tense and plural variants can match where available. A message using different words "
+            "may still describe the same event.")
 
 
 def _execute_opensearch_analysis(entry: dict, pattern, view, ctx, window: dict | None, settings: Settings,

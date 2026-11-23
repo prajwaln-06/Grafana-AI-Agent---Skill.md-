@@ -287,7 +287,8 @@ class QueryPlanCache:
                 if hit is not None:
                     return hit
 
-        if not (self.semantic_enabled and sig.understood and pattern_check is not None):
+        if not (self.semantic_enabled and sig.understood and pattern_check is not None) \
+                or query_cache.asks_for_minimum(question):
             return None
         tried = {e.entry_id for e in exact}
         matches: list[PlanEntry] = []
