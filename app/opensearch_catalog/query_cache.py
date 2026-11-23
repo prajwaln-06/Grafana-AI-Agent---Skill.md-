@@ -148,6 +148,9 @@ def _phrase(*words: str) -> tuple[str, ...]:
     return tuple(_stem(w) for w in words if w not in _AUX)
 
 
+phrase_key = _phrase     # public name: how a Vocabulary builds its phrase keys (same stemming as _PHRASES)
+
+
 # phrase (stems, auxiliaries removed) -> concepts
 _SIGNAL_ABSENT = ("ABSENT", "SIGNAL")
 _PHRASES: dict[tuple[str, ...], tuple[str, ...]] = {
@@ -218,6 +221,22 @@ def _is_literal(tok: str) -> bool:
 
 
 @dataclass(frozen=True)
+class Vocabulary:
+    """An optional, ADDITIVE extension of the signature lexicon, supplied by a caller that owns a
+    different domain (the Prometheus plan cache). The built-in lexicon (`_PHRASES`) is never altered and
+    always wins a collision, and with no vocabulary (the default, and everything OpenSearch does) the
+    result is exactly what it was before this class existed.
+
+    phrases        ((phrase stems, concepts), ...) -- same shape as `_PHRASES`, hashable so the signature
+                   cache can key on it. Build keys with `phrase_key`.
+    word_acronyms  ALL-CAPS tokens that are concept WORDS in this domain ("CPU"), not data. Without this
+                   an ALL-CAPS token is a case-sensitive literal, so "CPU" and "cpu" would differ.
+    """
+    phrases: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = ()
+    word_acronyms: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class QuestionSignature:
     canonical_text: str                 # Level-1 key
     operation: str | None               # list | count | explain | when | None
@@ -235,15 +254,19 @@ def _normalise_alias_items(aliases: Mapping[str, str] | tuple) -> tuple[tuple[st
     return tuple(sorted((_stem(str(k).strip()), str(v)) for k, v in items))
 
 
-def build_signature(question: str, aliases: Mapping[str, str] | tuple = ()) -> QuestionSignature:
+def build_signature(question: str, aliases: Mapping[str, str] | tuple = (),
+                    vocabulary: Vocabulary | None = None) -> QuestionSignature:
     """Deterministic, dependency-free. `aliases` maps a (stemmed) word to replacement words, applied
     before phrase matching; it is how an operator declares "in this index family, 'node' means
-    'switch'". Never raises."""
-    return _build_signature(question if isinstance(question, str) else "", _normalise_alias_items(aliases))
+    'switch'". `vocabulary` (optional) adds domain phrases on top of the built-in lexicon; see
+    Vocabulary. `canonical_text` (the Level-1 key) never depends on it. Never raises."""
+    return _build_signature(question if isinstance(question, str) else "", _normalise_alias_items(aliases),
+                            vocabulary)
 
 
 @lru_cache(maxsize=2048)
-def _build_signature(question: str, alias_items: tuple[tuple[str, str], ...]) -> QuestionSignature:
+def _build_signature(question: str, alias_items: tuple[tuple[str, str], ...],
+                     vocabulary: Vocabulary | None = None) -> QuestionSignature:
     reasons: list[str] = []
     text = unicodedata.normalize("NFKC", question).strip()
     if len(text) > MAX_QUESTION_CHARS:
@@ -287,6 +310,8 @@ def _build_signature(question: str, alias_items: tuple[tuple[str, str], ...]) ->
             raw_items.append(("q", "q:" + quotes[int(pm.group(2))]))
         elif pm and pm.group(1) == "w" and int(pm.group(2)) < len(windows):
             raw_items.append(("t", windows[int(pm.group(2))]))
+        elif vocabulary is not None and tok in vocabulary.word_acronyms:
+            raw_items.append(("a", tok))        # a domain acronym: spelled like a literal, used as a word
         elif _is_literal(tok):
             raw_items.append(("l", tok))
         else:
@@ -308,6 +333,8 @@ def _build_signature(question: str, alias_items: tuple[tuple[str, str], ...]) ->
     alias_map = dict(alias_items)
     items: list[tuple[str, Any]] = []
     for kind, val in raw_items:
+        if kind == "a":                     # (the Level-1 key above kept it verbatim, as a literal)
+            kind, val = "w", _stem(val)
         if kind == "w" and val in alias_map:
             for w in _TOKEN_RE.findall(alias_map[val]):
                 items.append(("w", _stem(w)))
@@ -322,15 +349,20 @@ def _build_signature(question: str, alias_items: tuple[tuple[str, str], ...]) ->
     residual: set[str] = set()
     window_seconds = windows[0] if len(windows) == 1 else None
 
+    phrases, max_phrase = _PHRASES, _MAX_PHRASE
+    if vocabulary is not None and vocabulary.phrases:
+        phrases = {**dict(vocabulary.phrases), **_PHRASES}       # the built-in lexicon wins a collision
+        max_phrase = max(_MAX_PHRASE, max(len(k) for k, _ in vocabulary.phrases))
+
     i = 0
     while i < len(items):
         kind, val = items[i]
         if kind == "w":
             matched = False
-            for n in range(min(_MAX_PHRASE, len(items) - i), 0, -1):
+            for n in range(min(max_phrase, len(items) - i), 0, -1):
                 chunk = items[i:i + n]
                 if all(k == "w" for k, _ in chunk):
-                    hit = _PHRASES.get(tuple(v for _, v in chunk))
+                    hit = phrases.get(tuple(v for _, v in chunk))
                     if hit is not None:
                         for c in hit:
                             if c.startswith("OP:"):

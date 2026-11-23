@@ -98,6 +98,31 @@ def main():
     case("5. cache disabled", off, si, Q1, "no query_plan_cache metadata (None); Router+Generator ran; Prometheus executed")
     print("\ncache snapshot:", json.dumps(ppc.snapshot(base)))
 
+    # ---- built-in concept vocabulary: NO aliases declared at all -----------------------------------------
+    print("\n" + "=" * 100 + "\nBUILT-IN CONCEPT VOCABULARY (PROMETHEUS_QUERY_PLAN_CACHE_ALIASES is empty)\n" + "=" * 100)
+    label_discovery.clear_cache()
+    label_discovery._fetch_series = lambda *a, **k: copy.deepcopy(SERIES)
+    nov = base.model_copy(update={"prometheus_query_plan_cache_aliases": {}})
+    ppc.reset()
+    case("6. first query (stores the plan)", nov, si, Q1, "hit=false, stored=true")
+    state.value = 33.0
+    case("7. synonym: 'CPU usage'", nov, si, Q2,
+         "hit=true match=semantic from the built-in vocabulary alone; Prometheus executed again (value 33.0)")
+    case("8. synonym: 'processor utilization'", nov, si, "Display processor utilization across all nodes.",
+         "hit=true match=semantic; no Router/Generator; Prometheus executed again")
+    case("9. different measurement: CPU LOAD average", nov, si, "Show CPU load average for all nodes.",
+         "hit=false: load is not utilization (Router+Generator ran)")
+    case("10. different time window", nov, si, "Display processor utilization across all nodes over the last 6 hours.",
+         "hit=false: the window is part of the signature (Router+Generator ran)")
+    case("11. different resource", nov, si, "Show memory usage for all nodes.",
+         "hit=false: memory is not CPU (Router+Generator ran)")
+    off_c = nov.model_copy(update={"prometheus_query_plan_cache_concepts_enabled": False})
+    ppc.reset()
+    case("12. vocabulary switched off: first query", off_c, si, Q1, "hit=false, stored=true")
+    case("13. vocabulary switched off: synonym", off_c, si, Q2,
+         "hit=false: with no vocabulary and no alias, 'usage' is not assumed to be 'utilization'")
+    print("\ncache snapshot (vocabulary off):", json.dumps(ppc.snapshot(off_c)))
+
 
 if __name__ == "__main__":
     main()

@@ -117,10 +117,14 @@ def test_exact_hit_ignores_ordinary_case_punctuation_and_plurals(env):
     assert env.info(res)["hit"] is True and env.pipeline_calls == 1
 
 
-def test_lowercased_acronym_is_conservatively_not_treated_as_the_same_literal(env):
-    # inherited from the shared matcher: "cpu" and "CPU" are different literals, so this is a safe miss
-    env.ask(Q_CPU)
-    assert env.info(env.ask("show cpu utilization for all nodes"))["hit"] is False
+def test_lowercased_acronym_is_conservatively_not_treated_as_the_same_literal(monkeypatch, settings):
+    # inherited from the shared matcher: "cpu" and "CPU" are different literals, so this is a safe miss.
+    # The built-in concept vocabulary deliberately supersedes this for CPU/GPU/RAM (they are concept words
+    # in this domain; see tests/test_prometheus_concepts.py), so this pins the unchanged behaviour with the
+    # vocabulary switched off. The assertion itself is the original one.
+    e = Env(monkeypatch, settings, prometheus_query_plan_cache_concepts_enabled=False)
+    e.ask(Q_CPU)
+    assert e.info(e.ask("show cpu utilization for all nodes"))["hit"] is False
 
 
 def test_hit_is_scoped_per_user(env):
@@ -181,7 +185,11 @@ def test_reworded_question_is_a_semantic_hit_when_the_alias_is_declared(env):
 
 
 def test_without_a_declared_alias_usage_and_utilization_are_not_assumed_equal(monkeypatch, settings):
-    e = Env(monkeypatch, settings, prometheus_query_plan_cache_aliases={})
+    # With the built-in concept vocabulary OFF nothing but a declared alias bridges wordings (the original
+    # contract of this test, unchanged). With it ON (the default) "cpu usage" is a recognised wording of
+    # "cpu utilization": see tests/test_prometheus_concepts.py.
+    e = Env(monkeypatch, settings, prometheus_query_plan_cache_aliases={},
+            prometheus_query_plan_cache_concepts_enabled=False)
     e.ask(Q_CPU)
     res = e.ask(Q_CPU_REWORDED)
     assert e.info(res)["hit"] is False and e.pipeline_calls == 2

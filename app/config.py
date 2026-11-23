@@ -168,8 +168,25 @@ class Settings(BaseSettings):
                     "skills/references, e.g. \"node-exporter\"), e.g. "
                     "{\"node-exporter\": {\"usage\": \"utilization\"}} to assert that for that exporter "
                     "'usage' and 'utilization' mean the same thing. Empty by default: no equivalence is "
-                    "assumed that was not declared. Applied only to plans of that exporter. Separate from "
-                    "OPENSEARCH_RESULT_CACHE_ALIASES (which are keyed by OpenSearch index family).")
+                    "assumed that was not declared beyond the built-in concept vocabulary "
+                    "(PROMETHEUS_QUERY_PLAN_CACHE_CONCEPTS_ENABLED). Aliases are applied first, so they "
+                    "override or extend it for that exporter. Applied only to plans of that exporter. "
+                    "Separate from OPENSEARCH_RESULT_CACHE_ALIASES (which are keyed by OpenSearch index "
+                    "family).")
+
+    prometheus_query_plan_cache_concepts_enabled: bool = Field(
+        default=True,
+        description="Use the built-in Prometheus concept vocabulary (app/prometheus_concepts.py) so common "
+                    "wordings of one measurement are recognised without declaring them as aliases: "
+                    "\"cpu usage\" / \"cpu utilization\" / \"processor usage\", \"memory usage\" / "
+                    "\"memory consumption\" / \"ram usage\", \"network traffic\" / \"network throughput\", "
+                    "\"disk read rate\" / \"disk read throughput\", and similar. Phrase-level and "
+                    "domain-aware (\"cpu load\" is NOT \"cpu utilization\"). It only makes a reworded "
+                    "question ELIGIBLE: the six-facet signature equality, the catalog ownership check, the "
+                    "plan's metric check and full revalidation still decide, and Prometheus is queried "
+                    "again on every hit. Needs PROMETHEUS_QUERY_PLAN_CACHE_SEMANTIC_ENABLED. False = only "
+                    "PROMETHEUS_QUERY_PLAN_CACHE_ALIASES bridge wordings (the previous behaviour). "
+                    "Never affects the OpenSearch caches.")
 
     prometheus_timeout_seconds: float = Field(default=15.0)
     opensearch_timeout_seconds: float = Field(default=15.0)

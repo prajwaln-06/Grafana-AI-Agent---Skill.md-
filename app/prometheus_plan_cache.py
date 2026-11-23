@@ -10,7 +10,11 @@ EXECUTED AGAIN against Prometheus for fresh data. It is the Prometheus counterpa
   * the cache class (`QueryPlanCache`: bounded LRU, exact -> semantic lookup, lost-race handling,
     exact statistics) is subclassed, not copied;
   * question matching is `opensearch_catalog.query_cache.build_signature` / `equivalent` (Level 1
-    identical canonical wording; Level 2 equal in every facet, deterministic, no embeddings).
+    identical canonical wording; Level 2 equal in every facet, deterministic, no embeddings). The only
+    Prometheus-specific part is VOCABULARY: `prometheus_concepts` hands the shared matcher its phrase table
+    (cpu usage / cpu utilization / processor usage -> `cpu_utilization`, ...) so ordinary synonyms need no
+    declared alias. A concept only makes a reworded question ELIGIBLE; the six-facet equality, the plan's
+    metric check, catalog ownership and revalidation below all still apply (docs/PROMETHEUS_CONCEPTS.md).
 
 What is Prometheus-specific (an OpenSearch plan depends on registry + live mappings; a PromQL plan on
 other things) is everything below that:
@@ -27,7 +31,8 @@ Safety model (every doubt is a miss)
    every signature facet AND confirmed by the catalog (`reference_ambiguity`): the catalog's own
    deterministic ranking of the new wording must still put the plan's reference on top, uniquely, and
    still contain every metric the plan uses. Level 2 is offered only for entries whose own question was
-   cross-checked against the query that really ran (`semantic_consistency`). Same scope only.
+   cross-checked against the query that really ran (`semantic_consistency`: window, literals, and that
+   every built-in concept in the question is backed by a plan metric). Same scope only.
 3. Reuse re-proves the plan (`revalidate_entry`), cheapest check first: schema version; configuration
    fingerprint; skill-text fingerprint (SKILL.md + the reference + its overview + prometheus
    fundamentals); catalog fingerprint (the full catalog entry of every metric the plan uses -- type,
@@ -76,7 +81,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Mapping
 
-from app import label_discovery, pipeline, time_utils, validator
+from app import label_discovery, pipeline, prometheus_concepts as concepts, time_utils, validator
 from app.catalog import search as catalog_search
 from app.opensearch_catalog import plan_cache as _os_plan
 from app.opensearch_catalog import query_cache as _qc
@@ -221,13 +226,24 @@ def _promql_windows(query: str) -> set[float]:
     return {int(n) * _UNIT_SECONDS[u] for n, u in _RANGE_SELECTOR_RE.findall(query)}
 
 
-def semantic_consistency(question: str, facts: PlanFacts, aliases: Mapping[str, Mapping[str, str]]
-                         ) -> tuple[bool, str]:
+def semantic_consistency(question: str, facts: PlanFacts, aliases: Mapping[str, Mapping[str, str]],
+                         *, concepts_enabled: bool = True) -> tuple[bool, str]:
     """May this entry be matched by DIFFERENTLY WORDED questions? Only if its own question agrees
     with the plan that really ran, in everything that can be checked mechanically."""
-    sig = _qc.build_signature(question, _qc.alias_items_for(aliases, [facts.family]))
+    sig = concepts.signature(question, _qc.alias_items_for(aliases, [facts.family]), enabled=concepts_enabled)
     if not sig.understood:
         return False, "question not fully understood: " + ", ".join(sig.reasons)
+    unbacked = concepts.unsupported_concept(sig, facts.metrics)
+    if unbacked:
+        return False, unbacked
+    if concepts_enabled:
+        # A domain acronym ("CPU") is a concept WORD under the vocabulary, not a case-sensitive literal, so
+        # the literal check below no longer sees it. When no concept phrase consumed it (it is still a
+        # leftover word: "CPU temperature") it must still appear in the executed query, exactly as it had to
+        # before; when a concept consumed it, the metric check above is what covers it.
+        for acronym in sorted(concepts.WORD_ACRONYMS):
+            if acronym.lower() in sig.residual and acronym.lower() not in facts.query.lower():
+                return False, f"literal {acronym!r} is not in the executed query"
     if sig.window_seconds is not None:
         if facts.window_seconds is not None:
             if abs(facts.window_seconds - sig.window_seconds) > 1:
@@ -243,8 +259,8 @@ def semantic_consistency(question: str, facts: PlanFacts, aliases: Mapping[str, 
     return True, ""
 
 
-def assess_executed(question: str, executed: Any, *, aliases: Mapping[str, Mapping[str, str]] | None = None
-                    ) -> Assessment:
+def assess_executed(question: str, executed: Any, *, aliases: Mapping[str, Mapping[str, str]] | None = None,
+                    concepts_enabled: bool = True) -> Assessment:
     """May this executed result be stored, for exact wording and (separately) for reworded questions?"""
     why = plan_eligibility(executed)
     if why:
@@ -257,7 +273,7 @@ def assess_executed(question: str, executed: Any, *, aliases: Mapping[str, Mappi
             time_expr=time_expr_of(executed))
     except (time_utils.TimeParseError, KeyError, TypeError, ValueError) as exc:
         return Assessment(False, f"the plan's time window could not be resolved ({type(exc).__name__})")
-    ok, sem_why = semantic_consistency(question, facts, aliases or {})
+    ok, sem_why = semantic_consistency(question, facts, aliases or {}, concepts_enabled=concepts_enabled)
     return Assessment(True, "", facts, ok, sem_why)
 
 
@@ -471,8 +487,19 @@ class PrometheusPlanCache(_os_plan.QueryPlanCache):
     """The OpenSearch plan cache's LRU / lookup machinery with Prometheus entries, eligibility and
     consistency check. Its own instance and statistics: it can never see an OpenSearch entry."""
 
+    def __init__(self, *, concepts_enabled: bool = True, **kwargs):
+        super().__init__(**kwargs)
+        self.concepts_enabled = bool(concepts_enabled)
+
     def snapshot(self) -> dict:
-        return {**super().snapshot(), "datasource": "prometheus"}
+        return {**super().snapshot(), "datasource": "prometheus", "concepts_enabled": self.concepts_enabled}
+
+    def _signatures_equal(self, question: str, entry) -> bool:
+        """Same six-facet equality as every other plan cache; only the VOCABULARY differs: the built-in
+        Prometheus concepts (prometheus_concepts) on top of the family's declared aliases."""
+        al = _qc.alias_items_for(self.aliases, [entry.pattern_id])
+        return _qc.equivalent(concepts.signature(question, al, enabled=self.concepts_enabled),
+                              concepts.signature(entry.question, al, enabled=self.concepts_enabled))
 
     def count(self, key: str) -> None:
         self._bump(key)
@@ -624,6 +651,21 @@ def reference_ambiguity(question: str, entry: PromPlanEntry, *, settings, catalo
     return None
 
 
+def concept_ownership(question: str, entry: PromPlanEntry, *, cache: "PrometheusPlanCache", settings, catalog
+                      ) -> str | None:
+    """The ownership check for a semantic candidate, with the built-in concepts taken into account.
+    `reference_ambiguity` itself is unchanged (reference alone on top, confident, every plan metric still
+    offered); it is asked about the question plus the canonical wording of its recognised concepts, and the
+    plan's metrics must back every one of those concepts. Any doubt is a miss."""
+    al = _qc.alias_items_for(cache.aliases, [entry.pattern_id])
+    if cache.concepts_enabled:
+        unbacked = concepts.unsupported_concept(concepts.signature(question, al), entry.facts.metrics)
+        if unbacked:
+            return unbacked
+    return reference_ambiguity(concepts.ownership_text(question, al, enabled=cache.concepts_enabled), entry,
+                               settings=settings, catalog=catalog)
+
+
 # =====================================================================================================
 # 6. process-wide wiring (settings -> the one cache) and the agent-facing operations
 # =====================================================================================================
@@ -642,14 +684,16 @@ def get_cache(settings) -> PrometheusPlanCache | None:
     if not enabled(settings):
         return None
     key = (settings.prometheus_query_plan_cache_max_entries, settings.prometheus_query_plan_cache_semantic_enabled,
-           json.dumps(settings.prometheus_query_plan_cache_aliases, sort_keys=True))
+           json.dumps(settings.prometheus_query_plan_cache_aliases, sort_keys=True),
+           settings.prometheus_query_plan_cache_concepts_enabled)
     with _lock:
         cache = _caches.get(key)
         if cache is None:
             cache = PrometheusPlanCache(
                 max_entries=settings.prometheus_query_plan_cache_max_entries,
                 semantic_enabled=settings.prometheus_query_plan_cache_semantic_enabled,
-                aliases=settings.prometheus_query_plan_cache_aliases)
+                aliases=settings.prometheus_query_plan_cache_aliases,
+                concepts_enabled=settings.prometheus_query_plan_cache_concepts_enabled)
             _caches[key] = cache
         return cache
 
@@ -693,7 +737,7 @@ def lookup(question: str, scope: str, settings, skill_index) -> PlanLookup:
         return revalidate_entry(entry, settings=settings, skill_index=skill_index, catalog=catalog.get())
 
     def pattern_check(entry, q):
-        return reference_ambiguity(q, entry, settings=settings, catalog=catalog.get())
+        return concept_ownership(q, entry, cache=cache, settings=settings, catalog=catalog.get())
 
     try:
         return cache.lookup(question, scope, revalidate, pattern_check)
@@ -775,7 +819,8 @@ def store_validated_plan(question: str, scope: str, executed: Any, settings, ski
             return StoreOutcome(False, "plan cache disabled")
         if not _prometheus_entries(executed):
             return StoreOutcome(False, "not a Prometheus execution")
-        assessment = assess_executed(question, executed, aliases=cache.aliases)
+        assessment = assess_executed(question, executed, aliases=cache.aliases,
+                                     concepts_enabled=cache.concepts_enabled)
         if not assessment.cacheable:
             return cache.store(question, scope, assessment, {}, None)           # counted, not stored
         if baseline is None:

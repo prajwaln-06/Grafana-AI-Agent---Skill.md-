@@ -296,9 +296,7 @@ class QueryPlanCache:
             if e.entry_id in tried or not e.semantic_ok:
                 continue
             try:
-                al = query_cache.alias_items_for(self.aliases, [e.pattern_id])
-                equal = query_cache.equivalent(query_cache.build_signature(question, al),
-                                               query_cache.build_signature(e.question, al))
+                equal = self._signatures_equal(question, e)
             except Exception:  # noqa: BLE001 -- a matching failure is a miss for this candidate
                 logger.exception("plan matching failed; treating as a miss")
                 self._bump("match_errors")
@@ -322,6 +320,14 @@ class QueryPlanCache:
                 if hit is not None:
                     return hit
         return None
+
+    def _signatures_equal(self, question: str, entry: PlanEntry) -> bool:
+        """Level-2 equivalence of a new question and an entry's own question: equal in every signature
+        facet, under the entry's per-family aliases. A subclass whose domain has its own vocabulary
+        overrides this (the Prometheus plan cache does); everything else about lookup is shared."""
+        al = query_cache.alias_items_for(self.aliases, [entry.pattern_id])
+        return query_cache.equivalent(query_cache.build_signature(question, al),
+                                      query_cache.build_signature(entry.question, al))
 
     def _accept(self, entry: PlanEntry, revalidate: Revalidator, reasons: list[str]) -> bool:
         if entry.schema_version != PLAN_SCHEMA_VERSION:
