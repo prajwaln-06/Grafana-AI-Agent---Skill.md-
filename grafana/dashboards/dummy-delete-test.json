@@ -1,0 +1,117 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "A dummy dashboard created for end-to-end deletion flow testing. Safe to delete.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 80 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "title": "Scrape Targets Up",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "count(up == 1)",
+          "refId": "A",
+          "legendFormat": "Up"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      },
+      "title": "Fake CPU Usage (Deletion Demo)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "avg(rate(process_cpu_seconds_total[5m]))",
+          "refId": "A",
+          "legendFormat": "avg cpu rate"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 8 },
+      "id": 3,
+      "options": {
+        "content": "## 🗑️ Dummy Dashboard — Deletion Flow Test\n\nThis dashboard was created automatically to test the **deletion escalation workflow**.\n\n- Ask the AI agent: *\"delete the Dummy Dashboard\"*  \n- A maintainer will see it escalated; an admin can directly approve/reject  \n- Check **Admin Console → Pending Deletions** for the approval queue\n\n> **Safe to delete** — this dashboard contains no real data or alerts.",
+        "mode": "markdown"
+      },
+      "title": "",
+      "type": "text"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["test", "deletion-demo", "dummy"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Dummy Dashboard — Deletion Test",
+  "uid": "dummy-delete-test-01",
+  "version": 1,
+  "weekStart": ""
+}

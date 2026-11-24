@@ -646,6 +646,19 @@ async def approve_pending_deletion(
             details={"proposal_id": proposal_id, "action": "execute_deletion"},
         )
 
+        # Invalidate in-memory dashboard cache and remove from demo dashboards
+        if dash_uid:
+            try:
+                from app.grafana_tools.demo_dashboards import DEMO_DASHBOARDS
+                DEMO_DASHBOARDS.pop(str(dash_uid), None)
+            except Exception:
+                pass
+        try:
+            from app.grafana_tools.dashboard import invalidate_dashboard_cache
+            invalidate_dashboard_cache()
+        except Exception:
+            pass
+
         return {
             "status": "approved",
             "proposal_id": proposal_id,

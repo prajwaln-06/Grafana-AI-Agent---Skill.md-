@@ -79,6 +79,40 @@ async def fetch_dashboard_list(*, refresh: bool = False) -> list[dict]:
             for uid, d in DEMO_DASHBOARDS.items()
         ]
 
+    # Exclude any dashboards that have been deleted via approved/executed proposals
+    deleted_uids = set()
+    try:
+        from app.storage.database import get_db_session
+        from app.storage.models import ProposalModel
+        with get_db_session() as session:
+            rows = session.query(ProposalModel).filter(
+                ProposalModel.operation.in_(["delete", "remove"]),
+                ProposalModel.state.in_(["applied", "executed"]),
+            ).all()
+            for r in rows:
+                t = r.target_resource or {}
+                c = r.canonical_content or {}
+                duid = t.get("dashboardUid") or c.get("dashboardUid")
+                if duid:
+                    deleted_uids.add(str(duid))
+    except Exception as exc:
+        logger.debug("Could not query DB for deleted dashboard UIDs: %s", exc)
+
+    try:
+        from app.grafana_tools.dashboard_writing import PROPOSALS
+        for p in PROPOSALS._items.values():
+            if p.get("status") in ("executed", "applied") and (
+                p.get("operation") in ("delete", "remove") or (p.get("ir") or {}).get("removeDashboard")
+            ):
+                duid = (p.get("ir") or {}).get("dashboardUid") or (p.get("target_resource") or {}).get("dashboardUid")
+                if duid:
+                    deleted_uids.add(str(duid))
+    except Exception:
+        pass
+
+    if deleted_uids:
+        dashboards = [d for d in dashboards if d.get("uid") not in deleted_uids]
+
     _dashboard_list = dashboards
     _dashboard_list_time = time.monotonic()
     logger.info(f"Discovery: fetched {len(dashboards)} dashboard(s)")

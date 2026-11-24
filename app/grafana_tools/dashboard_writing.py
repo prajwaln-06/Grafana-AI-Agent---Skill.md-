@@ -1745,6 +1745,18 @@ async def execute_approved_mutation(proposal_id: str, version: int, approval_tok
     # The write happened: record what actually changed.
     if operation == "remove" and item["ir"].get("removeDashboard"):
         after_panels: list[dict] = []
+        target_uid = str(written_uid or dashboard_uid or item["ir"].get("dashboardUid") or "")
+        if target_uid:
+            try:
+                from app.grafana_tools.demo_dashboards import DEMO_DASHBOARDS
+                DEMO_DASHBOARDS.pop(target_uid, None)
+            except Exception:
+                pass
+        try:
+            from app.grafana_tools.dashboard import invalidate_dashboard_cache
+            invalidate_dashboard_cache()
+        except Exception:
+            pass
     else:
         after_panels = list((payload.get("dashboard") or {}).get("panels") or [])
     _audit_dashboard_mutation(
