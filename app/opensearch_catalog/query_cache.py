@@ -905,7 +905,7 @@ class ResultCache:
     # ---- store ----
 
     def put(self, question: str, scope: str, executed: dict, assessment: Assessment,
-            fingerprints: Fingerprints) -> tuple[bool, str]:
+            fingerprints: Fingerprints, *, scheduled_at: float | None = None) -> tuple[bool, str]:
         """(stored, reason). Never raises. First writer wins until expiry: a duplicate never replaces
         or extends a live entry, so concurrent identical misses cannot churn or contaminate."""
         try:
@@ -924,8 +924,12 @@ class ResultCache:
                 return False, "result too large to cache"
             ttl = self.ttl_seconds if assessment.max_ttl is None else min(self.ttl_seconds, assessment.max_ttl)
             canonical_text = build_signature(question).canonical_text
-            now = self._clock()
             with self._lock:
+                age_seconds = max(0, time.monotonic() - scheduled_at) if scheduled_at is not None else 0
+                if age_seconds >= ttl:
+                    self._stats["not_stored"] += 1
+                    return False, "result expired while its cache write was pending"
+                now = self._clock()
                 self._purge_expired_locked(now)
                 if (scope, canonical_text) in self._by_key:
                     self._stats["duplicate_not_stored"] += 1
@@ -939,8 +943,8 @@ class ResultCache:
                 self._entries[eid] = CacheEntry(
                     entry_id=eid, scope=scope, question=question, canonical_text=canonical_text,
                     semantic_ok=assessment.semantic_ok, mode=assessment.mode, parts=assessment.parts,
-                    result_json=result_json, fingerprints=fingerprints, created_wall=self._wall(),
-                    created_at=now, expires_at=now + ttl, ttl_seconds=ttl)
+                    result_json=result_json, fingerprints=fingerprints, created_wall=self._wall() - age_seconds,
+                    created_at=now - age_seconds, expires_at=now + ttl - age_seconds, ttl_seconds=ttl)
                 self._by_key[(scope, canonical_text)] = eid
                 self._stats["stored"] += 1
             return True, ""

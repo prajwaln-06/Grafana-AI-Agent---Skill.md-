@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from time import monotonic
 from typing import AsyncGenerator
 
 from google.adk.agents.base_agent import BaseAgent
@@ -18,6 +19,7 @@ from app.opensearch_catalog import timings as os_timings
 from app.skill_index import SkillIndex
 
 logger = logging.getLogger(__name__)
+_cache_write_tasks: set[asyncio.Task] = set()
 
 
 def _catalog_provider(settings):
@@ -39,6 +41,43 @@ def _cache_scope(ctx) -> str:
 def _response_message(ctx, payload: dict) -> str:
     os_timings.finish(payload, ctx.invocation_id)
     return json.dumps(payload)
+
+
+def _cache_snapshot(entry: dict) -> dict:
+    """Copy response envelopes the request can still annotate before yielding."""
+    if not isinstance(entry, dict):
+        return entry
+    if isinstance(entry.get("results"), list):
+        return {**entry, "results": [_cache_snapshot(child) for child in entry["results"]]}
+    execution = entry.get("execution")
+    if not isinstance(execution, dict) or not isinstance(execution.get("metadata"), dict):
+        return dict(entry)
+    metadata = {key: value for key, value in execution["metadata"].items()
+                if key not in ("timings", "query_plan_cache")}
+    return {**entry, "execution": {**execution, "metadata": metadata}}
+
+
+def _queue_opensearch_cache_writes(question, scope, executed, settings, skill_index, generation, *, store_plan):
+    if not settings.opensearch_result_cache_enabled and not (store_plan and settings.opensearch_query_plan_cache_enabled):
+        return
+    snapshot = _cache_snapshot(executed)
+    scheduled_at = monotonic()
+
+    def write():
+        stores = []
+        if settings.opensearch_result_cache_enabled:
+            stores.append((os_runtime.store_executed_result, {"scheduled_at": scheduled_at}))
+        if store_plan and settings.opensearch_query_plan_cache_enabled:
+            stores.append((os_runtime.store_validated_plan, {}))
+        for store, kwargs in stores:
+            try:
+                store(question, scope, snapshot, settings, skill_index, generation=generation, **kwargs)
+            except Exception:
+                logger.exception("Background OpenSearch cache write failed")
+
+    task = asyncio.create_task(asyncio.to_thread(write))
+    _cache_write_tasks.add(task)
+    task.add_done_callback(_cache_write_tasks.discard)
 
 
 class ObservabilityQueryBuilderAgent(BaseAgent):
@@ -143,6 +182,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         # OpenSearch search. A miss, a disabled cache or any cache error falls through to the pipeline.
         fresh_question = not (previous_question and previous_result)
         cache_scope = _cache_scope(ctx)
+        write_generation = os_runtime.cache_write_generation()
         if fresh_question and question.strip():
             cached = await asyncio.to_thread(
                 os_runtime.lookup_cached_result, question, cache_scope, settings, skill_index)
@@ -181,11 +221,8 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                     await asyncio.to_thread(os_runtime.invalidate_cached_plan, settings, plan_hit.entry_id)
                     plan_invalidation = "the executor's guard refused the stored plan"
                 else:
-                    # Eligible for the answer cache under its own rules; stored BEFORE the plan metadata is
-                    # added so a later answer-cache hit does not claim a plan-cache hit it never had.
-                    with os_timings.stage("cache_store_ms"):
-                        await asyncio.to_thread(
-                            os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
+                    _queue_opensearch_cache_writes(
+                        question, cache_scope, executed, settings, skill_index, write_generation, store_plan=False)
                     os_plan_cache.annotate(executed, {
                         "hit": True, "match": plan_hit.match, "age_seconds": plan_hit.age_seconds,
                         "cache_entry_id": plan_hit.entry_id, "revalidated": True})
@@ -327,13 +364,8 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         # errors, partial runs, incomplete analyses and anything that is not OpenSearch). Not for a
         # dependency-resolved compound question, whose later queries depend on earlier results.
         if fresh_question and not already_executed:
-            with os_timings.stage("cache_store_ms"):
-                await asyncio.to_thread(
-                    os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
-                # Remember the validated PLAN of that same successful execution (single, relative-window,
-                # non-dependent OpenSearch entries only -- the plan cache refuses everything else).
-                await asyncio.to_thread(
-                    os_runtime.store_validated_plan, question, cache_scope, executed, settings, skill_index)
+            _queue_opensearch_cache_writes(
+                question, cache_scope, executed, settings, skill_index, write_generation, store_plan=True)
         if plan_invalidation:
             os_plan_cache.annotate(executed, {"hit": False, "invalidation_reason": plan_invalidation})
         # Prometheus plan cache: remember the validated PLAN of a successful, eligible single Prometheus

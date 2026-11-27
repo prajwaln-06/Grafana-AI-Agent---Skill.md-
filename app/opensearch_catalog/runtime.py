@@ -36,10 +36,18 @@ _registries: dict[tuple, IndexRegistry] = {}
 _caches: dict[tuple, FieldCatalogCache] = {}
 _result_caches: dict[tuple, query_cache.ResultCache] = {}
 _plan_caches: dict[tuple, plan_cache.QueryPlanCache] = {}
+_write_generation = 0
+
+
+def cache_write_generation() -> int:
+    with _lock:
+        return _write_generation
 
 
 def reset() -> None:
+    global _write_generation
     with _lock:
+        _write_generation += 1
         _registries.clear()
         _caches.clear()
         _result_caches.clear()
@@ -170,9 +178,12 @@ def get_result_cache(settings) -> query_cache.ResultCache | None:
 
 
 def reset_result_cache() -> None:
-    """Empties every result cache (keeps the instances). Used by the admin reload and by tests."""
+    """Detach old result caches so an in-flight write cannot repopulate them."""
+    global _write_generation
     with _lock:
+        _write_generation += 1
         caches = list(_result_caches.values())
+        _result_caches.clear()
     for cache in caches:
         cache.clear()
 
@@ -204,12 +215,15 @@ def lookup_cached_result(question: str, scope: str, settings, skill_index) -> di
     return hit.result if hit is not None else None
 
 
-def store_executed_result(question: str, scope: str, executed: dict, settings, skill_index) -> str:
+def store_executed_result(question: str, scope: str, executed: dict, settings, skill_index, *,
+                          generation: int | None = None, scheduled_at: float | None = None) -> str:
     """Stores `executed` if (and only if) it is complete, successful and safe. Returns "" when
     stored, otherwise the reason. Never raises."""
     cache = get_result_cache(settings)
     if cache is None:
         return "result cache disabled"
+    if generation is not None and generation != cache_write_generation():
+        return "cache reset after the request started"
     try:
         registry = get_registry(settings)
         assessment = query_cache.assess_executed(question, executed, registry=registry, aliases=cache.aliases)
@@ -221,7 +235,7 @@ def store_executed_result(question: str, scope: str, executed: dict, settings, s
             settings=settings, skill_index=skill_index)
         if prints is None:
             return why
-        stored, reason = cache.put(question, scope, executed, assessment, prints)
+        stored, reason = cache.put(question, scope, executed, assessment, prints, scheduled_at=scheduled_at)
         return "" if stored else reason
     except Exception:  # noqa: BLE001 -- never fail a request because of the cache
         logger.exception("storing the OpenSearch result in the result cache failed")
@@ -250,9 +264,12 @@ def get_plan_cache(settings) -> plan_cache.QueryPlanCache | None:
 
 
 def reset_plan_cache() -> None:
-    """Empties every plan cache (keeps the instances). Used by the admin reload and by tests."""
+    """Detach old plan caches so an in-flight write cannot repopulate them."""
+    global _write_generation
     with _lock:
+        _write_generation += 1
         caches = list(_plan_caches.values())
+        _plan_caches.clear()
     for cache in caches:
         cache.clear()
 
@@ -295,13 +312,16 @@ def invalidate_cached_plan(settings, entry_id: int) -> None:
         logger.exception("invalidating the cached plan failed")
 
 
-def store_validated_plan(question: str, scope: str, executed: dict, settings, skill_index) -> str:
+def store_validated_plan(question: str, scope: str, executed: dict, settings, skill_index, *,
+                         generation: int | None = None) -> str:
     """Stores the plan behind `executed` if (and only if) it is eligible (see plan_cache.plan_eligibility).
     Returns "" when stored, otherwise the reason. Never raises."""
     try:
         cache = get_plan_cache(settings)
         if cache is None:
             return "plan cache disabled"
+        if generation is not None and generation != cache_write_generation():
+            return "cache reset after the request started"
         registry = get_registry(settings)
         assessment = query_cache.assess_executed(question, executed, registry=registry, aliases=cache.aliases)
         why = plan_cache.plan_eligibility(assessment, executed)

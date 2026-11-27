@@ -14,6 +14,7 @@ import copy
 import dataclasses
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -189,6 +190,26 @@ def test_text_policy_changes_invalidate_both_caches(cache_settings, cluster, cha
     assert runtime.lookup_cached_plan(question, SCOPE, settings=changed, skill_index=None).hit is None
 
 
+def test_delayed_answer_store_does_not_extend_lifetime(cache_settings, cluster):
+    s = cache_settings.model_copy(update={"opensearch_result_cache_ttl_seconds": 60})
+    executed = execute(s, rows_entry())
+    why = runtime.store_executed_result("Show service logs", SCOPE, executed, s, None,
+                                        scheduled_at=time.monotonic() - 61)
+    assert "expired" in why
+    assert len(runtime.get_result_cache(s)) == 0
+
+
+def test_background_store_from_a_prior_cache_generation_is_refused(cache_settings, cluster):
+    s = cache_settings.model_copy(update={"opensearch_query_plan_cache_enabled": True})
+    executed = execute(s, rows_entry())
+    generation = runtime.cache_write_generation()
+    runtime.reset_result_cache()
+    for store in (runtime.store_executed_result, runtime.store_validated_plan):
+        why = store("Show service logs", SCOPE, executed, s, None, generation=generation)
+        assert "reset" in why
+    assert len(runtime.get_result_cache(s)) == len(runtime.get_plan_cache(s)) == 0
+
+
 def test_explicit_minimum_bypasses_semantic_lookups_in_both_caches(monkeypatch, cache_settings, cluster):
     settings = cache_settings.model_copy(update={"opensearch_query_plan_cache_enabled": True})
     cluster.handler = lambda *args: hits_body([{"Body": "fan off"}])
@@ -227,7 +248,11 @@ class AgentRun:
                               app_name="app")
 
         async def collect():
-            return [e async for e in agent_mod.root_agent._run_async_impl(ctx)]
+            events = [e async for e in agent_mod.root_agent._run_async_impl(ctx)]
+            # Tests assert what a later request sees after cache bookkeeping completes.
+            loop = asyncio.get_running_loop()
+            await asyncio.gather(*(task for task in tuple(agent_mod._cache_write_tasks) if task.get_loop() is loop))
+            return events
 
         events = asyncio.run(collect())
         assert len(events) == 1
