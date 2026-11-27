@@ -468,6 +468,7 @@ def fingerprint_config(settings) -> str:
         "redact_usernames": settings.opensearch_redact_usernames, "redact_ip": settings.opensearch_redact_ip_mode,
         "max_series": settings.max_series_per_result, "max_hits": settings.max_hits_per_result,
         "url": settings.opensearch_url, "user": settings.opensearch_auth_username,
+        "router_fastpath": settings.opensearch_router_fastpath,
         "alerts": settings.alert_rule_creation_enabled, "dependent": settings.dependent_query_resolution_enabled,
         "model": settings.gemini_model,
         "router_thinking": settings.gemini_router_thinking_budget,

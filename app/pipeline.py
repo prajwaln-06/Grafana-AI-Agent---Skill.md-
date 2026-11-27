@@ -374,6 +374,23 @@ class PipelineContext:
     clarification_answer: str | None = None
 
 
+def _fast_opensearch_route(question: str, settings: Settings, context: PipelineContext,
+                           catalog: Catalog | None) -> dict | None:
+    """Use a registry alias only for a simple read with no competing catalog candidate."""
+    if (not settings.opensearch_router_fastpath or catalog is None
+            or context.previous_question or context.previous_result or context.clarification_answer):
+        return None
+    try:
+        family = os_runtime.get_registry(settings).match_simple_read(question)
+        if family is None or catalog_search.search(catalog, question, top_n=1):
+            return None
+    except Exception:
+        logger.debug("OpenSearch fast-path routing unavailable; calling the Router", exc_info=True)
+        return None
+    return {"matched_references": [{"reference_path": family.domain_reference, "data_source": "opensearch"}],
+            "action_intent": "read_query"}
+
+
 async def run_pipeline(question: str, skill_index: SkillIndex, settings: Settings,
                         context: PipelineContext | None = None,
                         catalog: Catalog | None = None) -> dict:
@@ -389,7 +406,9 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
     if catalog is None:
         catalog = _get_catalog(settings)
 
-    router_output = await _run_router(question, skill_index, settings, context, catalog=catalog)
+    router_output = _fast_opensearch_route(question, settings, context, catalog)
+    if router_output is None:
+        router_output = await _run_router(question, skill_index, settings, context, catalog=catalog)
     unresolved_topics = _clean_unresolved_topics(router_output.get("unresolved_topics"))
 
     if router_output.get("gate_stop"):

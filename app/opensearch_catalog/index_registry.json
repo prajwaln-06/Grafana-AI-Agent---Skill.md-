@@ -7,6 +7,7 @@
       "domain_reference": "references/opensearch-logs/fabric-health.md",
       "enabled": true,
       "description": "Slingshot fabric health: heartbeat and fault documents",
+      "routing_aliases": ["fabric health logs", "slingshot logs", "slingshot fabric health logs", "slingshot fabric health log events"],
       "date_rotation": {
         "style": "daily",
         "suffix": "-YYYY.MM.dd",
@@ -133,6 +134,7 @@
       "domain_reference": "references/opensearch-logs/controller-log.md",
       "enabled": true,
       "description": "Controller syslog-style messages per host and service",
+      "routing_aliases": ["controller logs", "controller log", "controller log messages", "controller syslog", "controllerlog"],
       "date_rotation": {
         "style": "daily",
         "suffix": "-YYYY.MM.dd",
@@ -249,6 +251,7 @@
       "domain_reference": "references/opensearch-logs/ilo-events.md",
       "enabled": true,
       "description": "iLO / BMC Redfish event log entries",
+      "routing_aliases": ["ilo events", "ilo event log", "ilo event logs", "ilo event log entries", "bmc event logs"],
       "date_rotation": {
         "style": "daily",
         "suffix": "-YYYY.MM.dd",

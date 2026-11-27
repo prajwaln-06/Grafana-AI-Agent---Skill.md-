@@ -60,6 +60,8 @@ class Settings(GeminiTransportSettings):
         default=None,
         description="Index registry file. None = the packaged "
                     "app/opensearch_catalog/index_registry.json.")
+    opensearch_router_fastpath: bool = Field(
+        default=False, description="Skip the Router for simple reads naming one registered OpenSearch family when the Prometheus catalog has no candidate.")
     opensearch_field_catalog_ttl_seconds: float = Field(default=600.0, gt=0)
     opensearch_field_catalog_stale_ttl_seconds: float = Field(
         default=3600.0, gt=0,

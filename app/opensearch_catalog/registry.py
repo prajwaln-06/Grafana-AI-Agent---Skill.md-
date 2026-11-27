@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,6 +46,13 @@ KNOWN_CAVEAT_CODES = frozenset({
 })
 
 _PATTERN_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_ROUTING_ALIAS = r"[a-z0-9]+(?:[ _/-]+[a-z0-9]+)*"
+_SIMPLE_LOG_READ = re.compile(
+    r"(?:please )?(?:show|list|find|count|get) (?:me )?(?:(?:up to )?[1-9][0-9]{0,2} )?(?:the )?"
+    rf"(?P<family>{_ROUTING_ALIAS}?)"
+    r"(?: (?:in|from|over|during) (?:the )?(?:last|past) [1-9][0-9]{0,3} (?:minutes?|hours?|days?))?"
+    r"(?: containing (?P<quote>['\"])[\w .:/-]{1,100}(?P=quote))?[?.]?"
+)
 _ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # A concrete name or a prefix wildcard: letters, digits, '_', '.', '-' and an
 # optional single trailing '*'. Deliberately cannot express a bare '*', '_all',
@@ -134,6 +142,7 @@ class PatternEntry:
     # code as a string: {"meaning", "kind" ("login"/"logout"), "evidence"}. Used only to
     # LABEL result buckets; never to widen what may be queried. Empty = none verified.
     event_codes: dict[str, dict] = field(default_factory=dict)
+    routing_aliases: tuple[str, ...] = ()
 
     @property
     def max_window_seconds(self) -> int:
@@ -154,6 +163,16 @@ class IndexRegistry:
     @property
     def enabled_patterns(self) -> tuple[PatternEntry, ...]:
         return tuple(p for p in self.patterns if p.enabled)
+
+    def match_simple_read(self, question: str) -> PatternEntry | None:
+        """Resolve an explicit family name in a bounded, read-only question shape."""
+        normalized = " ".join(unicodedata.normalize("NFKC", question).casefold().split())
+        match = _SIMPLE_LOG_READ.fullmatch(normalized)
+        if match is None:
+            return None
+        alias = match["family"]
+        candidates = [p for p in self.patterns if alias in (p.pattern_id, *p.routing_aliases)]
+        return candidates[0] if len(candidates) == 1 and candidates[0].enabled else None
 
     def get(self, pattern_id: str) -> PatternEntry | None:
         for p in self.patterns:
@@ -468,6 +487,11 @@ def _build_entry(raw: dict, index: int, skills_root: Path | None) -> PatternEntr
     projection = _str_list(raw, "output_projection", where, required=True)
     display_time = _str_list(raw, "display_time_fields", where, required=False)
     caveats = _str_list(raw, "known_caveats", where, required=False)
+    routing_aliases = tuple(s.casefold() for s in _str_list(raw, "routing_aliases", where, required=False))
+    if len(set(routing_aliases)) != len(routing_aliases) or any(
+        re.fullmatch(_ROUTING_ALIAS, alias) is None for alias in routing_aliases
+    ):
+        _fail(where, "routing_aliases must be distinct family names")
 
     if time_field not in queryable:
         _fail(where, f"time_field {time_field!r} must be listed in queryable_fields")
@@ -529,6 +553,7 @@ def _build_entry(raw: dict, index: int, skills_root: Path | None) -> PatternEntr
         analyses=_build_analyses(raw.get("analyses"), where, roles, set(groupable) - set(never_group),
                                  set(projection), set(display_time)),
         event_codes=_build_event_codes(raw.get("event_codes"), where, roles),
+        routing_aliases=routing_aliases,
     )
 
 
