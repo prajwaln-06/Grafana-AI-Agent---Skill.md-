@@ -52,7 +52,7 @@ The optional Router bypass accepts a simple read verb plus one exact registered 
 | `GEMINI_HTTP_TIMEOUT_SECONDS` | `60` | Default timeout for each Gemini HTTP request |
 | `GEMINI_MAX_ATTEMPTS` | `3` | Maximum application attempts for transient and JSON failures |
 | `GEMINI_ROUTER_THINKING_BUDGET` | Unset | Optional setting for the shared Router |
-| `GEMINI_GENERATOR_THINKING_BUDGET` | `0` | Thinking budget for OpenSearch-only read generation |
+| `GEMINI_GENERATOR_THINKING_BUDGET` | Unset | Optional thinking budget for OpenSearch-only read generation |
 | `GEMINI_GENERATOR_MAX_OUTPUT_TOKENS` | `8192` | Output budget for OpenSearch-only read generation |
 | `GEMINI_GENERATOR_TIMEOUT_SECONDS` | Unset | Optional HTTP timeout override for OpenSearch-only read generation |
 
