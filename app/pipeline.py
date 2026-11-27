@@ -469,8 +469,9 @@ async def _resolve_matched_group(question: str, matched: list[dict], panic_mode:
     # Context building does blocking HTTP (label discovery, OpenSearch mappings): keep it off the event loop.
     generator_context = await asyncio.to_thread(
         _build_generator_context, matched, skill_index, settings, question=question, catalog=catalog)
+    opensearch_only = _is_opensearch_only(matched)
 
-    if generator_context.reference_universe_mismatch:
+    if not opensearch_only and generator_context.reference_universe_mismatch:
         # Batch 3 (Phase 5): a confident catalog decision shares zero
         # overlap with this reference universe's known_prometheus_metrics
         # -- ordinary Level 1/2 (which only ever broadens WITHIN this same
@@ -513,7 +514,7 @@ async def _resolve_matched_group(question: str, matched: list[dict], panic_mode:
         opensearch_context=generator_context.opensearch,
     )
 
-    level1_candidate_scope = {m["name"] for m in generator_context.metric_metadata} or None
+    level1_candidate_scope = None if opensearch_only else ({m["name"] for m in generator_context.metric_metadata} or None)
     contract, merged, validated = await _run_generation_attempt(
         question, matched, panic_mode, generator_context, skill_index, settings, context, action_intent,
         unresolved_topics, candidate_metric_scope=level1_candidate_scope, validator_kwargs=validator_kwargs,

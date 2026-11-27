@@ -269,6 +269,25 @@ def test_fast_path_requires_opt_in_unique_alias_and_no_candidate(settings, monke
     assert pipeline._fast_opensearch_route(question, enabled, fresh, catalog) is None
 
 
+@pytest.mark.parametrize("universe_mismatch", [True, False])
+def test_open_search_only_never_retries_the_prometheus_catalog_chain(skill_index, settings, fixture_cache, universe_mismatch):
+    matched = [{"reference_path": CTL_REF, "data_source": "opensearch"}]
+    ctx = pipeline._build_generator_context(matched, skill_index, settings)
+    ctx.reference_universe_mismatch = universe_mismatch
+    ctx.metric_metadata = ({"name": "unexpected_metric"},)
+    refused = {"mode": "single", "status": "unsupported_metric", "reference_used": CTL_REF,
+               "requested_measurement": "logs", "explanation": "unexpected generator status"}
+    with patch.object(pipeline, "_build_generator_context", return_value=ctx), \
+         patch.object(pipeline, "_run_level3_fallback") as level3, \
+         patch.object(llm_client, "call_llm_json", side_effect=[
+             MagicMock(parsed={"matched_references": matched}), MagicMock(parsed=refused),
+         ]) as llm:
+        result = _run(pipeline.run_pipeline("q", skill_index, settings, catalog=Catalog("1", "test")))
+    assert llm.call_count == 2  # one Router and one Generator
+    level3.assert_not_called()
+    assert result["status"] == "unsupported_metric"
+
+
 def test_end_to_end_valid_query_is_canonicalised(skill_index, settings, fixture_cache):
     q = {"size": 0, "query": {"bool": {"filter": [W, {"named_condition": "abnormal_severity"}]}},
          "aggs": {"h": {"terms": {"field": "Resource.host.name.keyword"}}}}
