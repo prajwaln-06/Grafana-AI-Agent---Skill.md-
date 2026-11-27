@@ -106,7 +106,7 @@ an answer that relies on a flagged behavior must say so plainly.
 | `severity_vocabulary_per_index` | Severity values differ in case and vocabulary per family; read exact stored values, never assume them |
 | `text_not_aggregatable` | Free-text message fields are for search (`match` / `match_phrase`), never for grouping |
 
-All filtering, sorting and time bucketing uses the ingest time field `@timestamp`.
+Time ranges and histograms use the ingest time field `@timestamp`. Row order depends on the query's permitted sort and the text ranking setting.
 
 ## Query Intents
 
@@ -124,19 +124,41 @@ query shapes in the relevant domain file and the DSL mechanics in
 
 ### Minimum-match text searches
 
-For an explicit request to match at least N named clues in one log entry, use
-one `should` branch per clue in a nested `bool` under the query's `filter`.
-Set that group's `minimum_should_match` to N, or to `1` for a request to match
-any clue. Keep the time range and mandatory fields in required filters. A
-`bool` with `filter` or `must` makes its `should` branches optional when the
-minimum is omitted.
+Write the user's unordered words in one `match` on the confirmed text field.
+The guard removes common standalone words, case-folds and deduplicates the
+keywords, and applies the default minimum. Use an explicit integer when the
+user specifies a minimum, including `1` for "any" or "either" and the number
+of distinct meaningful terms for "all." An explicit `operator: "and"` retains
+all-word matching. Use `match_phrase` for ordered wording.
 
-For an explicit minimum of unordered terms in one message, use `match` on the
-confirmed text field with a `query` string, `operator: "or"`, and integer
-`minimum_should_match` from `1` to `10`. The guard removes standalone common
-English words such as `the` and `is` and collapses repetitions before running
-the search. Ask for more distinct terms if too few remain. Use `match_phrase`
-for quoted wording and required filters for exact identifiers and exclusions.
+| Distinct keywords | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Default minimum | Clarify | Omitted | 2 | 2 | 3 | 3 | 4 | 5 | 6 | 6 | 7 |
+
+The default uses `OPENSEARCH_TEXT_DEFAULT_MSM_RATIO=0.75`, rounded down and
+bounded by 2, 10, and the keyword count. `OPENSEARCH_TEXT_DEFAULT_MSM_ENABLED`
+defaults to true. A minimum of two or more normally becomes a `bool.should`
+with one branch per keyword. A plain word's variants share one OR match.
+Identifiers such as `eth0/1`, `link-down`, and `x1000c0s0b0` each use one phrase
+branch. When the expanded form exceeds a limit, the guard warns and keeps a
+native analyzed match with the same integer minimum. An explicit minimum of
+one also uses the native form.
+
+For "at least N of these phrases," put one whole phrase or exact condition
+per branch in a nested `bool` with integer `minimum_should_match: N`. Each
+canonical signal can fill one slot. When any bool has `should` and no minimum,
+the guard adds `1`. Keep the time range and mandatory conditions outside the
+alternatives. Ask for more terms or a minimum of one when the requested
+threshold cannot be satisfied.
+
+Use `must_not` for clear exclusions. Inside unordered text, `not`, `no`, `never`,
+`without`, and `cannot` do not count as signals. The guard can move an adjacent
+single word into `must_not`. It records a warning if that scope is unclear.
+
+With `OPENSEARCH_RANK_TEXT_MATCHES=true` (the default), text rows without a
+requested sort appear best matches first, ties newest first. An explicit
+permitted sort takes precedence. Counts and aggregations keep required text
+in filter context.
 
 ### Multi-step analyses
 
@@ -177,7 +199,7 @@ stating a count or a time range.
 
 | Field | Meaning |
 |---|---|
-| `count` | `value`, `relation` (`eq` exact, `gte` at least) and `exact`. A `gte` total is a lower bound, never an exact count |
+| `count` | `value`, `relation`, and `exact`. A `gte` total is a lower bound. An absent total has relation `unknown` |
 | `rows` | rows returned vs documents matched, and whether more are available (row results are capped) |
 | `aggregation` | type, `approximate` and why: `cardinality` is an estimate; terms counts may be off by `doc_count_error_upper_bound`; `sum_other_doc_count` documents fall outside the returned buckets |
 | `partial`, `partial_reasons`, `shards`, `shard_failures` | the search timed out or some shards failed, so results may be incomplete. If every shard fails the result is an error, not an empty answer |
@@ -185,7 +207,9 @@ stating a count or a time range.
 | `observed_range` | the earliest and latest `@timestamp` **among the returned rows (or non-empty buckets) only**. It is not the full range of data available in OpenSearch and not the query window; absent data at the edges of the window cannot be told from this |
 | `severity_vocabulary`, `severity_vocabulary_provisional` | how far each severity vocabulary is trusted (`observed`, `documented`, `provisional`); a verdict that rests on a provisional vocabulary must be presented as such |
 | `redaction` | counts of masked user names and IP addresses and the policy used |
-| `text_search_note` | only on an empty result of a free-text search: what was searched, and that a message wording the same thing differently would not be found. An empty text search is not evidence that the event did not happen |
+| `text_search`, `text_search_note` | Search keywords, integer minimum if any, its source (`default`, `explicit`, `none`), and whether ranking applied. The note explains a threshold and how to loosen it, or describes a text search that returned no matches |
+| `row_order` | "best matches first, ties newest first" when relevance ranking applied |
+| `timings` | Request-stage durations in milliseconds. `opensearch_took_ms` comes from OpenSearch and unobserved stages are null |
 
 An analysis result also carries `execution.analysis`: its type, the parameters
 actually used, the counts it is based on (for example how many entities
@@ -226,9 +250,7 @@ URL, as it is for Prometheus.
   one-hour window silently misses most events.
 - Questions this domain cannot answer are `unmapped` with an explanation, never
   `unsupported_metric` (that status is for Prometheus measurements).
-- Free-text search uses only `match` / `match_phrase` on the family's text role.
-  Write the words the user used; do not guess the tense or plural the stored
-  message uses. The system also matches the other forms of the words
-  (`overheated` / `overheating` / `overheats` / `overheat`) and records that in
-  the result, so two wordings of the same question give the same query.
+- Free-text search uses `match` / `match_phrase` on the family's text role.
+  Write the user's words. The guard records the canonical word-form expansion
+  and any limit that requires a fallback in `guard_notes`.
 - State the relevant caveat whenever a count or ordering depends on it.

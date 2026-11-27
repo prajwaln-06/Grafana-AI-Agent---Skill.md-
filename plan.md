@@ -1,87 +1,123 @@
-# OpenSearch `minimum_should_match` implementation plan
+﻿# OpenSearch minimum match and latency implementation
 
-## Recommendation
+## Guard and query shape
 
-Use `bool.minimum_should_match` first to answer questions that name several independent log signals. For “at least two of these three,” give each signal one `should` branch and set the minimum to `2`. Put that group under the existing time filter, along with any requested host, service, event code, or other exact constraint. This improves match precision for rows, counts, and aggregations because a document must meet the same threshold in each case.
+The generator writes one `match` for unordered text and includes an integer minimum when the user asks for one, including “any” and “all.” For named signals it writes a nested `bool.should` with one branch per phrase or exact condition. The guard requires at least one branch whenever `should` is present and the minimum is omitted. It validates explicit minima against the number of branches and compares canonical branches for duplicates when the minimum exceeds one.
 
-Add integer `match.minimum_should_match` for unordered searches within one message field. Remove standalone English stop words such as `the` and `is` before applying the threshold. Clean up repeated words so they cannot make an impossible threshold appear valid. Keep phrase matching for quoted or named log phrases and exact filters for structured fields. Preserve the current behavior of ordinary `match` queries with no threshold.
+For an unordered `match` on a confirmed text role, the guard removes standalone common words and negators, case-folds and deduplicates keywords, and handles clear adjacent exclusions with `must_not`. With the default ratio, 2, 3, 4, 5, 6, 7, and 8 keywords require 2, 2, 3, 3, 4, 5, and 6 matches respectively. A single keyword receives no default minimum. The computed minimum is bounded by 2, 10, and the keyword count. Empty positive input or an impossible explicit minimum produces a clarification.
 
-## What OpenSearch supports
-
-`bool.minimum_should_match` counts the immediate `should` branches of that Boolean group. Its default is `0` when that group contains `must` or `filter`, and `1` when it has `should` clauses and neither is present. This matters here because every agent query requires a top-level time range. Putting message alternatives beside that range at the top level without a threshold can return every document in the window. A nested `bool` under `filter` makes the intended threshold explicit and keeps it in filter context. [OpenSearch Boolean query documentation](https://docs.opensearch.org/latest/query-dsl/compound/bool/)
-
-`match.minimum_should_match` applies to optional clauses produced by the message field’s search analyzer with `operator: "or"`. The analyzer can split identifiers, drop words, or combine alternatives into a single clause, so use explicit Boolean branches when the user names the exact signals to count. The linked page demonstrates both a full-text threshold and the effect of changing Boolean thresholds. [Minimum should match](https://docs.opensearch.org/latest/query-dsl/minimum-should-match/) · [Match query](https://docs.opensearch.org/latest/query-dsl/full-text/match/)
-
-| Documented form | Example and meaning | Project rollout |
-| --- | --- | --- |
-| Non-negative integer | `2` requires two optional clauses. | Start with this form. |
-| Negative integer | `-1` allows one optional clause to be missed. | Revisit if users ask for “all but one” over variable lists. |
-| Non-negative percentage | `80%` of four rounds down to three required clauses. | Defer until there is a variable-size list use case. |
-| Negative percentage | `-20%` of four allows zero misses after rounding down, so all four are required. | Defer for the same reason. |
-| Conditional expression | `2<75%` requires all clauses for up to two, then applies `75%`. | Defer. |
-| Multiple conditions | `3<-1 5<50%` requires all for up to three, allows one miss for four or five, and requires half for six or more. | Defer. |
-
-The documentation describes bounds for percentage-derived minima. If expression support becomes useful, test its rounding and boundary behavior on the deployed OpenSearch version before accepting strings from the generator. [Minimum should match value formats](https://docs.opensearch.org/latest/query-dsl/minimum-should-match/#valid-values)
-
-## Repository baseline before implementation
-
-| Existing code | What it means for the feature |
-| --- | --- |
-| [Runtime prompt](app/opensearch_catalog/context.py) and [index registry](app/opensearch_catalog/index_registry.json) | The generator already sees the fields that the registry and runtime mapping both allow. The text fields are `fields.Value` for fabric health, `Body` for controller logs, and `Message` for iLO. The existing 24-hour default and 7-day cap frame these searches. |
-| [Query guard](app/opensearch_catalog/guard.py) | `_bool` accepts integers from `0` to `10` and currently does not compare them with the number of `should` branches. `_match` accepts `query` and optional `operator` on `match`, and only `query` on `match_phrase`. It rejects the new `match` option today. |
-| [Text variants](app/opensearch_catalog/text_forms.py) and [severity](app/opensearch_catalog/severity.py) | Tense and plural variants already use an inner one-of group. Severity uses one-of groups where the family's rules call for alternatives. An outer threshold should count a complete group as one signal. |
-| [Canonicalization](app/opensearch_catalog/canonical.py), [validation](app/validator.py), and [execution](app/executor.py) | The guard normalizes the query, then validation and execution independently recheck the canonical form. Thresholds must survive those checks unchanged. The executor already sends accepted DSL to OpenSearch and exposes the count, buckets, or rows. |
-
-## Phase 1 · Require a minimum number of distinct signals
-
-1. Update the generator prompt and the shared OpenSearch log guidance to show `1` for “any of” and the requested integer for “at least N of.” Represent each named phrase as its own branch. Use an ordinary required filter for a condition that must always hold. Keep omitted and explicit-zero thresholds compatible with their current behavior.
-2. In `_Checker._bool`, validate positive minima against the number of immediate `should` branches after canonicalization, within the existing `0`–`10` limit. For a minimum above `1`, reject duplicate canonical branches so the same condition cannot fill two slots. Keep the internal variant groups at `1`, including on a guard recheck. When the requested minimum exceeds the given signals or is ambiguous, have the generator ask for clarification. The guard should reject invalid generated DSL with the reason.
-3. Document a worked example using the controller family. The phrases below illustrate user-supplied clues. Actual log wording should come from the question or verified data.
-
-**Example question**
-
-> Show controller logs from the last 24 hours containing at least two of these clues in the same log entry: “link down,” “port disabled,” and “transceiver fault.”
+For minima of at least two, the guard normally compiles word forms into a single OR match per keyword and technical identifiers into phrase branches. For example, this group requires two of three signals.
 
 ```json
 {
-  "query": {
-    "bool": {
-      "filter": [
-        {"range": {"@timestamp": {"gte": "now-24h", "lte": "now"}}},
-        {
-          "bool": {
-            "should": [
-              {"match_phrase": {"Body": "link down"}},
-              {"match_phrase": {"Body": "port disabled"}},
-              {"match_phrase": {"Body": "transceiver fault"}}
-            ],
-            "minimum_should_match": 2
-          }
-        }
-      ]
-    }
+  "bool": {
+    "should": [
+      {"match": {"Body": {"query": "fail failed failing fails", "operator": "or"}}},
+      {"match_phrase": {"Body": "eth0/1"}},
+      {"match_phrase": {"Body": "link-down"}}
+    ],
+    "minimum_should_match": 2
   }
 }
 ```
 
-A single entry with both “link down” and “port disabled” passes. An entry with only “link down” fails. Multiple forms of one phrase still count as one signal after the guard expands the variants. This filter applies to one document at a time. A time-proximity question across separate events still uses the existing correlation path.
+The compiler reserves the rest of the query's clauses before expanding. The guard allows at most 30 clauses, five levels of Boolean nesting, and 100 characters per text value. It uses a cleaned native match with the same integer minimum and warns when the per-signal form exceeds a limit. The native form applies the threshold to analyzed terms. Explicit minimum one uses that native form. Ordered phrase searches can still match word-form variants. Named conditions for severity retain their registry-defined branches.
 
-## Phase 2 · Match meaningful words within one message
+The runtime supplies the intersection of permitted registry fields and discovered operations. The guard canonicalizes the query and records applied changes and warnings in `guard_notes`. The validator and executor independently re-run the full guard and compare the query with the canonical form. Numeric strings, booleans, floats, negatives, percentages, and expressions cannot enter the DSL as minima.
 
-1. Extend `_Checker._match` to accept an integer `minimum_should_match` from `1` to `10` for `match` on a confirmed text field. Allow explicit `operator: "or"` or its omitted equivalent. Reject `operator: "and"` with the threshold, as well as booleans, floats, strings, and the option on `match_phrase`. Keep the existing field, text-length, depth, and clause limits.
-2. In the guard, remove standalone stop words case-insensitively and deduplicate repeated search words. Use a short allowlisted set of common English stop words and preserve negation such as `no` and `not`, as well as technical terms. Reject inputs with fewer remaining words than the requested minimum, including an all-stop-word input. Record the cleanup in `guard_notes`. Have the generator ask for more terms when it can identify this case before it builds a query.
-3. Preserve the threshold inside each generated `match` variant and recognize the validated integer when rechecking the group. Keep the surrounding word-form group at one of its variants. Skip variant expansion if it would create repeated tokens that alter the threshold; keep the cleaned search terms and the original threshold.
-4. For a controller search for two words from `the link is down at the port`, send `{"match":{"Body":{"query":"link down port","operator":"or","minimum_should_match":2}}}` before any applicable word-form expansion. Keep the configured field analyzer. Test analyzer behavior and real results with stop words, punctuation, and an input that would otherwise collapse to one meaningful term. Use explicit Boolean branches when the user requires distinct named signals. [Analyze API](https://docs.opensearch.org/latest/api-reference/analyze-apis/) · [OpenSearch match implementation](https://github.com/opensearch-project/OpenSearch/blob/main/server/src/main/java/org/opensearch/index/query/MatchQueryBuilder.java#L380-L402)
-5. Update `execution.metadata.text_search_note` in [the executor](app/executor.py) to describe the actual search when no rows match. Phrase searches have ordering semantics. A thresholded `match` searches analyzed terms, and an outer Boolean threshold requires a number of signal branches. Keep the existing response shape.
+For relevance ranking, the guard moves required positive text to scoring context for rows without a supplied sort and uses `[{"_score":"desc"},{"@timestamp":"desc"}]` for the shipped families. The generator cannot specify `_score`. Explicit permitted sorts take precedence. Count-only and aggregation queries keep required text in filter context. Execution reports the keywords, threshold provenance, rank status, and ordering when applied.
 
-For both phases, verify [result cache](app/opensearch_catalog/query_cache.py) and [query-plan cache](app/opensearch_catalog/plan_cache.py) behavior. The caches already store and revalidate canonical DSL. Use exact-question reuse for newly introduced threshold queries until the semantic matcher can prove that a reworded question asks for the same minimum and signals. Cover both directions so an existing broad cached query cannot answer an explicit threshold question either. Ordinary severity and word-form groups with a minimum of `1` keep their current cache behavior.
+[Guard](app/opensearch_catalog/guard.py) · [Text forms](app/opensearch_catalog/text_forms.py) · [Executor](app/executor.py)
 
-## How to measure improvement
+## Caches and routing
 
-- **Correctness.** Test `0`, `1`, `2`, and all branches as appropriate, plus missing clauses, too-large minima, duplicate branches, and invalid types. Include time and host scope, nested variant groups, severity, and exact event code filters. Add a pipeline test that verifies the canonical threshold in the actual client payload and a test that invalid DSL never reaches `_search`. Keep fixtures for rows, exact counts, and buckets. Mocked responses establish what the agent sends. A disposable OpenSearch index with known documents establishes which documents match.
-- **Relevance.** On a fixed time window and a labeled set of representative log entries, compare an any-signal baseline, the requested threshold, and an all-signals or phrase query where applicable. Record expected versus returned IDs and matched counts. A two-of-three query should drop one-signal noise while preserving relevant two-signal entries that an all-three query misses. Recheck the existing 30 mentor questions for regressions, especially severity and exact text searches.
-- **Cost.** Run repeated comparisons on the same indices, with identical time bounds, projections, size, sort, and `track_total_hits`. Bypass the agent caches when measuring execution cost. Compare median and p95 OpenSearch `took` and end-to-end latency. Fewer matching documents can reduce collection, aggregation, or response work. Query evaluation can also get more expensive, so a smaller result alone cannot establish a speedup. Use `profile: true` in separate direct diagnostics because profiling adds overhead. [OpenSearch Profile API](https://docs.opensearch.org/latest/api-reference/search-apis/profile/)
+The answer cache defaults to a 60-second TTL, with shorter lifetimes for narrow relative windows. The OpenSearch plan cache defaults on and re-executes valid plans against the current window. The guard's provenance lets equivalent questions reuse default-threshold entries. An explicit threshold is eligible for exact wording only. Configuration fingerprints include the threshold, ranking, and OpenSearch routing settings.
 
-## Implementation status
+The agent schedules cache writes before yielding the response. The reported timing covers work already completed. Backlogged answer writes cannot extend expiry, and an admin reload invalidates earlier pending writes. Field discovery serves a prior mapping while it is inside the stale TTL and refreshes once per pattern in the background. Cold and expired requests need a usable discovered view. Startup and admin reload schedule prewarm for all enabled patterns.
 
-Both phases are implemented. The automated tests cover query generation with a mocked model, validation, execution, and cache eligibility. A disposable OpenSearch 2.19.4 index verified that removing stop words and requiring two analyzed terms filters out irrelevant synthetic log entries while preserving consistent rows, counts, and aggregation results. Production relevance and latency measurements remain separate work. [Feature guide](mimuum_match.md)
+The optional Router bypass accepts a simple read verb plus one exact registered family alias or pattern ID, an optional recent time window, and an optional quoted text clause. The request must have no clarification context, the family must be enabled and unique, and a working Prometheus catalog must return zero candidates. All other requests use the Router. OpenSearch-only generation uses the compact prompt and does not enter the Prometheus candidate-expansion retry chain.
+
+[Result and plan caches](app/opensearch_catalog/runtime.py) · [Registry](app/opensearch_catalog/index_registry.json) · [Pipeline](app/pipeline.py)
+
+## Settings
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `OPENSEARCH_TEXT_DEFAULT_MSM_ENABLED` | `true` | Applies the default minimum to eligible unordered text |
+| `OPENSEARCH_TEXT_DEFAULT_MSM_RATIO` | `0.75` | Fraction rounded down for the default minimum |
+| `OPENSEARCH_RANK_TEXT_MATCHES` | `true` | Ranks eligible text rows before applying newest-first ties |
+| `OPENSEARCH_QUERY_PLAN_CACHE_ENABLED` | `true` | Reuses validated OpenSearch plans |
+| `OPENSEARCH_RESULT_CACHE_TTL_SECONDS` | `60` | Default completed-answer lifetime |
+| `OPENSEARCH_ROUTER_FASTPATH` | `false` | Enables the conservative registry-only routing decision |
+| `GEMINI_HTTP_TIMEOUT_SECONDS` | `60` | Default timeout for each Gemini HTTP request |
+| `GEMINI_MAX_ATTEMPTS` | `3` | Maximum application attempts for transient and JSON failures |
+| `GEMINI_ROUTER_THINKING_BUDGET` | Unset | Optional setting for the shared Router |
+| `GEMINI_GENERATOR_THINKING_BUDGET` | `0` | Thinking budget for OpenSearch-only read generation |
+| `GEMINI_GENERATOR_MAX_OUTPUT_TOKENS` | `8192` | Output budget for OpenSearch-only read generation |
+| `GEMINI_GENERATOR_TIMEOUT_SECONDS` | Unset | Optional HTTP timeout override for OpenSearch-only read generation |
+
+Gemini clients are reused by credential and mode. Transient requests use jittered backoff and honor `Retry-After` on HTTP 429. Invalid JSON gets one immediate retry within the attempt budget. AI Studio model discovery remembers which fallback succeeded and skips previously confirmed 404s. OpenSearch uses a keep-alive pool and trims response fields for counts and projected rows while preserving aggregation, total, shard, timeout, error, and timing data. [Google Gen AI SDK](https://googleapis.github.io/python-genai/) · [OpenSearch REST parameters](https://docs.opensearch.org/latest/api-reference/common-parameters/)
+
+## Verification
+
+The fixture suite checks guard idempotency, closed grammar, minimum values, scoring context, cache provenance, concurrent mapping refresh, and response filtering. The operator timing log and `execution.metadata.timings` report milliseconds for the phases actually run. The field `opensearch_took_ms` is reported by the cluster. Guard time can overlap validation time, and a background cache write has no response-time duration.
+
+### Prompt size
+
+Gemini's token counter measured the OpenSearch-only controller fixture. The total counts the complete input text. The individual counts measure sections separately.
+
+| Section | C0 | Release |
+| --- | ---: | ---: |
+| System instruction | 976 | 503 |
+| SKILL 5 operating principles | 1,273 | — |
+| SKILL 6 construction | 1,741 | — |
+| SKILL 7 refusal conditions | 644 | — |
+| SKILL 8 parameter interpretation | 972 | — |
+| SKILL 9 output contract | 2,451 | — |
+| Matched reference | 4,339 | 4,339 |
+| Parent overview | 3,476 | — |
+| Datasource fundamentals | 1,389 | — |
+| Live OpenSearch context | 2,311 | 2,360 |
+| Panic and action flags | 23 | 23 |
+| Question | 11 | 11 |
+| **Complete input** | **19,613** | **7,235** |
+
+### Stage checkpoints
+
+The fixture uses 30 warm-mapping cache misses per checkpoint and a fake model and cluster. The live checkpoint uses the same three questions from the full comparison with the query caches disabled. The live median includes every attempt and the last column gives OpenSearch executions. Treat these short checkpoint runs as diagnostics because provider response time and host load varied.
+
+| Checkpoint | Fixture median total, ms | Live probe median total, s | Live searches |
+| --- | ---: | ---: | ---: |
+| C0 instrumentation | 5.174 | 11.235 | 3/3 |
+| C1.1 transport | 71.233 | 8.012 | 3/3 |
+| C1.2 call policy | 46.728 | 3.675 | 3/3 |
+| C2 prompt reduction | 7.122 | 3.676 | 2/3 |
+| C3 background writes | 2.471 | 4.075 | 3/3 |
+| C4 field refresh | 3.037 | 6.481 | 2/3 |
+| C5 OpenSearch transport | 2.944 | 7.015 | 2/3 |
+| C6 Router bypass | 6.476 | 6.024 | 2/3 |
+| C7 retry scope | 4.992 | 2.930 | 2/3 |
+| C8 dead code cleanup | 3.058 | 15.227 | 3/3 |
+
+The C2 through C7 probes caught a malformed single-result envelope on the fabric-count question in some runs. The final prompt includes a complete result example and explicit JSON syntax instructions. With an empty Prometheus catalog fixture, C6 skipped the Router on 30 of 30 eligible reads. The configured live catalog returned competing candidates for the tested aliases and kept their ordinary route.
+
+### Before and after
+
+The same 12 questions ran against live Gemini and the configured OpenSearch cluster before C1 and after all changes. Both query caches and the optional Router bypass were disabled. All 12 requests reached OpenSearch in both runs. The fixture columns use 30 warm-mapping misses per run. Values are median milliseconds.
+
+| Stage | Fixture C0 | Fixture release | Live C0 | Live release |
+| --- | ---: | ---: | ---: | ---: |
+| Router | 0.587 | 0.590 | 5,139.430 | 1,105.496 |
+| Context | 0.270 | 0.351 | 0.885 | 0.883 |
+| Generator | 0.858 | 0.207 | 5,950.524 | 1,559.030 |
+| Validate | 0.189 | 0.205 | 0.613 | 0.409 |
+| Guard | 0.532 | 0.643 | 1.602 | 1.193 |
+| Search client | 0.042 | 0.057 | 44.552 | 19.974 |
+| OpenSearch `took` | 3.000 | 3.000 | 32.500 | 9.000 |
+| Normalize | 0.051 | 0.060 | 0.086 | 0.120 |
+| Cache store | 1.885 | — | 0.847 | — |
+| **Total** | **5.174** | **3.724** | **11,361.507** | **2,832.959** |
+
+OpenSearch `took` is synthetic in the fixture. The other fixture paths had median totals of 6.212 to 4.062 ms on a cold field catalog, 4.322 to 3.923 ms on a plan hit, and 1.296 to 2.665 ms on a result hit. The live suite's sample p95 by nearest rank was 20.299 s before and 8.061 s after. These sequential runs measure the configured endpoints under the test workload. Production concurrency and sustained tail latency are unmeasured.
+
+[Feature guide](mimuum_match.md) · [Environment settings](.env.example)
