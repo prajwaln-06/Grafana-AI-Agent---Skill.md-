@@ -177,11 +177,15 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "bound (date math like now-24h/now, or ISO timestamps). Never use event-time/display-only fields to filter.",
         "- Use the window the user asked for. NEVER shrink or widen it to fit a limit; a window over the maximum is "
         "rejected and the user is asked to narrow it.",
+        "- If no window was stated, use now-24h to now when the family allows it and state the assumption. "
+        "Ask for a window if that default exceeds the family's limit. Date math uses UTC. For /d or date-only "
+        "bounds, gte and lt round to the start of the day, while lte and gt round to the end.",
         "- Allowed clauses: bool(must/filter/should/must_not/minimum_should_match), term, terms, match, match_phrase "
         "(text role only, max %d chars), prefix (exact fields), range, exists. Forbidden: script, query_string, "
         "wildcard, regexp, fuzzy, nested/join queries, runtime/script fields, paging (`from`, search_after)." % lim.max_text_chars,
-        "- Use the user's own unordered search words in one match. The guard applies and reports the default "
-        "word minimum and handles word forms. Example for text field Message: "
+        "- Use the user's own unordered search words in one match. The guard handles word forms. "
+        + ("It applies and reports the default word minimum. " if lim.text_default_msm_enabled else "")
+        + "Example for text field Message: "
         "`{\"match\":{\"Message\":\"fan off rpm\"}}`. Use match_phrase for quoted or ordered text.",
         "- Set match minimum_should_match only if the user specifies a minimum or asks for any, either, or all "
         "of those words. For 'either fan or rpm', use `{\"match\":{\"Message\":"
@@ -226,9 +230,8 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "- Time proximity across two index families (\"near\", \"around the same time as\") is answered with "
         "mode \"multi\": exactly two ordinary row queries (one per pattern_id, each with its own fields) plus a "
         "top-level `correlation` object {\"type\": \"temporal_proximity\", \"left\": 0, \"right\": 1, "
-        "\"tolerance\": \"<duration>\"}. Use the tolerance stated by the user if given, or \"5m\" for general \"near\" "
-        "questions (such as whether link-down events occurred near fabric availability problems) and state the 5m "
-        "tolerance in the explanation. Python does the comparison; never estimate it yourself.",
+        "\"tolerance\": \"<duration>\"}. Use the tolerance stated by the user. Omit it for unspecified \"near\" "
+        "questions so the system can ask. Python does the comparison.",
     ]
     for pid in sorted(ctx.patterns):
         pc = ctx.patterns[pid]

@@ -65,6 +65,43 @@ def test_prompt_block_does_not_leak_other_families(skill_index, settings, fixtur
     assert "ilo_events" not in ctx.opensearch_block and "fabric_health" not in ctx.opensearch_block
 
 
+def test_log_generator_prompt_keeps_live_rules_and_uses_stable_question_last(skill_index, settings, fixture_cache):
+    ilo = "references/opensearch-logs/ilo-events.md"
+    matched = [{"reference_path": p, "data_source": "opensearch"} for p in (ilo, CTL_REF)]
+    ctx = pipeline._build_generator_context(matched, skill_index, settings)
+    clarification = pipeline.PipelineContext(previous_question="Which logs?", clarification_answer="Controller logs")
+    prompts = []
+    with patch.object(llm_client, "call_llm_json", return_value=MagicMock(parsed={})) as llm:
+        for refs in (matched, list(reversed(matched))):
+            context = pipeline._build_generator_context(refs, skill_index, settings)
+            _run(pipeline._run_generator("Controller logs", refs, False, context, skill_index, settings, clarification))
+            prompts.append(llm.call_args.kwargs)
+    assert prompts[0] == prompts[1]
+    prompt = prompts[0]["prompt"]
+    assert prompt.endswith("User question: Controller logs")
+    assert prompt.index(CTL_REF) < prompt.index(ilo)
+    assert ctx.opensearch_block in prompt
+    assert "If no window was stated, use now-24h to now" in prompt
+    assert "Parent exporter overview" not in prompt and "Datasource fundamentals" not in prompt
+    assert "SKILL.md reference sections" not in prompt
+    assert "prompt_injection_attempt" in prompts[0]["system_instruction"]
+    assert '{"mode":"single","status":"ok","data_source":"opensearch"' in prompts[0]["system_instruction"]
+    assert "Omit it for unspecified" in ctx.opensearch_block
+
+
+def test_mixed_generator_keeps_the_original_prompt_sections(skill_index, settings):
+    matched = [{"data_source": "prometheus"}, {"data_source": "opensearch"}]
+    ctx = pipeline.GeneratorContext(overview_texts={"overview.md": "overview"},
+                                    fundamentals_texts={"fundamentals.md": "fundamentals"},
+                                    labels_block="live labels")
+    with patch.object(llm_client, "call_llm_json", return_value=MagicMock(parsed={})) as llm:
+        _run(pipeline._run_generator("q", matched, False, ctx, skill_index, settings, pipeline.PipelineContext()))
+    sent = llm.call_args.kwargs
+    assert sent["system_instruction"] == pipeline._build_generator_instructions(settings, "read_query")
+    assert all(text in sent["prompt"] for text in (
+        "SKILL.md reference sections", "Parent exporter overview", "Datasource fundamentals", "live labels"))
+
+
 def test_unreachable_cluster_gives_unusable_context_not_a_guess(skill_index, settings):
     runtime.reset()
     dead = FieldCatalogCache(lambda ip: None, ttl_seconds=60, stale_ttl_seconds=60, max_indices=50,
