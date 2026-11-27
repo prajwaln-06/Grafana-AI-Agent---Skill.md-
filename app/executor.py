@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
 
 from app import normalizer, opensearch_client, prometheus_client, time_utils
 from app.config import Settings
@@ -445,47 +444,6 @@ def _execute_opensearch_analysis(entry: dict, pattern, view, ctx, window: dict |
                "warnings": res.warnings, "completed": True}
     block["analysis"] = redact_value(summary, policy)
     return block
-
-
-def _best_effort_extract_time_range(dsl_body: dict) -> dict | None:
-    """Best-effort, display-only extraction of a `range` clause on a date
-    field from the DSL body, so the frontend can show an absolute resolved
-    window for OpenSearch results too -- OpenSearch itself resolves date
-    math (now-1h, now/d, ...) server-side, so this is never required for
-    correct execution, only for a nicer response. Returns None if no
-    recognizable date range clause is found; never raises."""
-    try:
-        candidates = _find_range_clauses(dsl_body)
-        for field_name, bounds in candidates:
-            if field_name in ("@timestamp", "Timestamp"):
-                gte, lte = bounds.get("gte"), bounds.get("lte")
-                if gte and lte:
-                    start = time_utils.resolve_relative_time(gte) if isinstance(gte, str) and gte.startswith("now") else None
-                    end = time_utils.resolve_relative_time(lte) if isinstance(lte, str) and lte.startswith("now") else None
-                    return {
-                        "from_expression": gte,
-                        "to_expression": lte,
-                        "start": _iso(start) if start else None,
-                        "end": _iso(end) if end else None,
-                    }
-    except Exception:  # noqa: BLE001 -- purely cosmetic extraction, never fatal
-        return None
-    return None
-
-
-def _find_range_clauses(node: Any) -> list[tuple[str, dict]]:
-    found = []
-    if isinstance(node, dict):
-        if "range" in node and isinstance(node["range"], dict):
-            for field_name, bounds in node["range"].items():
-                if isinstance(bounds, dict):
-                    found.append((field_name, bounds))
-        for value in node.values():
-            found.extend(_find_range_clauses(value))
-    elif isinstance(node, list):
-        for item in node:
-            found.extend(_find_range_clauses(item))
-    return found
 
 
 # ---- shared helpers ---------------------------------------------------------------
