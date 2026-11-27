@@ -28,18 +28,28 @@ label_discovery.py's live Prometheus label verification:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 
 import requests
+from requests.adapters import HTTPAdapter
 
 DEFAULT_TIMEOUT_SECONDS = 15
 
 _session: requests.Session | None = None
+_session_lock = Lock()
+_RESPONSE_FIELDS = "took,timed_out,terminated_early,_shards,aggregations,hits.total,error,status"
+_PROJECTED_HITS = "hits.hits._index,hits.hits._id,hits.hits._source"
 
 
 def _get_session() -> requests.Session:
     global _session
     if _session is None:
-        _session = requests.Session()
+        with _session_lock:
+            if _session is None:
+                session = requests.Session()
+                for scheme in ("http://", "https://"):
+                    session.mount(scheme, HTTPAdapter(pool_connections=10, pool_maxsize=20))
+                _session = session
     return _session
 
 
@@ -69,8 +79,13 @@ def search(base_url: str, index_pattern: str, dsl_body: dict,
     never silently drops out of a query mid-window).
     """
     url = f"{base_url.rstrip('/')}/{index_pattern}/_search"
+    request = {"json": dsl_body, "timeout": timeout, "auth": auth}
+    if dsl_body.get("size") == 0:
+        request["params"] = {"filter_path": _RESPONSE_FIELDS}
+    elif isinstance(dsl_body.get("_source"), list) or dsl_body.get("_source") is False:
+        request["params"] = {"filter_path": f"{_RESPONSE_FIELDS},{_PROJECTED_HITS}"}
     try:
-        resp = _get_session().post(url, json=dsl_body, timeout=timeout, auth=auth)
+        resp = _get_session().post(url, **request)
     except requests.exceptions.Timeout:
         return ExecutionOutcome(status="timeout", error=f"Request to {url} exceeded {timeout}s timeout.")
     except requests.exceptions.ConnectionError as e:
@@ -85,6 +100,8 @@ def search(base_url: str, index_pattern: str, dsl_body: dict,
             status="endpoint_error",
             error=f"{url} returned non-JSON response (HTTP {resp.status_code}).",
         )
+    if not isinstance(body, dict):
+        return ExecutionOutcome(status="endpoint_error", error=f"{url} returned a non-object search response.")
 
     if resp.status_code != 200:
         error_msg = _extract_opensearch_error(body) or f"HTTP {resp.status_code}"

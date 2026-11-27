@@ -131,6 +131,14 @@ def test_empty_result_that_was_partial_says_so(settings):
     assert ex["metadata"]["partial"] is True
 
 
+def test_empty_projected_rows_without_a_total_preserve_the_unknown_count(settings):
+    raw = raw_hits(0)
+    del raw["hits"]["total"]
+    ex, _ = run(settings, entry(query={**CANON_Q, "track_total_hits": False}), outcome(raw, status="empty_result"))
+    assert ex["execution_status"] == "empty_result"
+    assert ex["metadata"]["count"] == {"value": None, "relation": "unknown", "exact": False}
+
+
 def test_endpoint_errors_are_redacted_and_bounded(settings):
     err = "failed for user admin at 10.0.0.1 body={'secret': 'x'} " + "y" * 2000
     ex, _ = run(settings, entry(), outcome(None, status="endpoint_error", error=err))

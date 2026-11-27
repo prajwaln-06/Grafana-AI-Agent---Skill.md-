@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from app import opensearch_client as osc
@@ -48,6 +49,46 @@ def test_search_opensearch_error_body_extracted():
         outcome = osc.search("http://localhost:9600", "syslog-*", {"bad": True})
     assert outcome.status == "endpoint_error"
     assert "bad query syntax" in outcome.error
+
+
+def test_the_session_reuses_keep_alive_adapters(monkeypatch):
+    monkeypatch.setattr(osc, "_session", None)
+    session = osc._get_session()
+    try:
+        assert osc._get_session() is session
+        assert all(session.adapters[scheme]._pool_maxsize == 20 for scheme in ("http://", "https://"))
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("body, projected", [
+    ({"size": 2, "_source": ["Body"]}, True),
+    ({"size": 0, "aggs": {"by_kind": {}}}, False),
+])
+def test_filtered_search_preserves_open_search_envelope_and_leaves_dsl_intact(body, projected):
+    returned = {"took": 5, "timed_out": True, "terminated_early": True,
+                "_shards": {"failed": 1, "failures": [{"reason": {"type": "shard_error"}}]},
+                "hits": {"total": {"value": 101, "relation": "gte"}},
+                "aggregations": {"by_kind": {"buckets": []}}}
+    if projected:
+        returned["hits"]["hits"] = [{"_index": "log", "_id": "1", "_source": {"Body": "message"}}]
+    with patch.object(osc, "_get_session") as mock_session:
+        mock_session.return_value.post.return_value = _fake_response(200, returned)
+        result = osc.search("http://localhost:9600", "log-*", body, timeout=12)
+    sent = mock_session.return_value.post.call_args.kwargs
+    assert sent["json"] is body and sent["timeout"] == 12
+    fields = set(sent["params"]["filter_path"].split(","))
+    assert {"hits.total", "aggregations", "_shards", "took", "timed_out", "terminated_early", "error"} <= fields
+    assert ("hits.hits._source" in fields) is projected
+    assert result.raw_body == returned and result.status == "success"
+
+
+def test_unprojected_search_does_not_filter_response_and_rejects_non_object():
+    with patch.object(osc, "_get_session") as mock_session:
+        mock_session.return_value.post.return_value = _fake_response(200, [1])
+        result = osc.search("http://localhost:9600", "log-*", {})
+    assert "params" not in mock_session.return_value.post.call_args.kwargs
+    assert result.status == "endpoint_error"
 
 
 def test_discover_attribute_keys_from_mapping():

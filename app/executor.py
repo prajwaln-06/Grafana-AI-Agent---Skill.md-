@@ -331,8 +331,6 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
         max_series=settings.max_series_per_result, max_hits=settings.max_hits_per_result,
     )
     normalized.metadata["query_window"] = window
-    if outcome.status == "empty_result":
-        normalized.metadata["count"] = {"value": 0, "relation": "eq", "exact": True}
     block = _success_block(normalized, base_url, resolved_time_range=window)
     # A count-only query (size 0) legitimately returns no rows; the answer is the
     # total in metadata.count. Only "matched nothing" is an empty result.
