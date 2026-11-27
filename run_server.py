@@ -67,14 +67,16 @@ def _log_opensearch_readiness(settings) -> None:
 async def _catalog_runtime_lifespan(_app: FastAPI):
     """Starts the background catalog refresh when
     CATALOG_RUNTIME_RECONCILIATION_ENABLED is true and stops it on shutdown.
-    With the flag off (the default) this does nothing at all. A problem
+    Also starts background discovery for the enabled OpenSearch patterns. A problem
     starting the worker is logged and never prevents the server from serving
     queries -- the pipeline then just has the static catalog."""
     from app.catalog import runtime as catalog_runtime
+    from app.opensearch_catalog import runtime as os_runtime
 
     worker_runtime = None
     settings = get_settings()
     _log_opensearch_readiness(settings)
+    os_runtime.prewarm_field_catalogs(settings)
     if settings.catalog_runtime_reconciliation_enabled:
         try:
             worker_runtime = catalog_runtime.get_runtime(settings)

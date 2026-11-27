@@ -556,8 +556,13 @@ def test_admin_reload_endpoint_reports_the_registry(monkeypatch, settings):
     # real ones would load the real catalog into process-wide state other tests then see.
     monkeypatch.setattr("run_server.get_settings", lambda: settings)
     monkeypatch.setattr("app.agent.get_settings", lambda: settings)
+    planned = []
+    monkeypatch.setattr(runtime.get_field_cache(settings), "prewarm", lambda entries: planned.append(
+        sorted(entry.pattern_id for entry in entries)))
     with patch.object(runtime, "reset_registry", wraps=runtime.reset_registry) as spy, TestClient(app) as client:
+        assert planned == [["controller_log", "fabric_health", "ilo_events"]]
         r = client.post("/api/v1/admin/reload-skill")
     assert r.status_code == 200 and spy.called
     assert r.json()["opensearch_registry"] == {"loaded": True,
                                                "patterns": ["controller_log", "fabric_health", "ilo_events"]}
+    assert len(planned) == 2 and planned[0] == planned[1]

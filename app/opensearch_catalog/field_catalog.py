@@ -50,6 +50,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Callable
 
@@ -70,6 +71,8 @@ STATUS_UNAVAILABLE = "unavailable"
 REASON_FETCH_FAILED = "fetch_failed"
 REASON_NO_MATCHING_INDICES = "no_matching_indices"
 REASON_REFRESH_FAILED = "refresh_failed"  # stale copy served because a refresh failed
+REASON_REFRESHING = "refresh_in_progress"
+REASON_REFRESH_INVALIDATED = "refresh_invalidated"
 
 OP_EXISTS = "exists"
 OP_TERM = "term"
@@ -355,10 +358,16 @@ def make_mapping_fetcher(base_url: str, *, auth: tuple[str, str] | None = None,
     return fetch
 
 
+@dataclass
+class _Refresh:
+    finished: threading.Event = field(default_factory=threading.Event)
+    invalidated: bool = False
+    catalog: FieldCatalog | None = None
+    warm_after: PatternEntry | None = None
+
+
 class FieldCatalogCache:
-    """Per-pattern TTL cache of FieldCatalogs. Thread-safe for the request
-    path (network calls happen outside the lock; two simultaneous refreshes of
-    one pattern may both fetch, which is harmless)."""
+    """Per-pattern TTL cache with a single refresh and bounded stale reads."""
 
     def __init__(self, fetch_mapping: MappingFetcher, *,
                  ttl_seconds: float = DEFAULT_TTL_SECONDS,
@@ -378,19 +387,25 @@ class FieldCatalogCache:
         self._good: dict[str, FieldCatalog] = {}          # last successful catalog per pattern_id
         self._last_failure: dict[str, float] = {}          # pattern_id -> time of last failed fetch
         self._last_failure_reason: dict[str, str] = {}
+        self._refreshes: dict[str, _Refresh] = {}
 
     def invalidate(self, pattern_id: str | None = None) -> None:
-        """Drop cached catalogs (all, or one pattern) and any failure backoff,
-        e.g. from an admin reload. The next get() refetches."""
+        """Discard data and prevent outstanding fetches from publishing it again."""
         with self._lock:
             if pattern_id is None:
                 self._good.clear()
                 self._last_failure.clear()
                 self._last_failure_reason.clear()
+                for refresh in self._refreshes.values():
+                    refresh.invalidated = True
+                    refresh.warm_after = None
             else:
                 self._good.pop(pattern_id, None)
                 self._last_failure.pop(pattern_id, None)
                 self._last_failure_reason.pop(pattern_id, None)
+                if refresh := self._refreshes.get(pattern_id):
+                    refresh.invalidated = True
+                    refresh.warm_after = None
 
     def snapshot(self) -> dict[str, dict]:
         """Read-only view of what is cached, per pattern_id, for an operator status
@@ -428,27 +443,102 @@ class FieldCatalogCache:
         now = self._clock()
         with self._lock:
             cached = self._good.get(pid)
-            last_fail = self._last_failure.get(pid)
-            fail_reason = self._last_failure_reason.get(pid, REASON_FETCH_FAILED)
-        if cached is not None and cached.discovered_at is not None \
-                and now - cached.discovered_at < self._ttl:
-            return cached
-        if last_fail is not None and now - last_fail < self._backoff:
-            return self._degraded(pid, cached, now, fail_reason)
+            age = self._age(cached, now)
+            if age < self._ttl:
+                return cached
+            if self._in_backoff(pid, now):
+                return self._degraded(pid, cached, now, self._last_failure_reason[pid])
+            refresh = self._refreshes.get(pid)
+            starts_refresh = refresh is None
+            if starts_refresh:
+                refresh = self._refreshes[pid] = _Refresh()
 
-        mapping = self._safe_fetch(entry.index_pattern)
-        if mapping is None:
-            return self._record_failure(pid, cached, now, REASON_FETCH_FAILED)
-        catalog = build_field_catalog(pid, mapping, max_indices=self._max_indices, discovered_at=now)
-        if catalog.discovery_status != STATUS_FRESH:
-            return self._record_failure(pid, cached, now, catalog.reason or REASON_NO_MATCHING_INDICES)
+        if age <= self._stale_ttl:
+            if starts_refresh:
+                self._start_background(entry, refresh, now)
+            return replace(cached, discovery_status=STATUS_STALE, reason=REASON_REFRESHING)
+
+        # Cold or expired: wait for a confirmed view and fail closed on failure.
+        if starts_refresh:
+            self._refresh(entry, refresh, now)
+        else:
+            refresh.finished.wait()
+        return refresh.catalog or FieldCatalog(
+            pattern_id=pid, discovery_status=STATUS_UNAVAILABLE, reason=REASON_REFRESH_INVALIDATED)
+
+    def prewarm(self, entries: Iterable[PatternEntry]) -> None:
+        """Start discovery for enabled patterns without delaying service startup."""
+        for entry in entries:
+            self._prewarm_pattern(entry)
+
+    def _prewarm_pattern(self, entry: PatternEntry) -> None:
+        pid, now = entry.pattern_id, self._clock()
         with self._lock:
-            self._good[pid] = catalog
-            self._last_failure.pop(pid, None)
-            self._last_failure_reason.pop(pid, None)
-        return catalog
+            if self._age(self._good.get(pid), now) < self._ttl or self._in_backoff(pid, now):
+                return
+            pending = self._refreshes.get(pid)
+            if pending is not None:
+                if pending.invalidated:
+                    pending.warm_after = entry
+                return
+            refresh = self._refreshes[pid] = _Refresh()
+        self._start_background(entry, refresh, now)
 
     # -- internals --
+
+    @staticmethod
+    def _age(cached: FieldCatalog | None, now: float) -> float:
+        if cached is None or cached.discovered_at is None:
+            return float("inf")
+        return now - cached.discovered_at
+
+    def _in_backoff(self, pid: str, now: float) -> bool:
+        return pid in self._last_failure and now - self._last_failure[pid] < self._backoff
+
+    def _start_background(self, entry: PatternEntry, refresh: _Refresh, now: float) -> None:
+        try:
+            threading.Thread(target=self._refresh, args=(entry, refresh, now), daemon=True,
+                             name=f"opensearch-mapping-{entry.pattern_id}").start()
+        except RuntimeError:
+            logger.exception("Could not start OpenSearch field discovery for %r", entry.pattern_id)
+            self._publish(entry.pattern_id, refresh, now, None, REASON_FETCH_FAILED)
+
+    def _refresh(self, entry: PatternEntry, refresh: _Refresh, now: float) -> None:
+        pid = entry.pattern_id
+        mapping = self._safe_fetch(entry.index_pattern)
+        catalog = None
+        if mapping is not None:
+            try:
+                catalog = build_field_catalog(pid, mapping, max_indices=self._max_indices, discovered_at=now)
+            except Exception:
+                logger.exception("Could not build the OpenSearch field catalog for %r", pid)
+        reason = (catalog.reason or REASON_NO_MATCHING_INDICES) if catalog is not None else REASON_FETCH_FAILED
+        self._publish(pid, refresh, now, catalog, reason)
+
+    def _publish(self, pid: str, refresh: _Refresh, now: float, catalog: FieldCatalog | None, reason: str) -> None:
+        failed = False
+        followup = None
+        with self._lock:
+            if not refresh.invalidated:
+                if catalog is not None and catalog.discovery_status == STATUS_FRESH:
+                    self._good[pid] = catalog
+                    self._last_failure.pop(pid, None)
+                    self._last_failure_reason.pop(pid, None)
+                    refresh.catalog = catalog
+                else:
+                    self._last_failure[pid] = now
+                    self._last_failure_reason[pid] = reason
+                    refresh.catalog = self._degraded(pid, self._good.get(pid), self._clock(), reason)
+                    failed = True
+            if refresh.warm_after is None:
+                del self._refreshes[pid]
+            else:
+                followup = self._refreshes[pid] = _Refresh()
+            refresh.finished.set()
+        if failed:
+            logger.warning("OpenSearch field discovery failed for %r (%s)", pid, reason)
+        if followup is not None:
+            self._start_background(refresh.warm_after, followup, self._clock())
 
     def _safe_fetch(self, index_pattern: str) -> dict | None:
         try:
@@ -461,14 +551,6 @@ class FieldCatalogCache:
                            index_pattern)
             return None
         return result
-
-    def _record_failure(self, pid: str, cached: FieldCatalog | None, now: float, reason: str) -> FieldCatalog:
-        with self._lock:
-            self._last_failure[pid] = now
-            self._last_failure_reason[pid] = reason
-        logger.warning("OpenSearch field discovery failed for %r (%s); serving %s", pid, reason,
-                       "stale cache if within window, else unavailable")
-        return self._degraded(pid, cached, now, reason)
 
     def _degraded(self, pid: str, cached: FieldCatalog | None, now: float, reason: str) -> FieldCatalog:
         if cached is not None and cached.discovered_at is not None \
@@ -551,7 +633,8 @@ def build_field_view(entry: PatternEntry, catalog: FieldCatalog) -> PatternField
     if catalog.discovery_status != STATUS_UNAVAILABLE and not time_ok:
         warnings.append(f"time field {entry.time_field!r} is not a confirmed date field")
     if catalog.discovery_status == STATUS_STALE:
-        warnings.append("field catalog is stale: the last refresh failed")
+        detail = "refresh in progress" if catalog.reason == REASON_REFRESHING else "the last refresh failed"
+        warnings.append(f"field catalog is stale: {detail}")
 
     return PatternFieldView(
         pattern_id=entry.pattern_id, discovery_status=catalog.discovery_status, reason=catalog.reason,

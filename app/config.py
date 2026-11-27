@@ -64,7 +64,7 @@ class Settings(GeminiTransportSettings):
     opensearch_field_catalog_stale_ttl_seconds: float = Field(
         default=3600.0, gt=0,
         description="How long a previously discovered catalog may still be served "
-                    "(marked stale) when a refresh fails. Must be >= the TTL.")
+                    "(marked stale) during background refresh or after failure. Must be >= the TTL.")
     opensearch_field_catalog_max_indices: int = Field(
         default=7, ge=1, description="Newest N daily indices merged per pattern.")
     opensearch_field_catalog_failure_backoff_seconds: float = Field(default=30.0, ge=0)

@@ -62,9 +62,11 @@ def reset_registry() -> None:
 
 
 def reset_field_cache() -> None:
-    """Drops cached field-catalog instances so newly added index fields are discovered immediately."""
+    """Invalidate field views and any in-flight discoveries of the old registry."""
     with _lock:
-        _caches.clear()
+        caches = list(_caches.values())
+    for cache in caches:
+        cache.invalidate()
 
 
 def reload_registry_status(settings) -> dict:
@@ -82,6 +84,7 @@ def reload_registry_status(settings) -> dict:
     except Exception as e:  # noqa: BLE001 -- report, never raise from an admin endpoint
         logger.exception("Unexpected failure while reloading the OpenSearch registry")
         return {"loaded": False, "error": f"unexpected error: {type(e).__name__}"}
+    prewarm_field_catalogs(settings, registry=reg)
     return {"loaded": True, "patterns": sorted(p.pattern_id for p in reg.enabled_patterns)}
 
 
@@ -109,7 +112,7 @@ def get_field_cache(settings) -> FieldCatalogCache:
            settings.opensearch_field_catalog_stale_ttl_seconds,
            settings.opensearch_field_catalog_max_indices,
            settings.opensearch_field_catalog_failure_backoff_seconds,
-           settings.opensearch_auth_username)
+           settings.opensearch_timeout_seconds, settings.opensearch_auth)
     with _lock:
         cache = _caches.get(key)
         if cache is None:
@@ -123,6 +126,17 @@ def get_field_cache(settings) -> FieldCatalogCache:
             )
             _caches[key] = cache
         return cache
+
+
+def prewarm_field_catalogs(settings, *, registry: IndexRegistry | None = None) -> None:
+    """Start read-only mapping discovery without blocking startup or admin reload."""
+    try:
+        registry = registry if registry is not None else get_registry(settings)
+        get_field_cache(settings).prewarm(registry.enabled_patterns)
+    except RegistryError:
+        logger.info("Skipping OpenSearch prewarm because the registry is unavailable")
+    except Exception:
+        logger.exception("Could not start OpenSearch field prewarm")
 
 
 def field_cache_snapshots() -> dict[str, dict]:

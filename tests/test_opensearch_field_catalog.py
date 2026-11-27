@@ -5,13 +5,16 @@ Mappings come from tests/fixtures/opensearch/*.json, which are SYNTHETIC
 (see that directory's README) -- these tests verify the code paths, not the
 live cluster's actual mappings."""
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from app.opensearch_catalog.field_catalog import (
     OP_EXISTS, OP_GROUP_BY, OP_MATCH, OP_METRIC, OP_RANGE, OP_SORT, OP_TERM,
-    REASON_FETCH_FAILED, REASON_NO_MATCHING_INDICES, REASON_REFRESH_FAILED,
+    REASON_FETCH_FAILED, REASON_NO_MATCHING_INDICES, REASON_REFRESH_FAILED, REASON_REFRESHING,
     STATUS_FRESH, STATUS_STALE, STATUS_UNAVAILABLE,
     FieldCatalogCache, build_field_catalog, build_field_view, flatten_index_mapping,
     make_mapping_fetcher,
@@ -262,6 +265,13 @@ def _cache(fetcher, clock, **kw):
     return FieldCatalogCache(fetcher, clock=clock, **kw)
 
 
+def _wait_for_refresh(cache, entry):
+    with cache._lock:
+        refresh = cache._refreshes.get(entry.pattern_id)
+    if refresh is not None:
+        assert refresh.finished.wait(3)
+
+
 @pytest.fixture()
 def entry(registry):
     return registry.get("controller_log")
@@ -282,8 +292,9 @@ def test_cache_refetches_after_ttl(entry):
     cache = _cache(fetcher, clock)
     cache.get(entry)
     clock.now += 601
-    cache.get(entry)
-    assert fetcher.calls == 2
+    assert cache.get(entry).reason == REASON_REFRESHING
+    _wait_for_refresh(cache, entry)
+    assert cache.get(entry).discovery_status == STATUS_FRESH and fetcher.calls == 2
 
 
 def test_failed_refresh_serves_stale_then_expires_to_unavailable(entry):
@@ -292,6 +303,8 @@ def test_failed_refresh_serves_stale_then_expires_to_unavailable(entry):
     good = cache.get(entry)
     fetcher.result = None                       # OpenSearch goes down
     clock.now += 601
+    assert cache.get(entry).discovery_status == STATUS_STALE
+    _wait_for_refresh(cache, entry)
     stale = cache.get(entry)
     assert stale.discovery_status == STATUS_STALE and stale.reason == REASON_REFRESH_FAILED
     assert stale.usable and stale.fields == good.fields
@@ -359,6 +372,81 @@ def test_invalidate_clears_cache_and_backoff(entry):
     fetcher.result = _load("mapping_controller_log.json")
     cache.invalidate()
     assert cache.get(entry).discovery_status == STATUS_FRESH
+
+
+def test_stale_reads_are_immediate_and_share_one_background_refresh(entry):
+    clock = _Clock()
+    started, release = threading.Event(), threading.Event()
+    mapping = _load("mapping_controller_log.json")
+    calls = []
+
+    def fetch(pattern):
+        calls.append(pattern)
+        if len(calls) == 2:
+            started.set()
+            assert release.wait(3)
+        return mapping
+
+    cache = _cache(fetch, clock)
+    before = cache.get(entry)
+    clock.now += 601
+    try:
+        for _ in range(8):
+            stale = cache.get(entry)
+            assert stale.reason == REASON_REFRESHING and stale.fields == before.fields
+        assert started.wait(2) and len(calls) == 2
+    finally:
+        release.set()
+    _wait_for_refresh(cache, entry)
+    assert cache.get(entry).discovered_at == clock.now
+
+
+def test_cold_reads_join_prewarm_and_fail_closed_on_error(entry):
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def fetch(pattern):
+        calls.append(pattern)
+        started.set()
+        assert release.wait(3)
+        return None
+
+    cache = _cache(fetch, _Clock())
+    cache.prewarm([entry])
+    assert started.wait(2)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        readers = [pool.submit(cache.get, entry) for _ in range(4)]
+        release.set()
+        assert all(f.result(timeout=2).discovery_status == STATUS_UNAVAILABLE for f in readers)
+    assert calls == [entry.index_pattern]
+
+
+def test_reload_drops_in_flight_mapping_and_prewarm_uses_the_new_index(entry):
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def fetch(pattern):
+        calls.append(pattern)
+        if pattern == entry.index_pattern:
+            started.set()
+            assert release.wait(3)
+            return _one({"old": {"type": "keyword"}})
+        return _one({"new": {"type": "keyword"}})
+
+    cache = _cache(fetch, _Clock())
+    cache.prewarm([entry])
+    assert started.wait(2)
+    replacement = replace(entry, index_pattern="new-index-*")
+    cache.invalidate(entry.pattern_id)
+    cache.prewarm([replacement])
+    assert calls == [entry.index_pattern] and cache.snapshot() == {}
+    with cache._lock:
+        old = cache._refreshes[entry.pattern_id]
+    release.set()
+    assert old.finished.wait(2) and old.catalog is None
+    new = cache.get(replacement)
+    assert set(new.fields) == {"new"}
+    assert calls == [entry.index_pattern, replacement.index_pattern]
 
 
 def test_patterns_are_cached_independently(registry):
