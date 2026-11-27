@@ -115,7 +115,9 @@ def strip_cache_info(result):
     r = copy.deepcopy(result)
     blocks = r["results"] if r.get("mode") == "multi" else [r]
     for b in blocks:
-        b["execution"].get("metadata", {}).pop("result_cache", None)
+        metadata = b["execution"].get("metadata", {})
+        metadata.pop("result_cache", None)
+        metadata.pop("timings", None)
     return r
 
 
@@ -260,7 +262,7 @@ def test_first_question_runs_the_pipeline_and_the_second_identical_one_does_not(
     assert len(cluster.searches) == 2, "no OpenSearch search for a cache hit"
     info = cache_info(second)[0]
     assert info["hit"] is True and info["match"] == "exact" and "similarity" not in info
-    assert strip_cache_info(second) == first                                          # the same completed answer
+    assert strip_cache_info(second) == strip_cache_info(first)                        # the same completed answer
     assert second["execution"]["fetched_at"] == first["execution"]["fetched_at"]      # honest about when it was fetched
     assert ev2.actions.state_delta.get("previous_question", 1) is None                # same state reset as a normal answer
 
@@ -301,7 +303,7 @@ def test_equivalent_wordings_reuse_the_stored_answer(absence_agent, question):
     assert len(cluster.searches) == 2
     info = cache_info(res)[0]
     assert info["match"] == "semantic" and "similarity" not in info
-    assert strip_cache_info(res) == first
+    assert strip_cache_info(res) == strip_cache_info(first)
 
 
 def test_nodes_are_down_is_a_miss_unless_the_operator_declared_the_equivalence(monkeypatch, cache_settings, cluster):
@@ -323,7 +325,7 @@ def test_declared_family_aliases_make_nodes_are_down_equivalent(monkeypatch, cac
     first, _ = run.ask(Q_BASE)
     for q in ("Which nodes are down?", "Which nodes have stopped sending heartbeat signals?"):
         res, _ = run.ask(q)
-        assert cache_info(res)[0]["match"] == "semantic" and strip_cache_info(res) == first
+        assert cache_info(res)[0]["match"] == "semantic" and strip_cache_info(res) == strip_cache_info(first)
     assert run.pipeline_questions == [Q_BASE]
     # the alias belongs to fabric_health only: it does nothing for a question about a different noun
     run.ask("Which racks are down?")
@@ -504,7 +506,7 @@ def test_a_cached_absence_analysis_skips_both_internal_queries_and_keeps_summary
     assert [b["key"] for b in res["execution"]["buckets"]] == [b["key"] for b in first["execution"]["buckets"]]
     assert {b["key"] for b in res["execution"]["buckets"]} == {"a0", "b0"}
     assert res["execution"]["metadata"]["query_window"] == first["execution"]["metadata"]["query_window"]
-    assert strip_cache_info(res) == first
+    assert strip_cache_info(res) == strip_cache_info(first)
 
 
 def test_recurrence_is_cached_under_its_own_concepts(monkeypatch, cache_settings, cluster):
@@ -879,7 +881,7 @@ def test_multi_mode_results_are_cached_whole_and_keep_their_shape(monkeypatch, c
     res, _ = run.ask(q)
     assert res["mode"] == "multi" and len(cluster.searches) == n and run.pipeline_questions == [q]
     assert [i["hit"] for i in cache_info(res)] == [True, True]
-    assert strip_cache_info(res) == first
+    assert strip_cache_info(res) == strip_cache_info(first)
     # a multi-entry answer is matched by its exact wording only
     run.ask("Show the fabric and controller messages")
     assert len(run.pipeline_questions) == 2
@@ -1535,7 +1537,7 @@ def test_a_complete_context_window_is_replayed_with_no_router_generator_or_opens
     second, _ = run.ask(CTX_Q)
     assert run.pipeline_questions == [CTX_Q], "Router/Generator must not run again"
     assert len(cluster.searches) == 4, "no OpenSearch search at all for the hit"
-    assert cache_info(second)[0]["hit"] is True and strip_cache_info(second) == first
+    assert cache_info(second)[0]["hit"] is True and strip_cache_info(second) == strip_cache_info(first)
 
 
 def test_an_incomplete_anchor_query_is_not_stored_and_the_next_identical_question_runs_the_pipeline_again(

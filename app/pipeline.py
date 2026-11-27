@@ -316,6 +316,7 @@ from datetime import datetime, timedelta, timezone
 
 from app import executor, label_discovery, llm_client, validator
 from app.opensearch_catalog import canonical as os_canonical, runtime as os_runtime
+from app.opensearch_catalog import timings as os_timings
 from app.opensearch_catalog.context import OpenSearchContext
 from app.catalog import runtime as catalog_runtime
 from app.catalog import search as catalog_search
@@ -396,6 +397,11 @@ async def run_pipeline(question: str, skill_index: SkillIndex, settings: Setting
         return _finalize(contract, unresolved_topics)
 
     matched = router_output.get("matched_references", [])
+    if isinstance(matched, list) and any(
+        isinstance(ref, dict) and str(ref.get("data_source", "")).strip().lower() == "opensearch"
+        for ref in matched
+    ):
+        os_timings.mark_opensearch()
     panic_mode = bool(router_output.get("panic_mode", False))
     action_intent = router_output.get("action_intent") or "read_query"
 
@@ -1913,6 +1919,7 @@ def _build_router_instructions(settings: Settings) -> str:
     return instructions
 
 
+@os_timings.measure("router_ms")
 async def _run_router(question: str, skill_index: SkillIndex, settings: Settings,
                        context: PipelineContext, catalog: Catalog | None = None) -> dict:
     section_headers = ["## 3.", "## 4.", "## 7."]
@@ -2033,6 +2040,7 @@ class Level1Outcome:
     reference_universe_mismatch: bool = False
 
 
+@os_timings.measure("context_ms")
 def _build_generator_context(matched: list[dict], skill_index: SkillIndex,
                               settings: Settings, question: str = "",
                               catalog: Catalog | None = None) -> GeneratorContext:
@@ -2436,6 +2444,7 @@ def _build_generator_instructions(settings: Settings, action_intent: str) -> str
     return instructions
 
 
+@os_timings.measure("generator_ms")
 async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
                           ctx: GeneratorContext, skill_index: SkillIndex, settings: Settings,
                           context: PipelineContext, action_intent: str = "read_query",

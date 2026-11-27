@@ -14,6 +14,7 @@ from app import executor
 from app import prometheus_plan_cache as prom_plan_cache
 from app.opensearch_catalog import plan_cache as os_plan_cache
 from app.opensearch_catalog import runtime as os_runtime
+from app.opensearch_catalog import timings as os_timings
 from app.skill_index import SkillIndex
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,11 @@ def _cache_scope(ctx) -> str:
     return f"{getattr(ctx, 'app_name', None) or 'app'}:{user}"
 
 
+def _response_message(ctx, payload: dict) -> str:
+    os_timings.finish(payload, ctx.invocation_id)
+    return json.dumps(payload)
+
+
 class ObservabilityQueryBuilderAgent(BaseAgent):
     _skill_index: SkillIndex | None = None
 
@@ -47,6 +53,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             )
         return self._skill_index
 
+    @os_timings.track_request
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         settings = get_settings()
         skill_index = self._get_skill_index_or_reload()
@@ -143,7 +150,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                 yield Event(
                     invocation_id=ctx.invocation_id,
                     author=self.name,
-                    message=json.dumps({"result": cached, "session_id": None}),
+                    message=_response_message(ctx, {"result": cached, "session_id": None}),
                     state={
                         "previous_question": None,
                         "previous_result": None,
@@ -176,15 +183,16 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
                 else:
                     # Eligible for the answer cache under its own rules; stored BEFORE the plan metadata is
                     # added so a later answer-cache hit does not claim a plan-cache hit it never had.
-                    await asyncio.to_thread(
-                        os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
+                    with os_timings.stage("cache_store_ms"):
+                        await asyncio.to_thread(
+                            os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
                     os_plan_cache.annotate(executed, {
                         "hit": True, "match": plan_hit.match, "age_seconds": plan_hit.age_seconds,
                         "cache_entry_id": plan_hit.entry_id, "revalidated": True})
                     yield Event(
                         invocation_id=ctx.invocation_id,
                         author=self.name,
-                        message=json.dumps({"result": executed, "session_id": None}),
+                        message=_response_message(ctx, {"result": executed, "session_id": None}),
                         state={
                             "previous_question": None,
                             "previous_result": None,
@@ -249,7 +257,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             yield Event(
                 invocation_id=ctx.invocation_id,
                 author=self.name,
-                message=json.dumps({
+                message=_response_message(ctx, {
                     "error": f"The query pipeline took longer than {settings.pipeline_timeout_seconds:.0f}s and was aborted. Please try again."
                 }),
             )
@@ -259,7 +267,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             yield Event(
                 invocation_id=ctx.invocation_id,
                 author=self.name,
-                message=json.dumps({"error": "The query pipeline failed unexpectedly. Please try again."}),
+                message=_response_message(ctx, {"error": "The query pipeline failed unexpectedly. Please try again."}),
             )
             return
 
@@ -281,7 +289,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
             yield Event(
                 invocation_id=ctx.invocation_id,
                 author=self.name,
-                message=json.dumps({"result": contract, "session_id": ctx.session.id}),
+                message=_response_message(ctx, {"result": contract, "session_id": ctx.session.id}),
                 state={
                     "previous_question": question,
                     "previous_result": contract,
@@ -319,12 +327,13 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         # errors, partial runs, incomplete analyses and anything that is not OpenSearch). Not for a
         # dependency-resolved compound question, whose later queries depend on earlier results.
         if fresh_question and not already_executed:
-            await asyncio.to_thread(
-                os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
-            # Remember the validated PLAN of that same successful execution (single, relative-window,
-            # non-dependent OpenSearch entries only -- the plan cache refuses everything else).
-            await asyncio.to_thread(
-                os_runtime.store_validated_plan, question, cache_scope, executed, settings, skill_index)
+            with os_timings.stage("cache_store_ms"):
+                await asyncio.to_thread(
+                    os_runtime.store_executed_result, question, cache_scope, executed, settings, skill_index)
+                # Remember the validated PLAN of that same successful execution (single, relative-window,
+                # non-dependent OpenSearch entries only -- the plan cache refuses everything else).
+                await asyncio.to_thread(
+                    os_runtime.store_validated_plan, question, cache_scope, executed, settings, skill_index)
         if plan_invalidation:
             os_plan_cache.annotate(executed, {"hit": False, "invalidation_reason": plan_invalidation})
         # Prometheus plan cache: remember the validated PLAN of a successful, eligible single Prometheus
@@ -337,7 +346,7 @@ class ObservabilityQueryBuilderAgent(BaseAgent):
         yield Event(
             invocation_id=ctx.invocation_id,
             author=self.name,
-            message=json.dumps({"result": executed, "session_id": None}),
+            message=_response_message(ctx, {"result": executed, "session_id": None}),
             state={
                 "previous_question": None,
                 "previous_result": None,

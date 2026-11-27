@@ -31,6 +31,7 @@ from typing import Any
 from app.normalizer import (
     Bucket, Hit, NormalizedResult, Point, Series, _epoch_ms_to_iso, _iso, _legend_label_for, safe_float,
 )
+from app.opensearch_catalog import timings
 from app.opensearch_catalog.redaction import RedactionPolicy, RedactionStats, redact_text, redact_value, safe_diagnostic
 from app.opensearch_catalog.registry import PatternEntry
 from app.opensearch_catalog.severity import _lookup, assess_hit
@@ -185,6 +186,7 @@ def _max_error_bound(node: Any) -> int:
 # ---- public ---------------------------------------------------------------------------------------------------
 
 
+@timings.measure("normalise_ms")
 def normalize_search_response(raw: dict, *, entry: PatternEntry, query: dict, policy: RedactionPolicy,
                               max_series: int, max_hits: int) -> NormalizedResult:
     stats = RedactionStats()

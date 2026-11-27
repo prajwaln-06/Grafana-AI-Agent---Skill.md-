@@ -40,6 +40,7 @@ from typing import Any
 
 from app import normalizer, opensearch_client, prometheus_client, time_utils
 from app.config import Settings
+from app.opensearch_catalog import timings as os_timings
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,14 @@ def _execute_prometheus_entry(entry: dict, settings: Settings) -> dict:
 # ---- OpenSearch -----------------------------------------------------------------
 
 
+def _search_opensearch(base_url: str, index_pattern: str, body: dict, *, timeout: float,
+                       auth: tuple[str, str] | None) -> opensearch_client.ExecutionOutcome:
+    with os_timings.stage("search_client_ms"):
+        outcome = opensearch_client.search(base_url, index_pattern, body, timeout=timeout, auth=auth)
+    os_timings.record_took(outcome.raw_body)
+    return outcome
+
+
 def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
     """Registry-governed OpenSearch execution. The index actually searched is
     ALWAYS resolved from the registry (by `pattern_id`, or by an exact match of
@@ -299,7 +308,7 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
             _add_text_search_metadata(block["metadata"], check.query, search_summary, empty=False)
         return block
 
-    outcome = opensearch_client.search(
+    outcome = _search_opensearch(
         base_url, pattern.index_pattern, check.query,
         timeout=max(settings.opensearch_timeout_seconds, limits.search_timeout_seconds),
         auth=settings.opensearch_auth,
@@ -404,8 +413,8 @@ def _execute_opensearch_analysis(entry: dict, pattern, view, ctx, window: dict |
                 "not_executed", f"{purpose}: query rejected before execution ({checked.code}): "
                                 f"{safe_diagnostic(checked.reason, policy)}")
         purposes.append(purpose)
-        outcome = opensearch_client.search(base_url, pattern.index_pattern, checked.query, timeout=timeout,
-                                           auth=settings.opensearch_auth)
+        outcome = _search_opensearch(base_url, pattern.index_pattern, checked.query, timeout=timeout,
+                                     auth=settings.opensearch_auth)
         if outcome.status not in ("success", "empty_result"):
             raise os_analysis.AnalysisError(outcome.status, f"{purpose}: {safe_diagnostic(outcome.error, policy)}")
         raw = outcome.raw_body or {}

@@ -102,6 +102,7 @@ from dataclasses import dataclass, field
 
 from app import time_utils
 from app.catalog.schema import CatalogStatus
+from app.opensearch_catalog import timings as os_timings
 
 # ---- public result type -------------------------------------------------------
 
@@ -178,6 +179,7 @@ _AGG_CLAUSE_RE = re.compile(
 # ---- entry point ----------------------------------------------------------------
 
 
+@os_timings.measure("validate_ms")
 def validate_contract(
     contract: dict,
     *,

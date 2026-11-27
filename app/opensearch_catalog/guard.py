@@ -56,7 +56,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app import time_utils
-from app.opensearch_catalog import text_forms
+from app.opensearch_catalog import text_forms, timings
 from app.opensearch_catalog.context import Limits, OpenSearchContext, PatternContext
 from app.opensearch_catalog.field_catalog import (
     OP_EXISTS, OP_GROUP_BY, OP_MATCH, OP_METRIC, OP_RANGE, OP_SORT, OP_TERM, FieldInfo,
@@ -1066,6 +1066,7 @@ class _Checker:
 # ---- public entry point -----------------------------------------------------------------------------------------------
 
 
+@timings.measure("guard_ms")
 def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = None,
                 followup_of: str | None = None, generated: bool = False,
                 _expand_text: bool = True) -> GuardResult:
