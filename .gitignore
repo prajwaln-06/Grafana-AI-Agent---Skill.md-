@@ -7,3 +7,6 @@ venv/
 *.egg-info/
 .DS_Store
 .adk/
+
+# Validation run output (scripts/run_full_validation.py)
+artifacts/

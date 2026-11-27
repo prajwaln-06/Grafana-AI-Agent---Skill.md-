@@ -1,5 +1,8 @@
 # Smoke test on the real cluster
 
+> Steps 0 to 6 below can be run in one go with `python scripts/run_full_validation.py` (see
+> [VALIDATION_RUNNER.md](VALIDATION_RUNNER.md)); this page remains the reference for what each step means.
+
 Every automated test in this repository uses a **pretend** OpenSearch. The
 fake network sits behind the real client code, and the field mappings come from
 **synthetic** fixtures written from the documented document shapes
