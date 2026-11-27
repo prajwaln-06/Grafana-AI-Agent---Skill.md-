@@ -38,6 +38,10 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: false,
         },
+        "/metrics": {
+          target: apiTarget,
+          changeOrigin: false,
+        },
       },
     },
   };

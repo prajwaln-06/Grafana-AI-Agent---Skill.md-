@@ -1,12 +1,22 @@
 """api/routes_health.py -- health, readiness, and capabilities introspection."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 
+from app import telemetry
 from app.api.schemas import CapabilitiesResponse, HealthResponse
 from app.auth.dependencies import require_principal
 
 router = APIRouter()
+
+
+@router.get("/metrics")
+async def metrics() -> Response:
+    """Prometheus metrics scrape endpoint, implementing Google SRE's 4 Golden Signals."""
+    return Response(
+        content=telemetry.generate_metrics_bytes(),
+        media_type=telemetry.CONTENT_TYPE_LATEST,
+    )
 
 
 @router.get("/healthz", response_model=HealthResponse)

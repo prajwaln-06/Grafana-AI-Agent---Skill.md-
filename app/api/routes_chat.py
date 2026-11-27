@@ -19,7 +19,9 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app import telemetry
 from app.adk_agent import run_adk_agent
+from app.api.telemetry_helpers import count_api_active_sessions
 from app.auth.audit import AuditEvent, record_denial
 from app.auth.dependencies import require_principal
 from app.auth.environment import EnvironmentDenied, EnvironmentRequired, resolve_environment
@@ -167,6 +169,20 @@ async def unified_chat_endpoint(
     req: ChatRequest,
     request: Request,
     principal: Principal = Depends(require_principal),
+) -> ChatResponse:
+    with telemetry.track_agent_turn(session_counter=count_api_active_sessions) as turn:
+        res = await _unified_chat_impl(req, request, principal)
+        if res.status == "policy_denied":
+            turn["status"] = "client_error"
+        elif res.status == "error":
+            turn["status"] = "server_error"
+        return res
+
+
+async def _unified_chat_impl(
+    req: ChatRequest,
+    request: Request,
+    principal: Principal,
 ) -> ChatResponse:
     text = req.message.strip()
     session = SESSION_STORE.get_or_create(req.sessionId or req.conversationId)

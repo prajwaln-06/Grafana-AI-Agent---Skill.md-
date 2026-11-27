@@ -10,12 +10,15 @@ or via the provided Dockerfile.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+from app import telemetry
 
 from app.api.routes_admin import router as admin_router
 from app.api.routes_auth import router as auth_router
@@ -95,6 +98,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_PUBLIC_API_KEY_PATHS = {"/healthz", "/readyz", "/metrics", "/docs", "/openapi.json"}
+
 _settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -102,6 +107,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 
 
@@ -109,13 +115,28 @@ app.add_middleware(
 async def api_key_guard(request: Request, call_next):
     """No-op when settings.api_key is unset (local dev / current setup).
     Once set, every request must carry a matching X-API-Key header --
-    health/readiness endpoints stay open regardless, so infra can probe
-    liveness without a key."""
+    health/readiness/metrics endpoints stay open regardless, so infra can probe
+    liveness and scrape Prometheus metrics without a key."""
     settings = get_settings()
-    if settings.api_key and request.url.path not in ("/healthz", "/readyz", "/docs", "/openapi.json"):
-        if request.headers.get("X-API-Key") != settings.api_key:
+    if (
+        settings.api_key
+        and request.method != "OPTIONS"
+        and request.url.path not in _PUBLIC_API_KEY_PATHS
+    ):
+        supplied = request.headers.get("X-API-Key") or ""
+        if not hmac.compare_digest(supplied.encode(), settings.api_key.encode()):
             return JSONResponse(status_code=401, content={"detail": "Missing or invalid X-API-Key header."})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def _trace_request_id(request: Request, call_next):
+    """Attach and echo X-Request-ID across every HTTP request for tracing."""
+    request_id = telemetry.resolve_request_id(request.headers.get("x-request-id"))
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 @app.exception_handler(LLMProviderConfigError)

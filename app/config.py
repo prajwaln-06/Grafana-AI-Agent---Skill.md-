@@ -327,3 +327,11 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+def _clear_settings_singleton() -> None:
+    global _settings
+    _settings = None
+
+
+get_settings.cache_clear = _clear_settings_singleton  # type: ignore[attr-defined]

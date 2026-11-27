@@ -1,7 +1,10 @@
+import hmac
 import json
 import logging
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 
@@ -13,6 +16,7 @@ from google.adk.evaluation.local_eval_sets_manager import LocalEvalSetsManager
 from google.adk.evaluation.local_eval_set_results_manager import LocalEvalSetResultsManager
 from google.genai import types
 
+from app import telemetry
 from app.auth.dependencies import require_admin_principal
 from app.config import get_settings
 from app.skill_index import SkillIndex
@@ -42,6 +46,41 @@ adk_web_server = ApiServer(
 
 app = adk_web_server.get_fast_api_app()
 
+_PUBLIC_PATHS = {"/readyz", "/health", "/healthz", "/metrics"}
+_startup_settings = get_settings()
+if not _startup_settings.api_key:
+    logger.warning("API_KEY is not set: every endpoint is unauthenticated. Set API_KEY before exposing this service.")
+
+
+@app.middleware("http")
+async def _require_api_key(request: Request, call_next):
+    expected = get_settings().api_key
+    if not expected or request.method == "OPTIONS" or request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+    supplied = request.headers.get("x-api-key", "")
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        return JSONResponse(status_code=401, content={"detail": "Missing or invalid API key."})
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def _trace_request_id(request: Request, call_next):
+    request_id = telemetry.resolve_request_id(request.headers.get("x-request-id"))
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_startup_settings.cors_allow_origins,
+    allow_credentials=_startup_settings.cors_allow_origins != ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+)
+
 
 # Backwards compatible API schemas
 class QueryRequest(BaseModel):
@@ -62,6 +101,15 @@ class ConfirmAlertRequest(BaseModel):
 @app.get("/readyz")
 async def readyz():
     return {"status": "ready", "skill_name": "observability-query-builder"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics scrape endpoint, implementing Google SRE's 4 Golden Signals."""
+    return Response(
+        content=telemetry.generate_metrics_bytes(),
+        media_type=telemetry.CONTENT_TYPE_LATEST,
+    )
 
 
 @app.get("/api/v1/capabilities")
@@ -111,8 +159,33 @@ async def reload_skill(principal = Depends(require_admin_principal)):
     }
 
 
+_ACTIVE_SESSIONS: set[str] = set()
+
+
+def _count_adk_sessions() -> int:
+    try:
+        svc = getattr(adk_web_server, "session_service", None)
+        sessions_dict = getattr(svc, "_sessions", getattr(svc, "sessions", None))
+        if isinstance(sessions_dict, dict):
+            return max(telemetry.count_nested_sessions(sessions_dict), len(_ACTIVE_SESSIONS))
+    except Exception:
+        pass
+    return len(_ACTIVE_SESSIONS)
+
+
+def _update_active_sessions_gauge() -> None:
+    telemetry.set_active_sessions_count(_count_adk_sessions())
+
+
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query(body: QueryRequest, request: Request) -> QueryResponse:
+    with telemetry.track_agent_turn(session_counter=_count_adk_sessions) as turn:
+        return await _query_impl(body, request, turn)
+
+
+async def _query_impl(
+    body: QueryRequest, request: Request, turn: dict[str, str]
+) -> QueryResponse:
     runner = await adk_web_server.get_runner_async("app")
     session_id = body.session_id
     
@@ -150,6 +223,7 @@ async def query(body: QueryRequest, request: Request) -> QueryResponse:
     try:
         response_data = json.loads(text_content)
     except Exception:
+        turn["status"] = "client_error"
         return QueryResponse(
             result={"status": "error", "explanation": text_content},
             session_id=None
@@ -165,7 +239,9 @@ async def query(body: QueryRequest, request: Request) -> QueryResponse:
     result = response_data.get("result")
     resp_session_id = response_data.get("session_id")
     if resp_session_id:
+        _ACTIVE_SESSIONS.add(session_id)
         return QueryResponse(result=result, session_id=session_id)
+    _ACTIVE_SESSIONS.discard(session_id)
     return QueryResponse(result=result, session_id=None)
 
 
@@ -201,6 +277,8 @@ async def confirm_alert(body: ConfirmAlertRequest):
             }
         )
         await adk_web_server.session_service.append_event(session=session, event=discard_event)
+        _ACTIVE_SESSIONS.discard(body.session_id)
+        _update_active_sessions_gauge()
         return {"status": "discarded"}
 
     # The flag gates the WRITE boundary itself, not merely proposal
@@ -243,6 +321,8 @@ async def confirm_alert(body: ConfirmAlertRequest):
         await adk_web_server.session_service.append_event(session=session, event=clear_event)
 
         if outcome.status == "success":
+            _ACTIVE_SESSIONS.discard(body.session_id)
+            _update_active_sessions_gauge()
             return {
                 "status": "created",
                 "rule_uid": outcome.rule_uid,

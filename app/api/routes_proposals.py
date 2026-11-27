@@ -6,7 +6,9 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from app import telemetry
 from app.adk_agent import run_adk_agent
+from app.api.telemetry_helpers import count_api_active_sessions
 from app.auth.dependencies import require_principal
 from app.auth.environment import EnvironmentDenied, EnvironmentRequired, resolve_environment
 from app.auth.audit import AuditEvent, record_denial, record_event
@@ -178,6 +180,21 @@ async def post_conversation_message(
     req: MessageRequest,
     principal: Principal = Depends(require_principal),
 ):
+    with telemetry.track_agent_turn(session_counter=count_api_active_sessions) as turn:
+        conv = await _post_conversation_message_impl(conversation_id, req, principal)
+        msg_status = (conv.get("message") or {}).get("status")
+        if msg_status == "policy_denied":
+            turn["status"] = "client_error"
+        elif msg_status == "error":
+            turn["status"] = "server_error"
+        return conv
+
+
+async def _post_conversation_message_impl(
+    conversation_id: str,
+    req: MessageRequest,
+    principal: Principal,
+):
     request_text = req.request.strip()
     if not request_text:
         raise HTTPException(status_code=400, detail="Message is required.")
@@ -289,6 +306,21 @@ async def create_proposal_direct(
 async def adk_chat_endpoint(
     req: AdkChatRequest,
     principal: Principal = Depends(require_principal),
+):
+    with telemetry.track_agent_turn(session_counter=count_api_active_sessions) as turn:
+        result = await _adk_chat_impl(req, principal)
+        if isinstance(result, dict):
+            res_status = result.get("status")
+            if res_status == "policy_denied":
+                turn["status"] = "client_error"
+            elif res_status == "error":
+                turn["status"] = "server_error"
+        return result
+
+
+async def _adk_chat_impl(
+    req: AdkChatRequest,
+    principal: Principal,
 ):
     if principal.role == "observer":
         if any(w in req.message.lower() for w in ["create", "add", "make", "build", "update", "modify", "delete", "remove"]):

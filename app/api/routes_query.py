@@ -10,8 +10,9 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app import executor
+from app import executor, telemetry
 from app.api.schemas import QueryRequest, QueryResponse
+from app.api.telemetry_helpers import count_api_active_sessions
 from app.auth.dependencies import require_principal
 from app.auth.environment import EnvironmentDenied, EnvironmentRequired, resolve_environment
 from app.auth.policy import authorize_promql
@@ -51,6 +52,15 @@ async def query(
     request: Request,
     body: QueryRequest,
     principal: Principal = Depends(require_principal),
+) -> QueryResponse:
+    with telemetry.track_agent_turn(session_counter=count_api_active_sessions):
+        return await _query_impl(request, body, principal)
+
+
+async def _query_impl(
+    request: Request,
+    body: QueryRequest,
+    principal: Principal,
 ) -> QueryResponse:
     environment = _resolve_request_environment(principal, body.environment)
     prom_dec = authorize_promql(principal, is_custom=True, expr=body.question, environment=environment)
