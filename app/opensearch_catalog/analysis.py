@@ -375,7 +375,7 @@ def run_ingest_lag(entry: dict, pattern: PatternEntry, limits: Limits, runner: R
         "documents_matched": {"value": total, "relation": rel},
         "event_time_verified": bool(cfg["verified"]),
         "explanation": f"{pattern.time_field} (ingest time) minus the event's own time, measured on the returned rows "
-                       f"only (a sample, newest first), not on every matching event.",
+                       f"only (a sample of matching events).",
     }
     if lags:
         ordered = sorted(lags)

@@ -358,7 +358,7 @@ ANCHOR = {"@timestamp": "2026-10-28T10:00:00Z", "Body": "LinkStatus Down on j104
 
 def context_handler(anchor=ANCHOR):
     def handler(index, dsl):
-        if dsl["sort"] == [{"@timestamp": {"order": "desc"}}]:                # the anchor query (newest first)
+        if dsl["sort"] == [{"_score": "desc"}, {"@timestamp": "desc"}]:        # the ranked anchor query
             return hits_body([anchor], ids=["A"])
         docs = [{"@timestamp": "2026-10-28T09:58:00Z", "Body": "before it"},
                 {**anchor},
@@ -417,7 +417,7 @@ def test_context_window_without_any_matching_event(settings, cluster):
 
 def test_context_window_flags_a_truncated_window(settings, cluster):
     def handler(index, dsl):
-        if dsl["sort"] == [{"@timestamp": {"order": "desc"}}]:
+        if dsl["sort"] == [{"_score": "desc"}, {"@timestamp": "desc"}]:
             return hits_body([ANCHOR], ids=["A"])
         return hits_body([{"@timestamp": "2026-10-28T09:59:00Z", "Body": "x"}], total=250)
     cluster.handler = handler

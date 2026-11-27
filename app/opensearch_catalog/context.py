@@ -45,6 +45,9 @@ class Limits:
     max_query_chars: int = 20000
     max_track_total_hits: int = 1_000_000
     search_timeout: str = "10s"
+    text_default_msm_enabled: bool = True
+    text_default_msm_ratio: float = 0.75
+    rank_text_matches: bool = True
     # Multi-step analyses (analysis.py). analysis_max_terms applies ONLY to the
     # 'absence' set difference; every other terms aggregation keeps max_terms_size.
     analysis_max_terms: int = 500
@@ -60,6 +63,9 @@ class Limits:
             max_terms_size=settings.opensearch_max_terms_size,
             max_histogram_buckets=settings.opensearch_max_histogram_buckets,
             search_timeout=settings.opensearch_search_timeout,
+            text_default_msm_enabled=settings.opensearch_text_default_msm_enabled,
+            text_default_msm_ratio=settings.opensearch_text_default_msm_ratio,
+            rank_text_matches=settings.opensearch_rank_text_matches,
             analysis_max_terms=settings.opensearch_analysis_max_terms,
             analysis_anchor_limit=settings.opensearch_analysis_anchor_limit,
             analysis_context_max_minutes=settings.opensearch_analysis_context_max_minutes,
@@ -174,20 +180,25 @@ def format_prompt_block(ctx: OpenSearchContext) -> str:
         "- Allowed clauses: bool(must/filter/should/must_not/minimum_should_match), term, terms, match, match_phrase "
         "(text role only, max %d chars), prefix (exact fields), range, exists. Forbidden: script, query_string, "
         "wildcard, regexp, fuzzy, nested/join queries, runtime/script fields, paging (`from`, search_after)." % lim.max_text_chars,
-        "- Text search: write the user's own words in ONE match/match_phrase; do not guess the tense or plural the "
-        "stored message uses and do not list variants yourself. The system also matches the other word forms "
-        "(overheated/overheating/overheats/overheat) and records it.",
-        "- For an explicit minimum of named signals in the same document, place a nested bool inside the top-level "
-        "filter, with one should branch per distinct signal and integer minimum_should_match (1 for any of them). "
-        "Keep time, entity, severity, and any mandatory conditions in required filters. Keep whole named phrases "
-        "in match_phrase and structured values in exact filters. A bool with filter or must defaults to zero required "
-        "should branches when the minimum is omitted.",
-        "- For an explicit minimum of unordered message terms, use match on the confirmed text field with "
-        "{\"query\": \"<user's keywords>\", \"operator\": \"or\", \"minimum_should_match\": <integer 1-10>} as the field options. "
-        "The system removes common words such as 'the' and 'is' and collapses repeated words before search. "
-        "Ask for more distinct terms if the search text provides fewer than the requested minimum. Preserve quoted "
-        "phrases and negation with phrase or Boolean filters. State what minimum the query applies.",
-        "- Row queries: omit `aggs`; `size` <= %d (default %d); rows come back newest first. To only COUNT matching documents, use `size` 0 with no `aggs` (and `track_total_hits`: true); the count is in the result metadata." % (lim.max_hits_size, lim.default_hits_size),
+        "- Use the user's own unordered search words in one match. The guard applies and reports the default "
+        "word minimum and handles word forms. Example for text field Message: "
+        "`{\"match\":{\"Message\":\"fan off rpm\"}}`. Use match_phrase for quoted or ordered text.",
+        "- Set match minimum_should_match only if the user specifies a minimum or asks for any, either, or all "
+        "of those words. For 'either fan or rpm', use `{\"match\":{\"Message\":"
+        "{\"query\":\"fan rpm\",\"operator\":\"or\",\"minimum_should_match\":1}}}`. For 'all', use the number "
+        "of distinct meaningful words. Keep clear exclusions in must_not.",
+        "- Write a positive integer for a requested minimum. For '2 of fan, off, rpm', set "
+        "`minimum_should_match: 2`. Percentages, negatives and expressions are forbidden. Ask for more terms "
+        "or a minimum of 1 if there are too few distinct signals.",
+        "- For named signals use a nested bool under the outer filter and one should branch per signal. "
+        "For 'both link down and power loss', use `{\"bool\":{\"should\":[{\"match_phrase\":{\"Message\":\"link down\"}},"
+        "{\"match_phrase\":{\"Message\":\"power loss\"}}],\"minimum_should_match\":2}}`. Keep time and other mandatory "
+        "conditions outside that group. A should group with no minimum requires at least one branch.",
+        "- Row queries: omit `aggs`; `size` <= %d (default %d). Omit sort unless requested. %s Never write _score. "
+        "To count matches without rows, use `size` 0 with no `aggs`." %
+        (lim.max_hits_size, lim.default_hits_size,
+         "Text rows default to best matches first, ties newest first. Other rows default to newest first."
+         if lim.rank_text_matches else "Rows default to newest first."),
         "- Aggregation queries: `size` 0 and exactly ONE top-level aggregation (terms, date_histogram, filters, "
         "cardinality, min, max, avg, sum, value_count), at most %d levels deep. To group by TWO fields (for example "
         "host, then event code), NEST the second `terms` inside the first one's `aggs`; two aggregations side by "

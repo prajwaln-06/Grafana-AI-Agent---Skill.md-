@@ -251,7 +251,7 @@ def test_C9_hmscd_before_and_after_a_link_down_event(skill_index, settings, monk
         "context_filter": {"term": {"Resource.service.name.keyword": "hmscd"}}})}
 
     def handler(index, dsl):
-        if dsl["sort"] == [{"@timestamp": {"order": "desc"}}]:
+        if dsl["sort"] == [{"_score": "desc"}, {"@timestamp": "desc"}]:
             return hits_body([{"@timestamp": "2026-10-28T10:00:00Z", "Body": "LinkStatus Down"}], ids=["anchor"])
         return hits_body([{"@timestamp": "2026-10-28T09:59:00Z", "Body": "hmscd before"},
                           {"@timestamp": "2026-10-28T10:01:00Z", "Body": "hmscd after"}], ids=["x", "y"])

@@ -80,6 +80,7 @@ CODE_UNKNOWN_FIELD = "unknown_field"
 CODE_OPERATION_NOT_SUPPORTED = "operation_not_supported"
 CODE_BAD_CLAUSE = "bad_clause"
 CODE_BAD_VALUE = "bad_value"
+CODE_GENERATED_SCORE_SORT = "generated_score_sort"
 CODE_TIME_RANGE = "time_range_invalid"
 CODE_WINDOW_EXCEEDS_MAX = "window_exceeds_max"
 CODE_LIMIT = "limit_exceeded"
@@ -115,6 +116,8 @@ _INTERVAL_RE = re.compile(r"^([1-9][0-9]*)(s|m|h|d)$")
 _TIMEOUT_RE = re.compile(r"^([1-9][0-9]*)(ms|s)$")
 _AGG_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,40}$")
 _MAX_MINIMUM_SHOULD_MATCH = 10
+_BOOL_CLAUSES = ("must", "filter", "should", "must_not")
+_MINIMUM_CLARIFICATION = "Please provide more distinct search terms or ask for any of the terms (minimum 1)."
 
 
 class GuardError(Exception):
@@ -139,6 +142,7 @@ class GuardResult:
     approximate_aggregations: tuple[str, ...] = ()
     intent: str | None = None
     analysis: dict | None = None      # canonical analysis parameters (None = simple question)
+    text_search: dict | None = None
 
 
 def _fail(code: str, reason: str, user_message: str = "") -> None:
@@ -222,6 +226,81 @@ def structural_check(body: Any, limits: Limits) -> str | None:
 
 def _is_num(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _items(value: Any) -> list:
+    return value if isinstance(value, list) else [value]
+
+
+def _branch_key(branch: dict) -> str:
+    """Compare canonical text clauses independently of analyzer-insensitive casing."""
+    kind, leaf = next(iter(branch.items()))
+    if kind in ("match", "match_phrase"):
+        path, value = next(iter(leaf.items()))
+        options = value if isinstance(value, dict) else {"query": value}
+        value = {**options, "query": options["query"].casefold()}
+        if value.get("operator") == "or":
+            del value["operator"]
+        branch = {kind: {path: value}}
+    elif kind == "bool":
+        # Scoring and filter contexts can be rewritten later in this pass.
+        # A required predicate matches the same documents in either context.
+        group = {key: sorted(_branch_key(child) for child in _items(value))
+                 if key in _BOOL_CLAUSES else value for key, value in leaf.items()
+                 if key not in ("must", "filter")}
+        required = [_branch_key(item) for key in ("must", "filter") for item in _items(leaf.get(key, []))]
+        if required:
+            group["filter"] = sorted(required)
+        branch = {kind: group}
+    return json.dumps(branch, sort_keys=True)
+
+
+def _branch_text(branch: dict) -> str:
+    return next((text for _, text, _ in text_forms.text_searches(branch)), "")
+
+
+def _positive_text(node: dict):
+    for key in ("match", "match_phrase"):
+        if key in node:
+            yield _branch_text(node)
+    if "bool" in node:
+        for key in ("must", "filter", "should"):
+            for child in _items(node["bool"].get(key, [])):
+                yield from _positive_text(child)
+
+
+def _text_context(node: dict, *, scoring: bool) -> bool:
+    """Move required text to the appropriate context without changing what matches."""
+    if "bool" not in node:
+        return False
+    group = node["bool"]
+    changed = False
+    for key in ("must", "filter", "should"):
+        for child in _items(group.get(key, [])):
+            changed = _text_context(child, scoring=scoring) or changed
+    old, new = ("filter", "must") if scoring else ("must", "filter")
+    children = _items(group.get(old, []))
+    text = [child for child in children if next(_positive_text(child), None)]
+    if text:
+        remaining = [child for child in children if child not in text]
+        if remaining:
+            group[old] = remaining if isinstance(group[old], list) else remaining[0]
+        else:
+            del group[old]
+        group[new] = _items(group.get(new, [])) + text
+    return changed or bool(text)
+
+
+def _search_summary(query: dict, thresholds: list, ranked: bool) -> dict | None:
+    if thresholds:
+        source, minimum, keywords = next((spec for spec in thresholds if spec[0] == "explicit"), thresholds[0])
+    else:
+        source, minimum = "none", None
+        texts = tuple(_positive_text(query))
+        keywords = tuple(dict.fromkeys(word for text in texts for word in text_forms.threshold_keywords(text))) or texts
+    if not keywords:
+        return None
+    return {"keywords": list(keywords), "minimum_should_match": minimum, "source": source, "ranked": ranked}
 
 
 # Range bounds that OpenSearch rounds UP when the expression is rounded (`/d`) or
@@ -311,6 +390,8 @@ class _Checker:
         self.applied: list[str] = []
         self.warnings: list[str] = []
         self.clauses = 0
+        self.text_thresholds: list[tuple[str, int, tuple[str, ...]]] = []
+        self.expand_text = True
         self.time_ranges: list[dict] = []
         self.window: dict | None = None
         self.approx: list[str] = []
@@ -364,12 +445,36 @@ class _Checker:
 
     # -- clauses -------------------------------------------------------------------------------------------------
 
+    def count_clauses(self, node: Any) -> int:
+        """Reserve space for the entire input before expanding any text clause."""
+        if not isinstance(node, dict):
+            return 1
+        if isinstance(node.get("bool"), dict):
+            return 1 + sum(self.count_clauses(child) for key in _BOOL_CLAUSES if key in node["bool"]
+                           for child in _items(node["bool"][key]))
+        if node.get("named_condition") == CONDITION_ABNORMAL:
+            try:
+                expanded, _ = expand_abnormal_condition(self.entry, self.view)
+            except SeverityConditionError:
+                return 1  # reported by the normal clause check
+            return self.count_clauses(expanded)
+        return 1
+
+    def count_agg_clauses(self, aggs: Any) -> int:
+        count = 0
+        if isinstance(aggs, dict):
+            for spec in aggs.values():
+                if not isinstance(spec, dict):
+                    continue
+                filters = spec.get("filters")
+                if isinstance(filters, dict) and isinstance(filters.get("filters"), dict):
+                    count += sum(self.count_clauses(node) for node in filters["filters"].values())
+                count += self.count_agg_clauses(spec.get("aggs", spec.get("aggregations")))
+        return count
+
     def clause(self, node: Any, where: str, depth: int, top: bool = False) -> dict:
         if not isinstance(node, dict) or len(node) != 1:
             _fail(CODE_BAD_CLAUSE, f"{where}: a clause must be an object with exactly one key")
-        self.clauses += 1
-        if self.clauses > self.limits.max_clauses:
-            _fail(CODE_LIMIT, f"the query has more than {self.limits.max_clauses} clauses")
         (kind, body), = node.items()
         if kind in ("match_phase", "match_phrases"):
             self.applied.append(f"{where}: canonicalised clause type typo {kind!r} to 'match_phrase'")
@@ -384,6 +489,9 @@ class _Checker:
                   f"{where}: clause type {kind!r} is not allowed")
         w = f"{where}/{kind}"
         if kind == "bool":
+            group = self._signal_group(body, w, depth)
+            if group is not None:
+                return group
             group = self._variant_group(body, w, depth)
             if group is not None:
                 return group
@@ -391,7 +499,7 @@ class _Checker:
         if kind in ("match", "match_phrase"):
             return self._text_search(kind, body, w, depth)
         if kind == "named_condition":
-            return self._named(body, w)
+            return self._named(body, w, depth)
         if kind == "range":
             return {"range": self._range(body, w, top)}
         if kind == "exists":
@@ -407,11 +515,11 @@ class _Checker:
         if extra:
             _fail(CODE_BAD_CLAUSE, f"{where}: unsupported bool key(s) {sorted(extra)}")
         out: dict[str, Any] = {}
-        for key in ("must", "filter", "should", "must_not"):
+        for key in _BOOL_CLAUSES:
             if key not in body:
                 continue
             val = body[key]
-            items = val if isinstance(val, list) else [val]
+            items = _items(val)
             if not items:
                 _fail(CODE_BAD_CLAUSE, f"{where}/{key}: must not be empty")
             checked = []
@@ -425,20 +533,30 @@ class _Checker:
                           f"{{\"named_condition\": \"{CONDITION_ABNORMAL}\"}} instead.")
                 # Only the ROOT bool's direct filter/must children may hold the
                 # time range (depth 1 = the root bool).
+                threshold_count = len(self.text_thresholds)
                 checked.append(self.clause(child, cw, depth + 1, top=(depth == 1 and key in ("filter", "must"))))
+                if key == "must_not":
+                    del self.text_thresholds[threshold_count:]
             out[key] = checked if isinstance(val, list) else checked[0]
         if "minimum_should_match" in body:
             m = body["minimum_should_match"]
             if type(m) is not int or not 0 <= m <= _MAX_MINIMUM_SHOULD_MATCH:
                 _fail(CODE_BAD_VALUE, f"{where}: minimum_should_match must be an integer from 0 to "
                                       f"{_MAX_MINIMUM_SHOULD_MATCH}")
-            should = out.get("should", [])
-            branches = should if isinstance(should, list) else [should]
+            branches = _items(out.get("should", []))
             if m > len(branches):
-                _fail(CODE_BAD_VALUE, f"{where}: minimum_should_match {m} exceeds the {len(branches)} should clauses")
-            if m > 1 and len({json.dumps(branch, sort_keys=True) for branch in branches}) != len(branches):
-                _fail(CODE_BAD_VALUE, f"{where}: use distinct should clauses for minimum_should_match above 1")
+                _fail(CODE_BAD_VALUE, f"{where}: minimum_should_match {m} exceeds the {len(branches)} should clauses",
+                      _MINIMUM_CLARIFICATION)
+            if m > 1 and len({_branch_key(branch) for branch in branches}) != len(branches):
+                _fail(CODE_BAD_VALUE, f"{where}: use distinct should clauses for minimum_should_match above 1",
+                      _MINIMUM_CLARIFICATION)
             out["minimum_should_match"] = m
+            words = tuple(text for branch in branches if (text := _branch_text(branch)))
+            if m and words:
+                self.text_thresholds.append(("explicit", m, words))
+        elif "should" in out:
+            out["minimum_should_match"] = 1
+            self.applied.append(f"{where}: minimum_should_match 1 added so at least one should clause is required")
         return out
 
     def _mentions_severity(self, node: Any) -> bool:
@@ -556,15 +674,6 @@ class _Checker:
                                       f"{_MAX_MINIMUM_SHOULD_MATCH}")
             if val.get("operator", "or") != "or":
                 _fail(CODE_BAD_VALUE, f"{where}: match minimum_should_match requires operator 'or'")
-            keywords = text_forms.threshold_keywords(text)
-            if len(keywords) < minimum:
-                _fail(CODE_BAD_VALUE, f"{where}: after removing common and repeated words, only {len(keywords)} "
-                                      f"distinct search words remain for minimum_should_match {minimum}")
-            cleaned = " ".join(keywords)
-            if cleaned != text:
-                self.applied.append(f"{where}: removed common words, repeated words, or separators before "
-                                    "applying minimum_should_match")
-                val = {**val, "query": cleaned}
         return {path: val}
 
     # -- word-form tolerance for free-text search (text_forms.py) -------------------------------------------
@@ -582,17 +691,20 @@ class _Checker:
         leaf = self._match(body, where, kind)
         (path, val), = leaf.items()
         text = val["query"] if isinstance(val, dict) else val
+        if kind == "match":
+            options = val if isinstance(val, dict) else {}
+            if options.get("operator") == "and":
+                return {kind: leaf}
+            minimum = options.get("minimum_should_match")
+            if minimum is not None or self.limits.text_default_msm_enabled:
+                threshold = self._threshold(path, text, options, minimum, where, depth)
+                if threshold is not None:
+                    return threshold
+            return {kind: leaf}
         variants = text_forms.phrase_variants(text)
         if len(variants) < 2:
             return {kind: leaf}
-        if isinstance(val, dict) and "minimum_should_match" in val and any(
-            " ".join(text_forms.threshold_keywords(v)) != v for v in variants
-        ):
-            self.warnings.append(f"{where}: word-form expansion would repeat or remove search words; "
-                                 "the cleaned words and minimum_should_match were kept")
-            return {kind: leaf}
-        if (depth > self.limits.max_bool_depth
-                or self.clauses + len(variants) > self.limits.max_clauses
+        if (not self._can_expand(depth, len(variants))
                 or any(len(v) > self.limits.max_text_chars for v in variants)):
             self.warnings.append(f"{where}: {text!r} is searched exactly as written; its other word forms were "
                                  f"not added because the query is at its size limits, so a different tense or "
@@ -604,6 +716,95 @@ class _Checker:
         self.applied.append(f"{where}: text search {text!r} also matches its other word forms {others} "
                             f"(tense/plural), so the wording of the question does not change the result")
         return {"bool": {"should": should, "minimum_should_match": 1}}
+
+    def _can_expand(self, depth: int, extra_clauses: int) -> bool:
+        return (self.expand_text and depth <= self.limits.max_bool_depth
+                and self.clauses + extra_clauses <= self.limits.max_clauses)
+
+    def _threshold(self, path: str, text: str, options: dict, minimum: int | None,
+                   where: str, depth: int) -> dict | None:
+        keywords, negatives, unsupported = text_forms.threshold_negation(text)
+        if not keywords:
+            _fail(CODE_BAD_VALUE, f"{where}: no meaningful positive search words remain", _MINIMUM_CLARIFICATION)
+        if minimum is None and len(keywords) <= 1 and not negatives and not unsupported:
+            return None
+        # Different inflections of one word must not occupy two should slots.
+        distinct = {}
+        for word in keywords:
+            branch = text_forms.signal_branch(path, word)
+            distinct.setdefault(_branch_key(branch), (word, branch))
+        keywords = tuple(word for word, _ in distinct.values())
+        branches = [branch for _, branch in distinct.values()]
+        source = "explicit" if minimum is not None else "default"
+        if minimum is None:
+            n = len(keywords)
+            if n > 1:
+                minimum = min(n, _MAX_MINIMUM_SHOULD_MATCH, max(2, math.floor(self.limits.text_default_msm_ratio * n)))
+                self.applied.append(f"{where}: default minimum_should_match {minimum} of {n} meaningful words applied")
+        if minimum is not None and minimum > len(keywords):
+            _fail(CODE_BAD_VALUE, f"{where}: minimum_should_match {minimum} exceeds the {len(keywords)} "
+                                  "distinct positive search words", _MINIMUM_CLARIFICATION)
+        if unsupported:
+            self.warnings.append(f"{where}: negation is not supported inside a threshold search unless it "
+                                 "immediately precedes a single alphanumeric keyword")
+        cleaned = " ".join(keywords)
+        # A case fold can grow some Unicode words. Keep their original casing in a
+        # native fallback when the folded spelling would exceed the input limit.
+        if len(cleaned) > self.limits.max_text_chars:
+            cleaned = text_forms.threshold_spelling(text, keywords)
+            self.warnings.append(f"{where}: original text kept because its case-folded form exceeds the text limit")
+        if cleaned != text or options.get("operator") != "or":
+            self.applied.append(f"{where}: normalised search words and operator for the text threshold")
+        native = {"match": {path: {"query": cleaned, "operator": "or"}}}
+        if minimum is not None:
+            native["match"][path]["minimum_should_match"] = minimum
+            self.text_thresholds.append((source, minimum, keywords))
+        # Reserve the Boolean wrapper and the exclusions independently of the preferred threshold form.
+        wrapper = 1 + len(negatives)
+        if negatives and (not self._can_expand(depth, wrapper)
+                          or any(len(word) > self.limits.max_text_chars for word in negatives)):
+            self.warnings.append(f"{where}: negation is not supported inside this threshold search at the query limits")
+            negatives = ()
+        positive = native
+        signal_depth = depth + bool(negatives)
+        extra = len(branches) + (wrapper if negatives else 0)
+        if minimum is not None and minimum >= 2:
+            if (len(branches) <= _MAX_MINIMUM_SHOULD_MATCH and self._can_expand(signal_depth, extra)
+                    and all(len(_branch_text(branch)) <= self.limits.max_text_chars for branch in branches)):
+                positive = {"bool": {"should": branches, "minimum_should_match": minimum}}
+                self.clauses += len(branches)
+                self.applied.append(f"{where}: minimum_should_match applied across {len(branches)} keyword signals")
+            else:
+                self.warnings.append(f"{where}: per-keyword threshold expansion exceeds the query limits; "
+                                     "the simple match applies the minimum to analyzed terms")
+        if not negatives:
+            return positive
+        self.clauses += wrapper
+        self.applied.append(f"{where}: excluded {', '.join(negatives)} with must_not")
+        excluded = [{"match": {path: {"query": word, "operator": "or", "minimum_should_match": 1}}}
+                    for word in negatives]
+        return {"bool": {"must": [positive], "must_not": excluded}}
+
+    def _signal_group(self, body: Any, where: str, depth: int) -> dict | None:
+        if not isinstance(body, dict) or set(body) != {"should", "minimum_should_match"}:
+            return None
+        items, minimum = body["should"], body["minimum_should_match"]
+        if (not isinstance(items, list) or type(minimum) is not int
+                or not 2 <= minimum <= len(items) <= _MAX_MINIMUM_SHOULD_MATCH):
+            return None
+        signals = [text_forms.signal_keyword(item) for item in items]
+        if any(signal is None for signal in signals) or len({path for path, _ in signals}) != 1:
+            return None
+        if depth > self.limits.max_bool_depth:
+            _fail(CODE_LIMIT, f"{where}: bool nesting deeper than {self.limits.max_bool_depth}")
+        if len({_branch_key(branch) for branch in items}) != len(items):
+            _fail(CODE_BAD_VALUE, f"{where}: use distinct keyword signals for minimum_should_match above 1",
+                  _MINIMUM_CLARIFICATION)
+        for i, branch in enumerate(items):
+            (kind, leaf), = branch.items()
+            self._match(leaf, f"{where}/should[{i}]/{kind}", kind)
+        self.text_thresholds.append(("explicit", minimum, tuple(word for _, word in signals)))
+        return {"bool": body}
 
     def _variant_group(self, body: Any, where: str, depth: int) -> dict | None:
         """The canonical output of `_text_search`, re-checked: each member is
@@ -620,16 +821,11 @@ class _Checker:
             if not isinstance(it, dict) or len(it) != 1:
                 return None
             (k, leaf), = it.items()
-            if k not in ("match", "match_phrase") or not isinstance(leaf, dict) or len(leaf) != 1:
+            if k != "match_phrase" or not isinstance(leaf, dict) or len(leaf) != 1:
                 return None
             (p, v), = leaf.items()
             if isinstance(v, dict):
-                if not isinstance(v.get("query"), str) or not all(
-                    type(value) is int if key == "minimum_should_match" else isinstance(value, str)
-                    for key, value in v.items()
-                ):
-                    return None
-                if "minimum_should_match" in v and " ".join(text_forms.threshold_keywords(v["query"])) != v["query"]:
+                if set(v) != {"query"} or not isinstance(v["query"], str):
                     return None
                 shapes.add(tuple(sorted((a, b) for a, b in v.items() if a != "query")))
                 texts.append(v.get("query"))
@@ -642,9 +838,6 @@ class _Checker:
                 or not text_forms.is_variant_group(texts):
             return None
         for i, it in enumerate(items):
-            self.clauses += 1
-            if self.clauses > self.limits.max_clauses:
-                _fail(CODE_LIMIT, f"the query has more than {self.limits.max_clauses} clauses")
             (k, leaf), = it.items()
             self._match(leaf, f"{where}/should[{i}]/{k}", k)
         return {"bool": {"should": copy.deepcopy(items), "minimum_should_match": 1}}
@@ -684,8 +877,8 @@ class _Checker:
                     _fail(CODE_BAD_VALUE, f"{where}: range bounds must be numbers")
         return {path: val}
 
-    def _named(self, body: Any, where: str) -> dict:
-        if body not in NAMED_CONDITIONS:
+    def _named(self, body: Any, where: str, depth: int) -> dict:
+        if not isinstance(body, str) or body not in NAMED_CONDITIONS:
             _fail(CODE_BAD_CLAUSE, f"{where}: unknown named condition {body!r}")
         try:
             clause, warns = expand_abnormal_condition(self.entry, self.view)
@@ -693,7 +886,7 @@ class _Checker:
             _fail(CODE_SEVERITY, f"{where}: {e}")
         self.warnings.extend(warns)
         self.applied.append(f"expanded named_condition '{body}' using the family's documented severity definition")
-        return clause
+        return {"bool": self._bool(clause["bool"], where, depth)}
 
     # -- time window ------------------------------------------------------------------------------------------------
 
@@ -867,13 +1060,15 @@ class _Checker:
 
 
 def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = None,
-                followup_of: str | None = None) -> GuardResult:
+                followup_of: str | None = None, generated: bool = False,
+                _expand_text: bool = True) -> GuardResult:
     """Validate and canonicalise ONE result entry (data_source 'opensearch').
 
     `followup_of` is set only by the executor for a query that Python built for an
     analysis (analysis.py). Such a query is checked by exactly the same rules; the
     only difference is that `intent`/`analysis` are not read from it and, for
-    'absence', the terms size may go up to the analysis maximum."""
+    'absence', the terms size may go up to the analysis maximum.
+    `generated` is set at the model boundary, before a guard-owned sort can exist."""
     now = now or datetime.now(timezone.utc)
     pid = entry.get("pattern_id") if isinstance(entry, dict) else None
     try:
@@ -903,6 +1098,7 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
             _fail(code, reason)
 
         ck = _Checker(pc, limits, now)
+        ck.expand_text = _expand_text
         body = copy.deepcopy(query)
         out: dict[str, Any] = {}
 
@@ -919,6 +1115,10 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
         if not isinstance(q, dict) or set(q) != {"bool"}:
             _fail(CODE_TIME_RANGE, "the query must be a top-level bool query containing the time range in `filter`",
                   "I need a bounded time range to search. Please say how far back to look.")
+        input_clauses = ck.count_clauses(q) + ck.count_agg_clauses(body.get("aggs", body.get("aggregations")))
+        ck.clauses = input_clauses
+        if input_clauses > limits.max_clauses:
+            _fail(CODE_LIMIT, f"the query has more than {limits.max_clauses} clauses")
         out["query"] = ck.clause(q, "query", 1)
         window = ck.resolve_window()
 
@@ -942,6 +1142,7 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
 
         # size / sort / source
         size = body.get("size")
+        ranked = False
         if has_aggs:
             if size is None:
                 out["size"] = 0
@@ -966,13 +1167,24 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
                                       f"without aggregations (0 = count only)")
                 out["size"] = size
             count_only = out["size"] == 0
+            score_sort = [{"_score": "desc"}, {pc.entry.time_field: "desc"}]
+            ranked = (not count_only and limits.rank_text_matches
+                      and ("sort" not in body or body["sort"] == score_sort)
+                      and bool(next(_positive_text(out["query"]), None)))
             if "sort" in body:
                 if count_only:
                     _fail(CODE_BAD_CLAUSE, "`sort` is not used by a count-only query (size 0)")
-                out["sort"] = _check_sort(body["sort"], ck)
+                out["sort"] = _check_sort(body["sort"], ck, score_sort if ranked else None, generated=generated)
+            elif ranked:
+                out["sort"] = score_sort
+                ck.applied.append("sorted best matches first, ties newest first")
             elif not count_only:
                 out["sort"] = [{pc.entry.time_field: {"order": "desc"}}]
                 ck.applied.append(f"sorted newest first by {pc.entry.time_field}")
+
+        if (ranked or out["size"] == 0) and _text_context(out["query"], scoring=ranked):
+            ck.applied.append("moved required text to must for relevance scoring" if ranked
+                              else "moved required text to filter for a count or aggregation")
 
         allowed_src = set(pc.entry.output_projection)
         if "_source" in body:
@@ -1008,6 +1220,14 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
 
         if "from" in body and body["from"] not in (0,):
             _fail(CODE_LIMIT, "paging is not allowed")
+        if "from" in body:
+            ck.applied.append("removed redundant from: 0")
+
+        if len(json.dumps(out)) > limits.max_query_chars:
+            if _expand_text and ck.clauses > input_clauses:
+                return check_entry(entry, ctx, now=now, followup_of=followup_of,
+                                   generated=generated, _expand_text=False)
+            _fail(CODE_LIMIT, f"the canonical query is larger than {limits.max_query_chars} characters")
 
         analysis = _check_analysis(atype, entry.get("analysis"), ck, out, window) if atype else None
 
@@ -1015,14 +1235,20 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
             ok=True, query=out, index=pc.entry.index_pattern, pattern_id=pid,
             applied=tuple(dict.fromkeys(ck.applied)), warnings=tuple(dict.fromkeys(ck.warnings)),
             window=window, estimated_buckets=est, approximate_aggregations=tuple(ck.approx),
-            intent=intent, analysis=analysis,
+            intent=intent, analysis=analysis, text_search=_search_summary(out["query"], ck.text_thresholds, ranked),
         )
     except GuardError as e:
         return GuardResult(ok=False, code=e.code, reason=e.reason, user_message=e.user_message, pattern_id=pid if isinstance(pid, str) else None)
 
 
-def _check_sort(sort: Any, ck: _Checker) -> list:
-    items = sort if isinstance(sort, list) else [sort]
+def _check_sort(sort: Any, ck: _Checker, score_sort: list | None, *, generated: bool) -> list:
+    items = _items(sort)
+    if any(isinstance(item, dict) and "_score" in item for item in items):
+        if generated:
+            _fail(CODE_GENERATED_SCORE_SORT, "`_score` sort is reserved for guard-applied relevance ranking")
+        if score_sort is not None and sort == score_sort:
+            return sort
+        _fail(CODE_BAD_CLAUSE, "`_score` is only available in the guard's relevance sort for text rows")
     if not items or len(items) > 3:
         _fail(CODE_BAD_CLAUSE, "sort needs 1-3 entries")
     out = []
@@ -1048,6 +1274,8 @@ def _check_sort(sort: Any, ck: _Checker) -> list:
             ck.applied.append(f"sort[{i}]: sort on analysed text field {path!r} applied to its confirmed keyword "
                               f"sub-field {eff!r}")
         out.append({eff: spec})
+    if not isinstance(sort, list):
+        ck.applied.append("normalised sort to a list")
     return out
 
 

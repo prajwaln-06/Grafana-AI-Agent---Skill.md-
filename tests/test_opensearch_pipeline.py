@@ -208,9 +208,10 @@ def test_threshold_query_passes_cleaned_words_to_opensearch(skill_index, setting
         assert executed["execution"]["execution_status"] == expected
         (index, sent), = cluster.searches
         assert index == "controllerlog-*"
-        assert sent["query"]["bool"]["filter"] == [W, {"match": {"Body": {
-            "query": "fan off", "minimum_should_match": minimum,
-        }}}]
+        assert sent["query"]["bool"]["filter"] == [W, {"bool": {"minimum_should_match": minimum, "should": [
+            {"match": {"Body": {"query": "fan", "operator": "or"}}},
+            {"match": {"Body": {"query": "off", "operator": "or"}}},
+        ]}}]
 
 
 def test_end_to_end_llm_written_index_is_rejected(skill_index, settings, fixture_cache):

@@ -283,9 +283,21 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
                                             f"changed or never canonicalised).", base_url,
                             resolved_time_range=check.window)
     window = check.window
+    search_summary = check.text_search
+    notes = entry.get("guard_notes")
+    if search_summary and isinstance(notes, dict) and isinstance(notes.get("text_search"), dict):
+        # The initial guard knows whether the model supplied the minimum. The
+        # identical canonical DSL cannot carry that provenance for the re-check.
+        search_summary = {**notes["text_search"], "ranked": search_summary["ranked"]}
 
     if entry.get("analysis") is not None:
-        return _execute_opensearch_analysis(entry, pattern, view, ctx, window, settings, policy, limits, base_url)
+        block = _execute_opensearch_analysis(entry, pattern, view, ctx, window, settings, policy, limits, base_url)
+        if isinstance(block.get("metadata"), dict) and search_summary:
+            # Context rows are ordered around each anchor, even if anchors were ranked.
+            if entry["analysis"]["type"] == "context_window":
+                search_summary = {**search_summary, "ranked": False}
+            _add_text_search_metadata(block["metadata"], check.query, search_summary, empty=False)
+        return block
 
     outcome = opensearch_client.search(
         base_url, pattern.index_pattern, check.query,
@@ -317,18 +329,36 @@ def _execute_opensearch_entry(entry: dict, settings: Settings) -> dict:
     # total in metadata.count. Only "matched nothing" is an empty result.
     if block["execution_status"] == "empty_result" and ((normalized.metadata.get("count") or {}).get("value") or 0) > 0:
         block["execution_status"] = "success"
-    if block["execution_status"] == "empty_result":
-        note = _text_search_note(check.query)
-        if note and isinstance(block.get("metadata"), dict):
-            block["metadata"]["text_search_note"] = note
+    _add_text_search_metadata(block["metadata"], check.query, search_summary,
+                              empty=block["execution_status"] == "empty_result")
     return block
 
 
-def _text_search_note(query: dict) -> str | None:
-    """For a free-text search that matched nothing: say plainly what was searched and
-    why a document describing the same thing may still exist, so an empty answer is
-    never mistaken for "it did not happen". None when the query has no text search."""
-    from app.opensearch_catalog.text_forms import multi_signal_minima, phrase_variants, text_searches
+def _add_text_search_metadata(metadata: dict, query: dict, summary: dict | None, *, empty: bool) -> None:
+    if summary is not None:
+        metadata["text_search"] = summary
+        if summary["ranked"]:
+            metadata["row_order"] = "best matches first, ties newest first"
+    if empty or (summary and summary["minimum_should_match"] is not None):
+        note = _text_search_note(query, summary, empty=empty)
+        if note:
+            metadata["text_search_note"] = note
+
+
+def _text_search_note(query: dict, summary: dict | None, *, empty: bool) -> str | None:
+    """Explain a threshold, or describe the search terms when a text query returned no matches."""
+    from app.opensearch_catalog.text_forms import phrase_variants, text_searches, threshold_keywords
+
+    if summary and summary["minimum_should_match"] is not None:
+        keywords = summary["keywords"]
+        words = ", ".join(keywords)
+        minimum = summary["minimum_should_match"]
+        prefix = "No document met the search conditions in this window. " if empty else ""
+        loosen = " Ask for any of these words to use a minimum of 1." if minimum > 1 else ""
+        native = minimum > 1 and any(n == minimum and list(threshold_keywords(text)) == keywords
+                                     for _, text, n in text_searches(query))
+        requirement = " analyzed terms drawn from" if native else " of"
+        return f"{prefix}The text search required at least {minimum}{requirement}: {words}.{loosen}"
 
     shown: list[tuple[str, str, int | None]] = []
     for kind, text, minimum in text_searches(query):
@@ -344,10 +374,8 @@ def _text_search_note(query: dict) -> str | None:
             searches.append(f"the ordered phrase {text!r}")
         else:
             searches.append(f"analyzed terms from {text!r}")
-    minima = ", ".join(str(n) for n in sorted(multi_signal_minima(query)))
-    group_note = f" The required minimum signal counts for Boolean groups were {minima}." if minima else ""
     return (f"No document met the search conditions in this window. The text search used {', '.join(searches)}."
-            f"{group_note} Tense and plural variants can match where available. A message using different words "
+            " Tense and plural variants can match where available. A message using different words "
             "may still describe the same event.")
 
 

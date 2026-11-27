@@ -50,12 +50,13 @@ _MIN_WORD_LEN = 4
 _VOWELS = "aeiou"
 _WORD_RE = re.compile(r"^[A-Za-z]+$")
 _SPLIT_RE = re.compile(r"(\s+)")
-_SEARCH_SPLIT_RE = re.compile(r"[\s,;!?()\[\]{}\"“”]+")
+_SEARCH_WORD_RE = re.compile(r"[^\s,;!?()\[\]{}\"“”]+")
+_NEGATORS = frozenset({"not", "no", "never", "without", "cannot"})
 _SEARCH_STOP_WORDS = frozenset({
     "a", "am", "an", "and", "are", "as", "at", "be", "been", "being", "by", "do", "does",
     "for", "from", "had", "has", "have", "in", "is", "it", "of", "on", "or", "that", "the",
     "these", "this", "those", "to", "was", "were", "which", "who", "with",
-})
+}) | _NEGATORS
 
 # Words that look inflected but are not (or whose variants would only add noise).
 _STOP = frozenset({
@@ -223,18 +224,77 @@ def is_variant_group(texts: list[str], cap: int = DEFAULT_MAX_VARIANTS) -> bool:
     return any(phrase_variants(t, cap) == target for t in texts)
 
 
-def threshold_keywords(text: str) -> tuple[str, ...]:
-    """Clean an unordered search before OpenSearch applies its field analyzer."""
-    words: dict[str, str] = {}
-    for part in _SEARCH_SPLIT_RE.split(text):
-        word = part.strip(".'‘’")
+def _search_words(text: str) -> Iterator[tuple[str, bool]]:
+    previous_end = 0
+    for match in _SEARCH_WORD_RE.finditer(text):
+        word = match.group().strip(".'‘’")
         if word.endswith(":") and not word.endswith("::"):
             word = word.rstrip(".:'‘’")
-        key = word.casefold()
-        if key in _SEARCH_STOP_WORDS or not any(c.isalnum() for c in word):
-            continue
-        words.setdefault(key, word)
-    return tuple(words.values())
+        if word:
+            yield word, text[previous_end:match.start()].isspace()
+            previous_end = match.end()
+
+
+def threshold_keywords(text: str) -> tuple[str, ...]:
+    """Return distinct, case-folded keywords, excluding standalone stop words."""
+    words = (word.casefold() for word, _ in _search_words(text))
+    return tuple(dict.fromkeys(word for word in words if word not in _SEARCH_STOP_WORDS and any(c.isalnum() for c in word)))
+
+
+def threshold_negation(text: str) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+    """Extract simple adjacent exclusions and flag expressions with unclear scope."""
+    positive, negative = [], []
+    unsupported = False
+    pending_negation = False
+    for original, adjacent in _search_words(text):
+        word = original.casefold()
+        if pending_negation:
+            pending_negation = False
+            if adjacent and word not in _SEARCH_STOP_WORDS and word.isalnum():
+                negative.append(word)
+                continue
+            unsupported = True
+        if word in _NEGATORS:
+            pending_negation = True
+        else:
+            positive.append(word)
+    excluded = tuple(dict.fromkeys(negative))
+    keywords = tuple(word for word in threshold_keywords(" ".join(positive)) if word not in excluded)
+    return keywords, excluded, unsupported or pending_negation
+
+
+def threshold_spelling(text: str, keywords: tuple[str, ...]) -> str:
+    """Use original spelling when case-folding alone exceeds the text limit."""
+    spellings = {word.casefold(): word for word, _ in reversed(list(_search_words(text)))}
+    return " ".join(spellings[word] for word in keywords)
+
+
+def _phrase_signal(keyword: str) -> bool:
+    return not keyword.isalnum() or (any(c.isalpha() for c in keyword) and any(c.isdigit() for c in keyword))
+
+
+def signal_branch(path: str, keyword: str) -> dict:
+    """Compile a single threshold signal, including its alternative word forms."""
+    if _phrase_signal(keyword):
+        return {"match_phrase": {path: keyword}}
+    return {"match": {path: {"query": " ".join(word_forms(keyword)), "operator": "or"}}}
+
+
+def signal_keyword(branch: object) -> tuple[str, str] | None:
+    """Recognise a threshold branch and return its field and representative keyword."""
+    if not isinstance(branch, dict) or len(branch) != 1:
+        return None
+    (kind, leaf), = branch.items()
+    if kind not in ("match", "match_phrase") or not isinstance(leaf, dict) or len(leaf) != 1:
+        return None
+    (path, value), = leaf.items()
+    text = value.get("query") if isinstance(value, dict) else value
+    if not isinstance(text, str):
+        return None
+    for keyword in threshold_keywords(text):
+        if branch == signal_branch(path, keyword):
+            return path, keyword
+    return None
 
 
 def _query_objects(node: object) -> Iterator[dict]:

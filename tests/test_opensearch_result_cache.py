@@ -1000,7 +1000,7 @@ def context_entry(**analysis):
 
 def context_handler(anchor=ANCHOR, follow_total=None, follow_relation="eq", no_anchor=False):
     def handler(index, dsl):
-        if dsl.get("sort") == [{"@timestamp": {"order": "desc"}}]:                    # the anchor query
+        if dsl.get("sort") == RANKED_ANCHORS:
             return hits_body([] if no_anchor else [anchor], ids=["A"])
         if dsl.get("sort") == [{"@timestamp": {"order": "asc"}}]:                     # a per-event follow-up
             docs = [{"@timestamp": "2026-10-28T09:58:00Z", "Body": "before it"}, {**anchor},
@@ -1291,7 +1291,7 @@ def test_every_warning_code_in_analysis_py_is_classified():
 # a fake cluster that reports totals the way OpenSearch does (see anchor_corpus_handler).
 # ---------------------------------------------------------------------------------------------------
 
-DESC = [{"@timestamp": {"order": "desc"}}]
+RANKED_ANCHORS = [{"_score": "desc"}, {"@timestamp": "desc"}]
 ASC = [{"@timestamp": {"order": "asc"}}]
 
 
@@ -1403,7 +1403,7 @@ def test_a_malformed_total_from_the_cluster_fails_closed(cache_settings, cluster
 
     def handler(index, dsl):
         body = base(index, dsl)
-        if "controllerlog" in index and dsl.get("sort") == DESC:
+        if "controllerlog" in index and dsl.get("sort") == RANKED_ANCHORS:
             if total is None:
                 body["hits"].pop("total")
             else:
@@ -1424,7 +1424,7 @@ def test_a_total_that_contradicts_the_returned_events_is_not_cached(cache_settin
 
     def handler(index, dsl):
         body = base(index, dsl)
-        if "controllerlog" in index and dsl.get("sort") == DESC:
+        if "controllerlog" in index and dsl.get("sort") == RANKED_ANCHORS:
             body["hits"]["total"] = {"value": 1, "relation": "eq"}                    # 1 matched, yet 3 were returned
         return body
 

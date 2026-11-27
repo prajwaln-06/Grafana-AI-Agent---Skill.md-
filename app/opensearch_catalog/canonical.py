@@ -36,25 +36,33 @@ def _canonicalise_entry(entry: dict, ctx: OpenSearchContext) -> dict:
         return entry
     if (entry.get("data_source") or "").strip().lower() != "opensearch":
         return entry
-    result = guard.check_entry(entry, ctx)
+    result = guard.check_entry(entry, ctx, generated=True)
     if result.ok:
         out = {**entry, "query": result.query, "index": result.index, "pattern_id": result.pattern_id}
         if result.analysis is not None:
             # canonical analysis parameters: documented defaults filled in, nothing the model wrote changed
             out["analysis"] = result.analysis
         notes = {"applied": list(result.applied), "warnings": list(result.warnings)}
-        if notes["applied"] or notes["warnings"]:
+        if result.text_search is not None:
+            notes["text_search"] = result.text_search
+        out.pop("guard_notes", None)
+        if any(notes.values()):
             out["guard_notes"] = notes
         return out
-    if result.code == guard.CODE_WINDOW_EXCEEDS_MAX:
-        logger.info("OpenSearch window exceeds the permitted maximum: %s", result.reason)
+    if result.code == guard.CODE_GENERATED_SCORE_SORT:
+        return {
+            **({"mode": entry["mode"]} if "mode" in entry else {}),
+            "status": "unmapped", "explanation": result.reason, "data_source": "opensearch",
+        }
+    if result.code in (guard.CODE_WINDOW_EXCEEDS_MAX, guard.CODE_BAD_VALUE) and result.user_message:
+        logger.info("OpenSearch search parameters need clarification: %s", result.reason)
         return {
             # keep the envelope of a single-mode contract (shape repair runs first)
             **({"mode": entry["mode"]} if "mode" in entry else {}),
             "status": "declined",
             "reason": "parameter_requires_clarification",
-            "explanation": result.user_message or result.reason,
-            "clarification": result.user_message or "Please narrow the time range.",
+            "explanation": result.user_message,
+            "clarification": result.user_message,
             "data_source": "opensearch",
         }
     return entry

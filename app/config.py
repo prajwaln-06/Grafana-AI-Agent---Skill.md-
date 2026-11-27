@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     opensearch_field_catalog_failure_backoff_seconds: float = Field(default=30.0, ge=0)
 
     # --- OpenSearch query limits (enforced in Python by opensearch_catalog.guard) ---
+    opensearch_text_default_msm_enabled: bool = True
+    opensearch_text_default_msm_ratio: float = Field(default=0.75, gt=0, le=1)
+    opensearch_rank_text_matches: bool = True
     opensearch_default_hits_size: int = Field(default=20, ge=1)
     opensearch_max_hits_size: int = Field(default=100, ge=1)
     opensearch_default_terms_size: int = Field(default=10, ge=1)
