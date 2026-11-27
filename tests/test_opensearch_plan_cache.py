@@ -525,11 +525,13 @@ def test_the_two_caches_are_separate_objects_with_separate_metadata(monkeypatch,
     assert "query_plan_cache" in res["execution"]["metadata"] and "result_cache" not in res["execution"]["metadata"]
 
 
-def test_the_default_is_opt_in_and_independent_of_the_result_cache(settings):
+def test_the_default_is_enabled_and_independent_of_the_result_cache(settings):
     from app.config import Settings
-    s = Settings(gemini_api_key="k", skills_root=settings.skills_root)
-    assert s.opensearch_query_plan_cache_enabled is False and s.opensearch_result_cache_enabled is True
-    assert s.opensearch_query_plan_cache_max_entries == 500
+    fields = Settings.model_fields
+    assert fields["opensearch_query_plan_cache_enabled"].default is True
+    assert fields["opensearch_result_cache_enabled"].default is True
+    assert fields["opensearch_result_cache_ttl_seconds"].default == 60
+    assert fields["opensearch_query_plan_cache_max_entries"].default == 500
 
 
 # ---------------------------------------------------------------------------------------------------

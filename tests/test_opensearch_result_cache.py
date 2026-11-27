@@ -53,7 +53,8 @@ def cluster(monkeypatch):
 def cache_settings(settings):
     """Result cache on, with a generous TTL so only the tests about time expire anything."""
     return settings.model_copy(update={"opensearch_result_cache_enabled": True,
-                                       "opensearch_result_cache_ttl_seconds": 600.0})
+                                       "opensearch_result_cache_ttl_seconds": 600.0,
+                                       "opensearch_query_plan_cache_enabled": False})
 
 
 def ctx_for(settings, *pids):
@@ -123,23 +124,67 @@ def cache_info(result):
     return [b["execution"]["metadata"]["result_cache"] for b in blocks]
 
 
-def test_both_caches_reuse_threshold_queries_by_exact_wording_only(cache_settings, cluster):
+@pytest.mark.parametrize("source", ["default", "explicit"])
+def test_both_caches_use_the_guards_threshold_source(cache_settings, cluster, source):
     settings = cache_settings.model_copy(update={"opensearch_query_plan_cache_enabled": True})
     cluster.handler = lambda *args: hits_body([{"Body": "fan off"}])
     entry = rows_entry()
-    entry["query"]["query"]["bool"]["filter"].append({"match": {"Body": {
-        "query": "the fan is off", "minimum_should_match": 2,
-    }}})
+    match = {"query": "the fan is off"}
+    if source == "explicit":
+        match["minimum_should_match"] = 2
+    entry["query"]["query"]["bool"]["filter"].append({"match": {"Body": match}})
     executed = execute(settings, entry)
-    question = "Show controller fan logs"
-    paraphrase = "List controller fan logs"
+    question = "Show service logs with the fan off"
+    paraphrase = "List service logs with the fan off"
     assert query_cache.equivalent(query_cache.build_signature(question), query_cache.build_signature(paraphrase))
     assert store(settings, question, executed) == ""
     assert runtime.store_validated_plan(question, SCOPE, executed, settings, None) == ""
     assert lookup(settings, question) is not None
     assert runtime.lookup_cached_plan(question, SCOPE, settings, None).hit is not None
-    assert lookup(settings, paraphrase) is None
-    assert runtime.lookup_cached_plan(paraphrase, SCOPE, settings, None).hit is None
+    assessment = query_cache.assess_executed(question, executed, registry=runtime.get_registry(settings))
+    assert assessment.parts[0].minimum_match_source == source
+    assert assessment.semantic_ok is (source == "default"), assessment.semantic_reason
+    answer = lookup(settings, paraphrase)
+    plan = runtime.lookup_cached_plan(paraphrase, SCOPE, settings, None).hit
+    if source == "explicit":
+        assert answer is None and plan is None
+    else:
+        assert cache_info(answer)[0]["match"] == "semantic" and plan.match == "semantic"
+
+
+@pytest.mark.parametrize("question, expected", [
+    ("which one of the hosts", False),
+    ("any one of", False),
+    ("any one of these hosts", False),
+    ("5 out of memory errors", False),
+    ("at least 5 errors", False),
+    ("at least 2 meaningful words", True),
+    ("three of these named phrases", True),
+    ("2 out of the following signals", True),
+    ("four or more distinct terms", True),
+    ("any one of these keywords", True),
+    ("all of the clues", True),
+    ("minimum_should_match 2", True),
+])
+def test_minimum_language_requires_search_units(question, expected):
+    assert query_cache.asks_for_minimum(question) is expected
+
+
+@pytest.mark.parametrize("change", [
+    {"opensearch_text_default_msm_enabled": False},
+    {"opensearch_text_default_msm_ratio": 0.85},
+    {"opensearch_rank_text_matches": False},
+])
+def test_text_policy_changes_invalidate_both_caches(cache_settings, cluster, change):
+    settings = cache_settings.model_copy(update={"opensearch_query_plan_cache_enabled": True})
+    executed = execute(settings, rows_entry())
+    question = "Show controller fan logs"
+    assert store(settings, question, executed) == ""
+    assert runtime.store_validated_plan(question, SCOPE, executed, settings, None) == ""
+    changed = settings.model_copy(update=change)
+    assert query_cache.fingerprint_config(changed) != query_cache.fingerprint_config(settings)
+    assert lookup(changed, question) is None
+    assert runtime.lookup_cached_plan(question, SCOPE, settings=changed, skill_index=None).hit is None
 
 
 def test_explicit_minimum_bypasses_semantic_lookups_in_both_caches(monkeypatch, cache_settings, cluster):

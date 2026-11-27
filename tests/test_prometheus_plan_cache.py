@@ -148,7 +148,8 @@ def test_default_is_disabled_and_independent_of_opensearch_flags(settings):
     assert s.prometheus_query_plan_cache_max_entries == 500 and s.prometheus_query_plan_cache_semantic_enabled is True
     on_os = s.model_copy(update={"opensearch_query_plan_cache_enabled": True})
     assert not ppc.enabled(on_os)
-    on_prom = s.model_copy(update={"prometheus_query_plan_cache_enabled": True})
+    on_prom = s.model_copy(update={"prometheus_query_plan_cache_enabled": True,
+                                   "opensearch_query_plan_cache_enabled": False})
     assert ppc.enabled(on_prom) and not on_prom.opensearch_query_plan_cache_enabled
 
 
@@ -164,7 +165,7 @@ def test_prometheus_and_opensearch_plan_caches_are_separate_instances(env):
     env.ask(Q_CPU)
     assert isinstance(env.cache, ppc.PrometheusPlanCache) and isinstance(env.cache, os_plan.QueryPlanCache)
     assert env.cache.snapshot()["entries"] == 1
-    assert os_runtime.plan_cache_snapshot(env.run.settings).get("enabled", False) is False
+    assert os_runtime.plan_cache_snapshot(env.run.settings).get("entries", 0) == 0
 
 
 def test_opensearch_plan_cache_enabled_alone_adds_no_prometheus_metadata(monkeypatch, settings):

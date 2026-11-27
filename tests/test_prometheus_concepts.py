@@ -673,4 +673,4 @@ def test_the_opensearch_caches_are_untouched_by_a_prometheus_synonym_hit(e):
     from app.opensearch_catalog import runtime as os_runtime
     e.ask(Q_CPU)
     _semantic_hit(e, e.ask("Show processor usage for all nodes."))
-    assert os_runtime.plan_cache_snapshot(e.run.settings).get("enabled", False) is False
+    assert os_runtime.plan_cache_snapshot(e.run.settings).get("entries", 0) == 0

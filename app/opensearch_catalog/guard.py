@@ -143,6 +143,7 @@ class GuardResult:
     intent: str | None = None
     analysis: dict | None = None      # canonical analysis parameters (None = simple question)
     text_search: dict | None = None
+    explicit_minimum: bool = False
 
 
 def _fail(code: str, reason: str, user_message: str = "") -> None:
@@ -391,6 +392,7 @@ class _Checker:
         self.warnings: list[str] = []
         self.clauses = 0
         self.text_thresholds: list[tuple[str, int, tuple[str, ...]]] = []
+        self.explicit_minimum = False
         self.expand_text = True
         self.time_ranges: list[dict] = []
         self.window: dict | None = None
@@ -506,7 +508,7 @@ class _Checker:
             return {"exists": self._exists(body, w)}
         return {kind: handler(body, w, kind)}
 
-    def _bool(self, body: Any, where: str, depth: int) -> dict:
+    def _bool(self, body: Any, where: str, depth: int, *, named_condition: bool = False) -> dict:
         if depth > self.limits.max_bool_depth:
             _fail(CODE_LIMIT, f"{where}: bool nesting deeper than {self.limits.max_bool_depth}")
         if not isinstance(body, dict) or not body:
@@ -551,6 +553,8 @@ class _Checker:
                 _fail(CODE_BAD_VALUE, f"{where}: use distinct should clauses for minimum_should_match above 1",
                       _MINIMUM_CLARIFICATION)
             out["minimum_should_match"] = m
+            if m and not named_condition:
+                self.explicit_minimum = True
             words = tuple(text for branch in branches if (text := _branch_text(branch)))
             if m and words:
                 self.text_thresholds.append(("explicit", m, words))
@@ -736,6 +740,8 @@ class _Checker:
         keywords = tuple(word for word, _ in distinct.values())
         branches = [branch for _, branch in distinct.values()]
         source = "explicit" if minimum is not None else "default"
+        if source == "explicit":
+            self.explicit_minimum = True
         if minimum is None:
             n = len(keywords)
             if n > 1:
@@ -804,6 +810,7 @@ class _Checker:
             (kind, leaf), = branch.items()
             self._match(leaf, f"{where}/should[{i}]/{kind}", kind)
         self.text_thresholds.append(("explicit", minimum, tuple(word for _, word in signals)))
+        self.explicit_minimum = True
         return {"bool": body}
 
     def _variant_group(self, body: Any, where: str, depth: int) -> dict | None:
@@ -886,7 +893,7 @@ class _Checker:
             _fail(CODE_SEVERITY, f"{where}: {e}")
         self.warnings.extend(warns)
         self.applied.append(f"expanded named_condition '{body}' using the family's documented severity definition")
-        return {"bool": self._bool(clause["bool"], where, depth)}
+        return {"bool": self._bool(clause["bool"], where, depth, named_condition=True)}
 
     # -- time window ------------------------------------------------------------------------------------------------
 
@@ -1236,6 +1243,7 @@ def check_entry(entry: dict, ctx: OpenSearchContext, *, now: datetime | None = N
             applied=tuple(dict.fromkeys(ck.applied)), warnings=tuple(dict.fromkeys(ck.warnings)),
             window=window, estimated_buckets=est, approximate_aggregations=tuple(ck.approx),
             intent=intent, analysis=analysis, text_search=_search_summary(out["query"], ck.text_thresholds, ranked),
+            explicit_minimum=ck.explicit_minimum,
         )
     except GuardError as e:
         return GuardResult(ok=False, code=e.code, reason=e.reason, user_message=e.user_message, pattern_id=pid if isinstance(pid, str) else None)

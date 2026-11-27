@@ -19,7 +19,7 @@ Safety model (every doubt is a miss)
    hit time, not at generation time.
 2. WHEN it may be reused: Level 1 identical canonical wording; Level 2 reworded and signature-equal
    in every facet (query_cache.equivalent) -- offered only for entries query_cache judged
-   semantic-safe (absence / recurrence analyses). Same scope only.
+   semantic-safe (explicit search thresholds allow exact wording only). Same scope only.
 3. Reuse re-proves the plan: schema version, registry pattern still enabled, registry / live field
    view / configuration / skill fingerprints unchanged, and the stored canonical query still passes
    guard.check_entry unchanged (query_cache.revalidate_entry). The executor then runs the full guard a

@@ -78,9 +78,16 @@ MIN_EFFECTIVE_TTL_SECONDS = 5.0
 
 # analysis type <-> the concept a question must carry for Level-2 reuse (others: exact wording only)
 _ANALYSIS_CONCEPT = {"absence": "ABSENT", "recurrence": "RECURRING"}
+_COUNT = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
+_SEARCH_UNITS = (
+    r"(?:(?:the|these|following|listed|named|distinct|meaningful|search|message|log|event)\s+)*"
+    r"(?:words?|phrases?|signals?|terms?|clues?|keywords?)"
+)
 _MINIMUM_LANGUAGE = re.compile(
-    r"\b(?:at\s+least|at\s+minimum|minimum\s+of|minimum[_ ]should[_ ]match|"
-    r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:or\s+more|(?:out\s+)?of))\b", re.I
+    rf"\b(?:minimum[_ -]should[_ -]match|"
+    rf"(?:at\s+(?:least|minimum)|minimum\s+of)\s+{_COUNT}\s+(?:of\s+)?{_SEARCH_UNITS}|"
+    rf"{_COUNT}\s+(?:or\s+more|(?:out\s+)?of)\s+{_SEARCH_UNITS}|"
+    rf"(?:any|either|all)\s+(?:one\s+of\s+|of\s+)?{_SEARCH_UNITS})\b", re.I
 )
 
 
@@ -540,6 +547,7 @@ class PartFacts:
     window_to: str
     window_seconds: float
     window_relative: bool
+    minimum_match_source: str = "none"
 
 
 @dataclass(frozen=True)
@@ -719,8 +727,18 @@ def _part_problem(entry: Any) -> tuple[PartFacts | None, str]:
         aj = json.dumps(analysis, sort_keys=True, ensure_ascii=False, allow_nan=False) if analysis is not None else ""
     except (TypeError, ValueError):
         return None, "query is not JSON-serialisable"
+    notes = entry.get("guard_notes")
+    summary = md.get("text_search")
+    source = summary.get("source") if isinstance(summary, dict) else None
+    if isinstance(notes, dict) and notes.get("explicit_minimum") is True:
+        source = "explicit"
+    elif source not in ("default", "explicit", "none"):
+        # Legacy entries had only explicit match thresholds. Reuse them by exact wording.
+        source = "explicit" if multi_signal_minima(query) or any(
+            minimum is not None for _, _, minimum in text_searches(query)
+        ) else "none"
     return PartFacts(pid, atype, aj, qj, win["from_expression"], win["to_expression"], float(win["seconds"]),
-                     relative), ""
+                     relative, source), ""
 
 
 def _narrowest_span(part: PartFacts) -> float | None:
@@ -755,10 +773,7 @@ def _semantic_consistency(question: str, parts: tuple[PartFacts, ...], registry:
     if len(parts) != 1:
         return False, "multi-part result: exact wording only"
     part = parts[0]
-    query = json.loads(part.query_json)
-    if asks_for_minimum(question) or multi_signal_minima(query) or any(
-        minimum is not None for _, _, minimum in text_searches(query)
-    ):
+    if part.minimum_match_source == "explicit":
         return False, "minimum-match search: exact wording only"
     sig = build_signature(question, alias_items_for(aliases, [part.pattern_id]))
     if not sig.understood:

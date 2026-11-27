@@ -49,9 +49,13 @@ class Settings(BaseSettings):
     opensearch_field_catalog_failure_backoff_seconds: float = Field(default=30.0, ge=0)
 
     # --- OpenSearch query limits (enforced in Python by opensearch_catalog.guard) ---
-    opensearch_text_default_msm_enabled: bool = True
-    opensearch_text_default_msm_ratio: float = Field(default=0.75, gt=0, le=1)
-    opensearch_rank_text_matches: bool = True
+    opensearch_text_default_msm_enabled: bool = Field(
+        default=True, description="Require a minimum of distinct meaningful keywords for unordered text searches.")
+    opensearch_text_default_msm_ratio: float = Field(
+        default=0.75, gt=0, le=1,
+        description="Fraction of distinct keywords required by default, rounded down and bounded to 2-10.")
+    opensearch_rank_text_matches: bool = Field(
+        default=True, description="Rank text-search rows by relevance, then newest, unless a sort was specified.")
     opensearch_default_hits_size: int = Field(default=20, ge=1)
     opensearch_max_hits_size: int = Field(default=100, ge=1)
     opensearch_default_terms_size: int = Field(default=10, ge=1)
@@ -125,11 +129,10 @@ class Settings(BaseSettings):
     # the current registry / live mapping / config / skill text, re-run through the guard, and EXECUTED
     # AGAIN for fresh data. Matching rules (and the semantic switch / aliases) are the result cache's.
     opensearch_query_plan_cache_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Reuse a validated OpenSearch query plan for an identical or equivalent question, "
                     "skipping the LLM calls but always re-validating and re-executing it. In memory only. "
-                    "False (the default: opt-in, so existing behaviour is unchanged) = every result-cache "
-                    "miss runs the full Router/Generator pipeline. Independent of "
+                    "False = every result-cache miss runs the full Router/Generator pipeline. Independent of "
                     "OPENSEARCH_RESULT_CACHE_ENABLED. Its semantic matching and aliases are "
                     "OPENSEARCH_RESULT_CACHE_SEMANTIC_ENABLED / OPENSEARCH_RESULT_CACHE_ALIASES, shared "
                     "on purpose: one place declares what counts as an equivalent question.")

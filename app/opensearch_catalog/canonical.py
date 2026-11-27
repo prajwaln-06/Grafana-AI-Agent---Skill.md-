@@ -45,6 +45,8 @@ def _canonicalise_entry(entry: dict, ctx: OpenSearchContext) -> dict:
         notes = {"applied": list(result.applied), "warnings": list(result.warnings)}
         if result.text_search is not None:
             notes["text_search"] = result.text_search
+        if result.explicit_minimum:
+            notes["explicit_minimum"] = True
         out.pop("guard_notes", None)
         if any(notes.values()):
             out["guard_notes"] = notes
