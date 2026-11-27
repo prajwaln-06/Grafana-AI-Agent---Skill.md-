@@ -470,6 +470,9 @@ def fingerprint_config(settings) -> str:
         "url": settings.opensearch_url, "user": settings.opensearch_auth_username,
         "alerts": settings.alert_rule_creation_enabled, "dependent": settings.dependent_query_resolution_enabled,
         "model": settings.gemini_model,
+        "router_thinking": settings.gemini_router_thinking_budget,
+        "generator_thinking": settings.gemini_generator_thinking_budget,
+        "generator_output_tokens": settings.gemini_generator_max_output_tokens,
     })
 
 

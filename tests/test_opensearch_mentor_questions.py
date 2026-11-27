@@ -333,7 +333,7 @@ def test_generator_prompt_lists_the_analyses_of_the_selected_family_only(skill_i
     FakeCluster(handler=generic).install(monkeypatch)
     prompts = []
 
-    def fake(prompt, system_instruction, api_key, model):
+    def fake(prompt, system_instruction, api_key, model, **policy):
         prompts.append(prompt)
         if len(prompts) == 1:
             return MagicMock(parsed={"gate_stop": None, "panic_mode": False, "unresolved_topics": [],

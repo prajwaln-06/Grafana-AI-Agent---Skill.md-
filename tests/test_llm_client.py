@@ -1,12 +1,14 @@
 """Exercise the Gemini transport with a fake SDK and clock."""
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from google.genai import errors as genai_errors
+from google.genai import types
 
-from app import llm_client
+from app import llm_client, pipeline
 from app.config import GeminiTransportSettings
 
 
@@ -200,3 +202,64 @@ def test_model_probe_is_memoized_for_success_and_exhaustion(available):
     expected = ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
     expected += ["gemini-2.5-flash-lite"] if available else ["gemini-2.5-flash", "gemini-2.0-flash"]
     assert attempted == expected
+
+
+def test_none_policy_kwargs_send_the_original_config():
+    fake = _fake_client("{}")
+    with patch("google.genai.Client", return_value=fake):
+        llm_client.call_llm_json("original", "system", "key", "model",
+                                 thinking_budget=None, max_output_tokens=None, timeout_seconds=None)
+    expected = types.GenerateContentConfig(
+        system_instruction="system", response_mime_type="application/json", temperature=0.0)
+    assert fake.models.generate_content.call_args.kwargs == {"model": "model", "contents": "original", "config": expected}
+
+
+def test_thinking_rejection_retries_the_same_request_without_only_that_option():
+    unsupported = genai_errors.ClientError(400, {"error": {"message": "Thinking budget is not supported"}})
+    fake = _fake_client(side_effect=[unsupported, SimpleNamespace(text="{}")])
+    with patch("google.genai.Client", return_value=fake) as client, patch.object(llm_client.time, "sleep") as sleep:
+        llm_client.call_llm_json("q", "s", "key", "model", thinking_budget=0, max_output_tokens=123, timeout_seconds=5)
+    before, after = [c.kwargs["config"] for c in fake.models.generate_content.call_args_list]
+    assert before.thinking_config.thinking_budget == 0
+    assert after == before.model_copy(update={"thinking_config": None})
+    assert after.max_output_tokens == 123 and after.http_options.timeout == 5_000
+    assert client.call_count == 1
+    sleep.assert_not_called()
+
+
+@pytest.mark.parametrize("datasources,action,apply", [
+    (["prometheus"], "read_query", False),
+    (["prometheus"], "propose_alert_rule", False),
+    (["opensearch", "prometheus"], "read_query", False),
+    (["opensearch", "opensearch"], "read_query", True),
+])
+def test_generator_policy_preserves_prometheus_and_alert_config(settings, skill_index, datasources, action, apply):
+    settings = settings.model_copy(update={"alert_rule_creation_enabled": action == "propose_alert_rule",
+                                           "gemini_generator_thinking_budget": 8,
+                                           "gemini_generator_timeout_seconds": 9})
+    fake = _fake_client("{}")
+    matched = [{"data_source": source} for source in datasources]
+    with patch("google.genai.Client", return_value=fake):
+        asyncio.run(pipeline._run_generator("q", matched, False, pipeline.GeneratorContext(),
+                                            skill_index, settings, pipeline.PipelineContext(), action))
+    config = fake.models.generate_content.call_args.kwargs["config"]
+    if apply:
+        assert config.thinking_config.thinking_budget == 8
+        assert config.max_output_tokens == 8192 and config.http_options.timeout == 9_000
+    else:
+        assert config == types.GenerateContentConfig(
+            system_instruction=pipeline._build_generator_instructions(settings, action),
+            temperature=0.0, response_mime_type="application/json")
+
+
+@pytest.mark.parametrize("budget", [None, 0])
+def test_router_thinking_is_opt_in(settings, skill_index, budget):
+    settings = settings.model_copy(update={"gemini_router_thinking_budget": budget})
+    fake = _fake_client("{}")
+    with patch("google.genai.Client", return_value=fake):
+        asyncio.run(pipeline._run_router("q", skill_index, settings, pipeline.PipelineContext()))
+    expected = types.GenerateContentConfig(system_instruction=pipeline._build_router_instructions(settings),
+                                           temperature=0.0, response_mime_type="application/json")
+    if budget is not None:
+        expected.thinking_config = types.ThinkingConfig(thinking_budget=budget)
+    assert fake.models.generate_content.call_args.kwargs["config"] == expected

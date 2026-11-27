@@ -744,6 +744,10 @@ def _datasource_of(matched_reference: dict) -> str:
     return (matched_reference.get("data_source") or "").strip().lower()
 
 
+def _is_opensearch_only(matched: list[dict]) -> bool:
+    return bool(matched) and all(_datasource_of(reference) == "opensearch" for reference in matched)
+
+
 def _extract_dependency_plan(matched: list[dict]) -> DependencyPlan | None:
     """Deterministically validates the Router's optional `intent_id`/
     `depends_on` annotations on `matched_references` (see
@@ -1962,12 +1966,16 @@ async def _run_router(question: str, skill_index: SkillIndex, settings: Settings
     prompt = "\n\n".join(prompt_parts)
 
     # The LLM SDK call is synchronous (and retries with time.sleep): run it in a worker thread.
+    policy = {}
+    if settings.gemini_router_thinking_budget is not None:
+        policy["thinking_budget"] = settings.gemini_router_thinking_budget
     response = await asyncio.to_thread(
         llm_client.call_llm_json,
         prompt=prompt,
         system_instruction=_build_router_instructions(settings),
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
+        **policy,
     )
     return response.parsed
 
@@ -2498,12 +2506,20 @@ async def _run_generator(question: str, matched: list[dict], panic_mode: bool,
         )
 
     prompt = "\n\n".join(prompt_parts)
+    policy = {}
+    if action_intent != _ALERT_ACTION_INTENT and _is_opensearch_only(matched):
+        policy = {key: value for key, value in (
+            ("thinking_budget", settings.gemini_generator_thinking_budget),
+            ("max_output_tokens", settings.gemini_generator_max_output_tokens),
+            ("timeout_seconds", settings.gemini_generator_timeout_seconds),
+        ) if value is not None}
     response = await asyncio.to_thread(
         llm_client.call_llm_json,
         prompt=prompt,
         system_instruction=_build_generator_instructions(settings, action_intent),
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
+        **policy,
     )
     # Raw Generator output. OpenSearch canonicalisation is NOT done here: it must
     # run after `_normalize_contract_shape` (see `_normalize_then_canonicalise`),

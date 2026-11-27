@@ -52,7 +52,8 @@ class _ModelRoute:
 
 
 def call_llm_json(prompt: str, system_instruction: str, api_key: str, model: str,
-                  max_retries: int | None = None) -> LLMResponse:
+                  max_retries: int | None = None, *, thinking_budget: int | None = None,
+                  max_output_tokens: int | None = None, timeout_seconds: float | None = None) -> LLMResponse:
     """Send the original prompt and parse JSON, with bounded retries."""
     settings = get_gemini_transport_settings()
     attempts = settings.gemini_max_attempts if max_retries is None else max_retries
@@ -62,7 +63,9 @@ def call_llm_json(prompt: str, system_instruction: str, api_key: str, model: str
     attempt = 0
     for attempt in range(1, attempts + 1):
         try:
-            text = _call_gemini_once(prompt, system_instruction, api_key, model, settings.gemini_http_timeout_seconds)
+            text = _call_gemini_once(
+                prompt, system_instruction, api_key, model, settings.gemini_http_timeout_seconds,
+                thinking_budget=thinking_budget, max_output_tokens=max_output_tokens, timeout_seconds=timeout_seconds)
             return LLMResponse(text=text, parsed=_parse_json_response(text))
         except _PermanentError as exc:
             raise LLMCallError(f"LLM call failed with a non-retryable error: {exc}") from exc
@@ -105,9 +108,23 @@ def _client_for(genai, types, api_key: str, timeout_seconds: float):
         return client, identity, studio
 
 
+def _generate_content(client, model: str, prompt: str, config, errors):
+    try:
+        return client.models.generate_content(model=model, contents=prompt, config=config)
+    except (errors.APIError, TypeError, ValueError) as exc:
+        # Older Gemini models and SDKs can reject a thinking configuration.
+        # Preserve the original request settings and remove only that option.
+        if (getattr(config, "thinking_config", None) is None
+                or (isinstance(exc, errors.APIError) and exc.code != 400)
+                or "thinking" not in str(exc).lower()):
+            raise
+        return client.models.generate_content(
+            model=model, contents=prompt, config=config.model_copy(update={"thinking_config": None}))
+
+
 def _generate(client, identity: tuple, studio: bool, model: str, prompt: str, config, errors):
     if not studio or model != _STUDIO_MODELS[0]:
-        return client.models.generate_content(model=model, contents=prompt, config=config)
+        return _generate_content(client, model, prompt, config, errors)
     with _client_lock:
         route = _model_routes.get(identity)
         if route is None:
@@ -116,8 +133,7 @@ def _generate(client, identity: tuple, studio: bool, model: str, prompt: str, co
         with route.lock:
             while not route.confirmed and route.candidate < len(_STUDIO_MODELS):
                 try:
-                    response = client.models.generate_content(
-                        model=_STUDIO_MODELS[route.candidate], contents=prompt, config=config)
+                    response = _generate_content(client, _STUDIO_MODELS[route.candidate], prompt, config, errors)
                 except errors.APIError as exc:
                     if exc.code != 404:
                         raise
@@ -127,7 +143,7 @@ def _generate(client, identity: tuple, studio: bool, model: str, prompt: str, co
                     return response
     if not route.confirmed:
         raise _PermanentError(f"HTTP 404 from Gemini API: no model in the fallback list for {model!r} is available.")
-    return client.models.generate_content(model=_STUDIO_MODELS[route.candidate], contents=prompt, config=config)
+    return _generate_content(client, _STUDIO_MODELS[route.candidate], prompt, config, errors)
 
 
 def _retry_after(error) -> float:
@@ -147,7 +163,8 @@ def _retry_after(error) -> float:
 
 
 def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model: str,
-                      timeout_seconds: float) -> str:
+                      transport_timeout: float, *, thinking_budget: int | None,
+                      max_output_tokens: int | None, timeout_seconds: float | None) -> str:
     try:
         from google import genai
         from google.genai import errors, types
@@ -155,9 +172,19 @@ def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model:
         raise _PermanentError("google-genai is not installed. Run: pip install google-genai") from exc
 
     try:
-        client, identity, studio = _client_for(genai, types, api_key, timeout_seconds)
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction, response_mime_type="application/json", temperature=0.0)
+        client, identity, studio = _client_for(genai, types, api_key, transport_timeout)
+        options = {"system_instruction": system_instruction, "response_mime_type": "application/json", "temperature": 0.0}
+        if max_output_tokens is not None:
+            options["max_output_tokens"] = max_output_tokens
+        if timeout_seconds is not None:
+            options["http_options"] = types.HttpOptions(timeout=round(timeout_seconds * 1000))
+        config = types.GenerateContentConfig(**options)
+        if thinking_budget is not None:
+            try:
+                thinking = types.ThinkingConfig(thinking_budget=thinking_budget)
+                config = types.GenerateContentConfig(**options, thinking_config=thinking)
+            except (AttributeError, TypeError, ValueError):
+                logger.debug("Gemini SDK did not accept thinking_config")
         response = _generate(client, identity, studio, model, prompt, config, errors)
         text = response.text
         if text is None:

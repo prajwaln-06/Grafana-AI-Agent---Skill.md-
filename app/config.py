@@ -34,6 +34,14 @@ class Settings(GeminiTransportSettings):
     # --- LLM ---
     gemini_api_key: str = Field(..., description="Google Gemini API key.")
     gemini_model: str = Field(default="gemini-3.5-flash-lite")
+    gemini_router_thinking_budget: int | None = Field(
+        default=None, ge=0, description="Optional Gemini thinking budget for the shared Router.")
+    gemini_generator_thinking_budget: int | None = Field(
+        default=0, ge=0, description="Thinking budget for OpenSearch-only read generation.")
+    gemini_generator_max_output_tokens: int | None = Field(
+        default=8192, ge=1, description="Output token limit for OpenSearch-only read generation.")
+    gemini_generator_timeout_seconds: float | None = Field(
+        default=None, gt=0, description="Optional HTTP timeout override for OpenSearch-only read generation.")
 
     # --- Skill package ---
     skills_root: Path = Field(default=Path("skills"),
