@@ -1,17 +1,22 @@
-"""
-Tests llm_client.py's own logic (retry/backoff, permanent-vs-transient
-error classification, JSON-fence stripping) by mocking the `google.genai`
-SDK boundary, NOT by making a real network call -- there is no network path
-to Google's API from this environment (or from most CI runners). See
-HANDOFF.md's testing section for the live smoke test to run once you have a
-real GEMINI_API_KEY and network access.
-"""
+"""Exercise the Gemini transport with a fake SDK and clock."""
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from google.genai import errors as genai_errors
 
 from app import llm_client
+from app.config import GeminiTransportSettings
+
+
+@pytest.fixture(autouse=True)
+def clear_clients():
+    llm_client._clients.clear()
+    llm_client._model_routes.clear()
+    yield
+    llm_client._clients.clear()
+    llm_client._model_routes.clear()
 
 
 def _fake_client(response_text=None, side_effect=None):
@@ -118,3 +123,80 @@ def test_empty_response_body_is_treated_as_transient_and_retried():
     with patch("google.genai.Client", return_value=fake_client), patch("time.sleep"):
         result = llm_client.call_llm_json("prompt", "system", "key", "model")
     assert result.parsed == {"ok": True}
+
+
+def test_client_is_created_once_for_parallel_calls_and_separates_vertex_mode(monkeypatch):
+    monkeypatch.delenv("GOOGLE_GENAI_USE_VERTEXAI", raising=False)
+    with patch("google.genai.Client", return_value=_fake_client('{"a": 1}')) as client:
+        with ThreadPoolExecutor(max_workers=4) as threads:
+            results = list(threads.map(lambda _: llm_client.call_llm_json("q", "s", "key", "model"), range(8)))
+        assert client.call_count == 1 and all(r.parsed == {"a": 1} for r in results)
+        assert client.call_args.kwargs["http_options"].timeout == 60_000
+        monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+        llm_client.call_llm_json("q", "s", "key", "model")
+        assert client.call_count == 2
+
+
+def test_transport_settings_and_jittered_backoff(monkeypatch):
+    clock = [0.0]
+    times = []
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    def generate(**kwargs):
+        times.append(clock[0])
+        if len(times) < 3:
+            raise genai_errors.ServerError(503, {"error": {"message": "busy"}})
+        return SimpleNamespace(text='{"ok": true}')
+
+    settings = GeminiTransportSettings(_env_file=None, gemini_http_timeout_seconds=43, gemini_max_attempts=3)
+    monkeypatch.setattr(llm_client, "get_gemini_transport_settings", lambda: settings)
+    monkeypatch.setattr(llm_client.time, "sleep", sleep)
+    monkeypatch.setattr(llm_client.random, "uniform", lambda low, high: 1.1 if (low, high) == (0.8, 1.2) else 1)
+    with patch("google.genai.Client", return_value=_fake_client(side_effect=generate)) as client:
+        assert llm_client.call_llm_json("q", "s", "key", "model").parsed == {"ok": True}
+    assert times == pytest.approx([0, 0.55, 1.65])
+    assert client.call_args.kwargs["http_options"].timeout == 43_000
+
+
+@pytest.mark.parametrize("header,delay", [("4", 4), ("Thu, 01 Jan 1970 00:00:09 GMT", 3)])
+def test_rate_limit_honors_retry_after(monkeypatch, header, delay):
+    rate_limit = genai_errors.ClientError(429, {"error": {"message": "busy"}},
+                                          SimpleNamespace(headers={"Retry-After": header}))
+    monkeypatch.setattr(llm_client.time, "time", lambda: 6)
+    fake = _fake_client(side_effect=[rate_limit, SimpleNamespace(text="{}")])
+    with patch("google.genai.Client", return_value=fake), patch.object(llm_client.time, "sleep") as sleep:
+        llm_client.call_llm_json("q", "s", "key", "model")
+    sleep.assert_called_once_with(delay)
+
+
+def test_parse_failure_retries_once_without_sleep_even_with_more_attempts():
+    fake = _fake_client("invalid")
+    with patch("google.genai.Client", return_value=fake), patch.object(llm_client.time, "sleep") as sleep:
+        with pytest.raises(llm_client.LLMCallError, match="after 2 attempts"):
+            llm_client.call_llm_json("q", "s", "key", "model", max_retries=4)
+    assert fake.models.generate_content.call_count == 2
+    sleep.assert_not_called()
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_model_probe_is_memoized_for_success_and_exhaustion(available):
+    attempted = []
+
+    def generate(model, **kwargs):
+        attempted.append(model)
+        if available and model == "gemini-2.5-flash-lite":
+            return SimpleNamespace(text="{}")
+        raise genai_errors.ClientError(404, {"error": {"message": "missing"}})
+
+    with patch("google.genai.Client", return_value=_fake_client(side_effect=generate)):
+        for _ in range(2):
+            if available:
+                llm_client.call_llm_json("q", "s", "AIza-test", "gemini-3.5-flash-lite")
+            else:
+                with pytest.raises(llm_client.LLMCallError, match="non-retryable"):
+                    llm_client.call_llm_json("q", "s", "AIza-test", "gemini-3.5-flash-lite")
+    expected = ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
+    expected += ["gemini-2.5-flash-lite"] if available else ["gemini-2.5-flash", "gemini-2.0-flash"]
+    assert attempted == expected

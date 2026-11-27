@@ -1,60 +1,40 @@
-"""
-llm_client.py
-
-The ONLY module that talks to the Gemini API directly. Every pipeline phase
-calls `call_llm_json()` and gets back a parsed dict (or a well-typed
-failure) -- none of them import google.genai themselves. This isolation
-means: (a) swapping models/providers later touches one file, and (b) every
-other module in the pipeline is unit-testable by mocking this one function,
-without needing a real API key or network access.
-
-NOTE FOR WHOEVER DEPLOYS THIS: this wraps the `google-genai` SDK
-(`pip install google-genai`). The exact call shape below matches that
-package's documented usage as of this writing, but SDK call signatures do
-shift between versions -- verify this against the installed version's docs
-if `call_llm_json` raises immediately on first real use. This module could
-not be exercised against a live Gemini endpoint in the environment this was
-written/reviewed in either (no network path to generativelanguage.
-googleapis.com from that sandbox) -- see HANDOFF.md's testing section for
-exactly what to run once you have a real API key and network access.
-
-FAIL-FAST vs RETRY: `google.genai.errors.APIError` carries the HTTP status
-in `.code`. A 4xx here (400 bad request -- e.g. a malformed config field a
-newer/older SDK version doesn't recognize, 401/403 -- bad or missing API
-key, 404 -- unknown model name) means every retry will fail identically;
-retrying it 3x with exponential backoff only adds ~6 seconds of latency to
-every single request before surfacing the same error. Those fail
-immediately, with the actual message intact. 429 (rate limit) and 5xx
-(server error) are genuinely transient and go through the normal retry
-path, as does any exception that isn't an APIError at all (network errors,
-timeouts).
-"""
+﻿"""Shared Gemini JSON transport for the Router and Generator."""
 from __future__ import annotations
 
 import json
 import logging
+import math
+import os
+import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
+from threading import Lock
+
+from app.config import get_gemini_transport_settings
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 5
-BASE_BACKOFF_SECONDS = 2
+BASE_BACKOFF_SECONDS = 0.5
+_PERMANENT_HTTP_STATUS_CODES = {400, 401, 403, 404}
+_STUDIO_MODELS = ("gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash")
+_client_lock = Lock()
+_clients: dict[tuple, object] = {}
+_model_routes: dict[tuple, _ModelRoute] = {}
 
 
 class LLMCallError(Exception):
-    """Raised when every retry attempt has been exhausted, OR immediately
-    for a non-retryable failure (see _PermanentError below). Callers should
-    treat this as an internal_error result, never as a signal to guess at
-    the answer themselves."""
+    """Gemini returned a permanent failure or exhausted the allowed attempts."""
 
 
 class _PermanentError(Exception):
-    """A failure that will not resolve itself on retry (bad API key,
-    unknown model name, malformed request) -- raised instead of
-    _TransientError so call_llm_json can fail immediately rather than
-    burning ~6 seconds of exponential backoff to reproduce the same
-    error 3 times."""
+    pass
+
+
+class _TransientError(Exception):
+    def __init__(self, message: str, retry_after: float = 0):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -63,130 +43,142 @@ class LLMResponse:
     parsed: dict | list
 
 
+@dataclass
+class _ModelRoute:
+    """Remember prior 404s even if the next model temporarily fails."""
+    candidate: int = 0
+    confirmed: bool = False
+    lock: Lock = field(default_factory=Lock)
+
+
 def call_llm_json(prompt: str, system_instruction: str, api_key: str, model: str,
-                   max_retries: int = MAX_RETRIES) -> LLMResponse:
-    """Calls Gemini with the given prompt + system instruction, requesting a
-    JSON-only response, retrying with exponential backoff on transient
-    failures. Raises LLMCallError if every attempt fails, or if every
-    attempt returns text that doesn't parse as JSON (also treated as a
-    failure -- a phase that can't parse its own model's output has nothing
-    safe to do with it)."""
+                  max_retries: int | None = None) -> LLMResponse:
+    """Send the original prompt and parse JSON, with bounded retries."""
+    settings = get_gemini_transport_settings()
+    attempts = settings.gemini_max_attempts if max_retries is None else max_retries
     last_error: Exception | None = None
-    for attempt in range(max_retries):
+    parse_retry_used = False
+    transport_retries = 0
+    attempt = 0
+    for attempt in range(1, attempts + 1):
         try:
-            text = _call_gemini_once(prompt, system_instruction, api_key, model)
-            parsed = _parse_json_response(text)
-            return LLMResponse(text=text, parsed=parsed)
-        except _PermanentError as e:
-            raise LLMCallError(f"LLM call failed with a non-retryable error: {e}") from e
-        except (_TransientError, json.JSONDecodeError) as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                backoff = BASE_BACKOFF_SECONDS * (2 ** attempt)
-                logger.warning("LLM call attempt %d/%d failed (%s); retrying in %ds",
-                                attempt + 1, max_retries, e, backoff)
-                time.sleep(backoff)
-                continue
-    raise LLMCallError(f"LLM call failed after {max_retries} attempts: {last_error}")
+            text = _call_gemini_once(prompt, system_instruction, api_key, model, settings.gemini_http_timeout_seconds)
+            return LLMResponse(text=text, parsed=_parse_json_response(text))
+        except _PermanentError as exc:
+            raise LLMCallError(f"LLM call failed with a non-retryable error: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            if parse_retry_used:
+                break
+            parse_retry_used = True
+        except _TransientError as exc:
+            last_error = exc
+            if attempt < attempts:
+                delay = BASE_BACKOFF_SECONDS * (2 ** transport_retries) * random.uniform(0.8, 1.2)
+                delay = max(delay, exc.retry_after)
+                transport_retries += 1
+                logger.warning("Gemini attempt %d/%d failed; retrying in %.2fs", attempt, attempts, delay)
+                time.sleep(delay)
+    raise LLMCallError(f"LLM call failed after {attempt} attempts: {last_error}") from last_error
 
 
-class _TransientError(Exception):
-    """Wraps SDK-level failures (network, rate limit, 5xx) that are worth
-    retrying, as opposed to a JSON-parse failure which is handled
-    separately above but retried the same way (a retried call sometimes
-    produces well-formed JSON even when one attempt didn't)."""
+def _client_for(genai, types, api_key: str, timeout_seconds: float):
+    use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    location = os.environ.get("GOOGLE_CLOUD_LOCATION")
+    key = api_key.strip() if api_key else api_key
+    studio = bool(key and key.startswith("AIza"))
+    if studio:
+        options = {"api_key": key, "vertexai": False}
+        identity = (key, False, None, None)
+    elif use_vertex and project and key and key.startswith("AQ."):
+        options = {"vertexai": True, "project": project, "location": "global"}
+        identity = (api_key, True, project, "global")
+    else:
+        options = {"api_key": api_key}
+        identity = (api_key, use_vertex, project if use_vertex else None, location if use_vertex else None)
+    with _client_lock:
+        client = _clients.get(identity)
+        if client is None:
+            http = types.HttpOptions(timeout=round(timeout_seconds * 1000))
+            client = _clients[identity] = genai.Client(http_options=http, **options)
+        return client, identity, studio
 
 
-_PERMANENT_HTTP_STATUS_CODES = {400, 401, 403, 404}
+def _generate(client, identity: tuple, studio: bool, model: str, prompt: str, config, errors):
+    if not studio or model != _STUDIO_MODELS[0]:
+        return client.models.generate_content(model=model, contents=prompt, config=config)
+    with _client_lock:
+        route = _model_routes.get(identity)
+        if route is None:
+            route = _model_routes[identity] = _ModelRoute()
+    if not route.confirmed:
+        with route.lock:
+            while not route.confirmed and route.candidate < len(_STUDIO_MODELS):
+                try:
+                    response = client.models.generate_content(
+                        model=_STUDIO_MODELS[route.candidate], contents=prompt, config=config)
+                except errors.APIError as exc:
+                    if exc.code != 404:
+                        raise
+                    route.candidate += 1
+                else:
+                    route.confirmed = True
+                    return response
+    if not route.confirmed:
+        raise _PermanentError(f"HTTP 404 from Gemini API: no model in the fallback list for {model!r} is available.")
+    return client.models.generate_content(model=_STUDIO_MODELS[route.candidate], contents=prompt, config=config)
 
 
-def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model: str) -> str:
+def _retry_after(error) -> float:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    value = headers.get("Retry-After") if headers is not None else None
+    if not value:
+        return 0
+    try:
+        try:
+            delay = float(value)
+        except ValueError:
+            delay = parsedate_to_datetime(value).timestamp() - time.time()
+        return max(0, delay) if math.isfinite(delay) else 0
+    except (ValueError, TypeError, OverflowError):
+        return 0
+
+
+def _call_gemini_once(prompt: str, system_instruction: str, api_key: str, model: str,
+                      timeout_seconds: float) -> str:
     try:
         from google import genai
         from google.genai import errors, types
-    except ImportError as e:
-        raise _PermanentError(
-            "google-genai is not installed. Run: pip install google-genai"
-        ) from e
+    except ImportError as exc:
+        raise _PermanentError("google-genai is not installed. Run: pip install google-genai") from exc
 
     try:
-        import os
-
-        use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1")
-        gcp_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        is_ai_studio_key = bool(api_key and api_key.strip().startswith("AIza"))
-
-        if is_ai_studio_key:
-            # Standard Google AI Studio key (AIzaSy...): explicitly force Gemini Developer API
-            # (vertexai=False) so any machine-level GOOGLE_GENAI_USE_VERTEXAI env var cannot
-            # redirect it to Vertex AI.
-            client = genai.Client(api_key=api_key.strip(), vertexai=False)
-        elif use_vertex and gcp_project and api_key and api_key.strip().startswith("AQ."):
-            client = genai.Client(vertexai=True, project=gcp_project, location="global")
-        else:
-            client = genai.Client(api_key=api_key)
-
-        gen_config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            temperature=0.0,
-        )
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=gen_config,
-            )
-        except errors.APIError as first_err:
-            # If a Google AI Studio key is used with the default Vertex model ID
-            # ('gemini-3.5-flash-lite') and AI Studio returns 404 NOT_FOUND, automatically
-            # fall back to standard AI Studio Flash models ('gemini-2.5-flash-lite', 'gemini-2.5-flash').
-            if is_ai_studio_key and getattr(first_err, "code", None) == 404 and model == "gemini-3.5-flash-lite":
-                response = None
-                for fallback_model in ("gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"):
-                    try:
-                        response = client.models.generate_content(
-                            model=fallback_model,
-                            contents=prompt,
-                            config=gen_config,
-                        )
-                        break
-                    except errors.APIError as fb_err:
-                        if getattr(fb_err, "code", None) == 404:
-                            continue
-                        raise
-                if response is None:
-                    raise first_err
-            else:
-                raise
+        client, identity, studio = _client_for(genai, types, api_key, timeout_seconds)
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction, response_mime_type="application/json", temperature=0.0)
+        response = _generate(client, identity, studio, model, prompt, config, errors)
         text = response.text
         if text is None:
             raise _TransientError("Gemini returned an empty response body.")
         return text
-    except _TransientError:
+    except (_PermanentError, _TransientError):
         raise
-    except errors.APIError as e:
-        code = getattr(e, "code", None)
-        if code in _PERMANENT_HTTP_STATUS_CODES:
+    except errors.APIError as exc:
+        if exc.code in _PERMANENT_HTTP_STATUS_CODES:
             raise _PermanentError(
-                f"HTTP {code} from Gemini API (model={model!r}): {getattr(e, 'message', e)}. "
-                f"Check GEMINI_API_KEY and GEMINI_MODEL in your .env -- this will not resolve "
-                f"on retry."
-            ) from e
-        raise _TransientError(str(e)) from e
-    except Exception as e:  # noqa: BLE001 -- anything else from the call
-        # (network errors, timeouts, an SDK version whose exception types
-        # don't match the errors.APIError hierarchy checked above) is
-        # treated as transient and retried, up to max_retries.
-        raise _TransientError(str(e)) from e
+                f"HTTP {exc.code} from Gemini API (model={model!r}): {exc.message}. "
+                f"Check GEMINI_API_KEY and GEMINI_MODEL in your .env -- this will not resolve on retry."
+            ) from exc
+        raise _TransientError(str(exc), _retry_after(exc) if exc.code == 429 else 0) from exc
+    except Exception as exc:  # SDK transport failures have the same retry surface.
+        raise _TransientError(str(exc)) from exc
 
 
 def _parse_json_response(text: str) -> dict | list:
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        # Strip a ```json ... ``` fence if the model wrapped its output in
-        # one despite response_mime_type -- happens occasionally across
-        # model versions and is cheap to defend against.
         cleaned = cleaned.strip("`")
         if cleaned.lower().startswith("json"):
             cleaned = cleaned[4:]

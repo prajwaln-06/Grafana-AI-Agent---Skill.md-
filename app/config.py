@@ -9,15 +9,28 @@ request.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class GeminiTransportSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    gemini_http_timeout_seconds: float = Field(
+        default=60.0, gt=0, description="Default Gemini HTTP timeout per request in seconds.")
+    gemini_max_attempts: int = Field(
+        default=3, ge=1, description="Maximum Gemini request attempts following transient or JSON parse failures.")
+
+
+@lru_cache(maxsize=1)
+def get_gemini_transport_settings() -> GeminiTransportSettings:
+    return GeminiTransportSettings()
+
+
+class Settings(GeminiTransportSettings):
     # --- LLM ---
     gemini_api_key: str = Field(..., description="Google Gemini API key.")
     gemini_model: str = Field(default="gemini-3.5-flash-lite")
