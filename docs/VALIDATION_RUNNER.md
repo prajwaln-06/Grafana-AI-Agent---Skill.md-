@@ -48,6 +48,7 @@ python scripts/run_full_validation.py \
 | `--agent-url URL` | Agent base URL (default `$VALIDATION_AGENT_URL`, `$AGENT_URL`, else `http://localhost:8000`). |
 | `--timeout SEC` | Per-request read timeout (default 300). |
 | `--ids FH-01,CL-03` | Run only some questions. The file records that fewer than 30 were run; do not treat it as the full suite. |
+| `--delay SEC` | Pause between questions (default 0). Pacing only: no retries, results unchanged. Useful if the LLM provider rate-limits. |
 | `--max-connect-failures N` | Stop sending after N consecutive connection failures (default 3; 0 = never). |
 
 If the agent has `API_KEY` set, export the same `API_KEY` for the runner; it is sent as `X-API-Key` and never
@@ -126,6 +127,35 @@ or `.env` (see `.env.example`).
 * `VALIDATION_LIVE_EVAL_CMD`: the stage 5 runner.
 
 Prerequisites: Python 3.10+ (the Dockerfile uses 3.12) and `pip install -r requirements.txt`.
+
+## Reading Stage 5 results
+
+* **HTTP 502 with `The query pipeline failed unexpectedly`**: the server caught an exception inside `run_pipeline`
+  and hid it from the client (`app/agent.py`, `except Exception`). The cause is only in the **agent server log**
+  (`Pipeline failed for question: ...` plus a traceback), never in the response, so look there. If Gemini failed
+  after its attempts (`LLMCallError`), this is the same 502. Rerun with `--delay` to see whether pacing changes it.
+* **`empty_result`**: the query ran and OpenSearch returned nothing (check `execution.metadata.count` and `shards`).
+  It is INCONCLUSIVE by design. Decide whether the data should exist: questions naming a specific switch, port or
+  BMC, or a message wording, can only match if the cluster holds it; a question about non-healthy states is
+  correctly empty when every document is `HEALTHY`.
+* A `success` whose `execution.analysis` shows zero flagged rows (for example `text_ratio_shortfall`) is a
+  completed analysis, not an empty query; read `analysis.scan_complete` and `pattern_verified`.
+
+## Manual steps the runner does not cover
+
+Compared with [SMOKE_TEST.md](SMOKE_TEST.md), these still need a person:
+
+* Interpreting stage 2 and 4 output: unregistered fields, dropped role bindings, type conflicts, analysis numbers
+  against their placeholder parameters, then setting `"verified": true` in `index_registry.json`.
+* Step 3 follow-through: reviewing the snapshots, copying them over `tests/fixtures/opensearch/`, running
+  `python -m pytest tests -q`, and fixing the registry or skill example (the runner never runs the unit tests).
+* Step 5 checks: `/api/v1/opensearch/status` (the runner only probes `/readyz`); comparing answers with the same
+  query in OpenSearch Dashboards (`run_opensearch_30_suite.py` did a direct comparison; the live runner does not);
+  and the "check on purpose" table (`result.index` vs registry, `guard_notes.applied`, `count.exact`,
+  severity-vocabulary and redaction metadata, `threshold_verified`).
+* The two refusal probes (a 30-day window and a 2-hour before/after span) are not among the 30 questions.
+* The server log's reason codes for `validation_failed`, and the 502 root cause above.
+* Step 6: recording what was learned in the registry and `docs/NEXT_PHASE.md`.
 
 ## Statuses and exit codes
 

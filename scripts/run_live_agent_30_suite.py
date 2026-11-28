@@ -227,7 +227,8 @@ def write_document(path: Path, doc: dict[str, Any]) -> None:
 
 def run_suite(agent_url: str, out: Path, *, cases: list[dict[str, Any]] | None = None, session: Any = None,
               timeout: float = DEFAULT_TIMEOUT, api_key: str | None = None,
-              max_connect_failures: int = DEFAULT_MAX_CONNECT_FAILURES, log=print) -> tuple[dict[str, Any], int]:
+              max_connect_failures: int = DEFAULT_MAX_CONNECT_FAILURES, delay: float = 0.0,
+              sleep=time.sleep, log=print) -> tuple[dict[str, Any], int]:
     """Run the questions in order, rewriting ``out`` after each one. Returns (document, exit_code)."""
     cases = load_cases() if cases is None else cases
     sess = session if session is not None else requests.Session()
@@ -241,6 +242,8 @@ def run_suite(agent_url: str, out: Path, *, cases: list[dict[str, Any]] | None =
 
     write_document(out, build_document(agent_url, records, len(cases), started=started, aborted=None, complete=False))
     for i, case in enumerate(cases):
+        if delay > 0 and i > 0:
+            sleep(delay)  # optional pacing between questions (e.g. to stay under an LLM provider's rate limit)
         try:
             rec, conn_failed = run_question(case, agent_url, sess, timeout, headers)
         except KeyboardInterrupt:
@@ -282,6 +285,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"Per-request read timeout in seconds (default {DEFAULT_TIMEOUT:g}).")
     ap.add_argument("--ids", metavar="ID[,ID...]", help="Only run these question ids (e.g. FH-01,CL-03). "
                     "A partial run is recorded as such; it is not the full 30.")
+    ap.add_argument("--delay", type=float, default=0.0, metavar="SEC",
+                    help="Pause between questions (default 0). Pacing only; it never retries or changes a result.")
     ap.add_argument("--max-connect-failures", type=int, default=DEFAULT_MAX_CONNECT_FAILURES, metavar="N",
                     help="Stop sending after N consecutive connection failures (0 = never stop). "
                          f"Default {DEFAULT_MAX_CONNECT_FAILURES}.")
@@ -295,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--out is required (or set VALIDATION_RESULTS_FILE)")
     if args.timeout <= 0:
         ap.error("--timeout must be positive")
+    if args.delay < 0:
+        ap.error("--delay must not be negative")
     cases = load_cases()
     if args.ids:
         wanted = [s.strip().upper() for s in args.ids.split(",") if s.strip()]
@@ -304,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         cases = [c for c in cases if c["test_id"].upper() in wanted]
     print(f"Live HTTP evaluation: {len(cases)} question(s) -> {query_endpoint(strip_url_credentials(args.agent_url))}")
     doc, code = run_suite(args.agent_url, Path(args.out), cases=cases, timeout=args.timeout,
-                          api_key=os.environ.get("API_KEY") or None, max_connect_failures=args.max_connect_failures)
+                          api_key=os.environ.get("API_KEY") or None, max_connect_failures=args.max_connect_failures, delay=args.delay)
     print(f"{doc['responses_received']}/{doc['total']} responses received; wrote {args.out}")
     if doc["aborted_reason"]:
         print(f"WARNING: {doc['aborted_reason']}", file=sys.stderr)

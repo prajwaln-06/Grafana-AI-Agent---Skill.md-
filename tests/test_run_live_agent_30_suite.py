@@ -228,3 +228,11 @@ def test_master_runner_placeholders_expand_to_this_runners_cli(tmp_path):
     assert argv[0] == sys.executable and "{" not in " ".join(argv)
     args = live.build_parser().parse_args(argv[2:])
     assert args.out == str(tmp_path / "live_eval" / "results.json") and args.agent_url == "http://agent:8000"
+
+
+def test_delay_paces_between_questions_without_retrying(tmp_path):
+    naps = []
+    doc, code, sess, _ = run([FakeResp(502, {"detail": "x"})], ids=("A-1", "A-2", "A-3"), tmp_path=tmp_path,
+                             delay=2.5, sleep=naps.append)
+    assert naps == [2.5, 2.5] and len(sess.calls) == 3  # one request per question: a 502 is never retried
+    assert [r["http_status"] for r in doc["results"]] == [502, 502, 502]
