@@ -15,7 +15,7 @@ The manual procedure it automates is [SMOKE_TEST.md](SMOKE_TEST.md).
 | 2 | Live mapping verification | `smoke_test_opensearch.py --queries --rows` | OpenSearch, read-only. No Gemini. |
 | 3 | Mapping snapshots | `smoke_test_opensearch.py --save-mappings <run dir>/mappings` | OpenSearch, read-only. No Gemini. |
 | 4 | Examples and analyses | `smoke_test_opensearch.py --examples --analyses` | OpenSearch, read-only. No Gemini. |
-| 5 | Live question evaluation | **Your** live runner (`--live-eval-cmd`); results graded with `manual_test_report.grade` | Agent server, Gemini, OpenSearch |
+| 5 | Live question evaluation | A live runner (`--live-eval-cmd`), e.g. `scripts/run_live_agent_30_suite.py`; results graded with `manual_test_report.grade` | Agent server, Gemini, OpenSearch |
 | 6 | Findings and report | `manual_test_report.py <stage 5 results> --strict`, then `report.json` and `report.md` | none |
 
 Only stages 0 (when stage 5 is on) and 5 call Gemini. Stages 1 to 4 never do, so a run without a live runner
@@ -23,9 +23,47 @@ makes **no** Gemini call and says so.
 
 ### Stage 5 is an integration point, not a built-in test
 
-The repository has no live evaluator that sends questions to `POST /api/v1/query` and records the response
-(see the audit). Without one, stage 5 is reported **BLOCKED**, and the overall result is INCONCLUSIVE (exit 3).
-Nothing is substituted: not the 30-suite, not canned payloads.
+The master runner does not contain a live evaluator; it runs whatever `--live-eval-cmd` names. Without one,
+stage 5 is reported **BLOCKED**, and the overall result is INCONCLUSIVE (exit 3). Nothing is substituted: not
+`run_opensearch_30_suite.py` (in-process, canned payloads, fixed HTTP 200), not canned payloads.
+
+The repository's runner for this slot is `scripts/run_live_agent_30_suite.py`. It sends the 30 mentor questions
+(ids, text and expected behavior imported from `run_opensearch_30_suite.py`; its canned router/generator payloads
+are never used) as real `POST /api/v1/query` requests with body `{"question": ...}` to a running agent.
+
+```bash
+# on its own (agent already running; stage 5 needs the real GEMINI_API_KEY and a reachable OpenSearch behind it)
+python scripts/run_live_agent_30_suite.py --out /path/to/results.json --agent-url http://localhost:8000
+python scripts/manual_test_report.py /path/to/results.json --strict     # grade it
+
+# through the master runner
+python scripts/run_full_validation.py \
+    --live-eval-cmd "python scripts/run_live_agent_30_suite.py --out {results_file} --agent-url {agent_url}"
+# or:  export VALIDATION_LIVE_EVAL_CMD="..."   (same placeholders)
+```
+
+| Option | Meaning |
+|---|---|
+| `--out FILE` | Where to write results (default `$VALIDATION_RESULTS_FILE`, which the master runner sets). |
+| `--agent-url URL` | Agent base URL (default `$VALIDATION_AGENT_URL`, `$AGENT_URL`, else `http://localhost:8000`). |
+| `--timeout SEC` | Per-request read timeout (default 300). |
+| `--ids FH-01,CL-03` | Run only some questions. The file records that fewer than 30 were run; do not treat it as the full suite. |
+| `--max-connect-failures N` | Stop sending after N consecutive connection failures (default 3; 0 = never). |
+
+If the agent has `API_KEY` set, export the same `API_KEY` for the runner; it is sent as `X-API-Key` and never
+written to the output.
+
+What it records, per question, from the real exchange: `http_status` (the status the server returned, or `null`
+when no response arrived; never defaulted to 200), `application_status` and `execution_status` (from
+`response.result`, `multi:` prefixed for multi-entry answers), `elapsed_seconds`, `generated_opensearch_dsl`,
+`opensearch_execution_results`, `raw_response` and `raw_response_text`, plus `request_sent`, `request_error` and
+`response_parse_error`. Failure handling: a connection error or connect timeout is `request_sent: false`; a read
+timeout is `request_sent: true` with no status; a non-JSON body, or a 200 body without `result`, is a parse error;
+non-200 responses are kept as returned. There are no retries. The file is rewritten after every question, and if
+the agent disappears the unsent questions are still listed (`request_sent: false`) with `aborted_reason` set.
+
+Exit code: 0 when every question got an HTTP response with a parseable body (a 500 is a response; grading fails it),
+1 when any question had no usable response or the run aborted, 2 on usage errors, 130 on Ctrl-C.
 
 Supply a runner with `--live-eval-cmd` or `VALIDATION_LIVE_EVAL_CMD`. Contract:
 
@@ -44,7 +82,7 @@ must be `ok` and executed). A genuinely empty result is **INCONCLUSIVE**, not a 
 has its id, text, HTTP status, application status, execution time, generated DSL, expected versus actual and
 any error. Full evidence stays in `live_eval/results.json`.
 
-The runner cannot verify that your runner really sent HTTP requests to a live agent; that is the contract.
+The master runner cannot verify that a runner really sent HTTP requests to a live agent; that is the contract.
 The runner's results file is rewritten in place with secrets masked.
 
 ## Usage
@@ -134,5 +172,6 @@ style pairs, URL credentials). Reports hold configuration as booleans (`gemini_a
 
 * Counts for stages 1-4 are parsed from the smoke script's text output; they are `n/a` if it printed none.
 * A timeout kills only the direct child process.
-* The live runner is yours to provide; until it is configured, a full run ends INCONCLUSIVE (exit 3) by design.
+* A live runner must be configured (`--live-eval-cmd`); until then a full run ends INCONCLUSIVE (exit 3) by design.
+* `run_live_agent_30_suite.py` has been unit-tested with mocked HTTP and exercised against a local stub server only. A Stage 5 verdict needs a run against the real agent with Gemini and OpenSearch.
 * The runner does not run the unit tests; run `python -m pytest tests -q` separately.
