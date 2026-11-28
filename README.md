@@ -128,6 +128,11 @@ npm run dev
 * Real-time sidebar sparklines monitoring **CPU Busy %**, **Memory Available**, **GPU Temperature**, and **GPU Utilization**.
 * 1-click collapse (`✕`) to expand the chat interface to 100% full screen.
 
+### 6. Agent Self-Monitoring & Request Tracing (Prometheus `/metrics`)
+* Exposes an unauthenticated Prometheus scrape endpoint at `GET /metrics` (on `:8008` and `:8000`, and proxied at `http://localhost:5173/metrics` in Vite dev mode) defined in `app/telemetry.py`.
+* Tracks **Google SRE 4 Golden Signals** across query and chat turns (`adk_request_duration_seconds`, `adk_requests_total`, `adk_in_flight_requests`, `adk_active_sessions_gauge`, `process_resident_memory_bytes`, and `adk_build_info`).
+* Attaches and echoes `X-Request-ID` (`req-...`) headers across every HTTP response for request tracing.
+
 ---
 
 ## 🎬 Tested Demo Prompts
@@ -182,9 +187,11 @@ cd ui && npm run build
 │   │   ├── main.py          # FastAPI application & router registry
 │   │   ├── routes_chat.py   # Unified chat gateway & multi-turn coordinator
 │   │   ├── routes_query.py  # Telemetry query endpoint (/api/v1/query)
-│   │   ├── routes_proposals.py # Dashboard proposal lifecycle
+│   │   ├── routes_health.py # Health, readiness, capabilities, and /metrics probes
+│   │   ├── routes_proposals.py # Dashboard & alert proposal lifecycle
 │   │   ├── routes_admin.py  # Administrative endpoints (users, scopes, audit log)
-│   │   └── routes_auth.py   # OIDC login, callback, whoami, logout
+│   │   ├── routes_auth.py   # OIDC login, callback, whoami, logout
+│   │   └── telemetry_helpers.py # Active session counting across API stores
 │   ├── auth/
 │   │   ├── policy.py        # Central Policy Module: roles, scopes, impact classes
 │   │   ├── principal.py     # The verified identity (issuer, subject, role, scopes)
@@ -204,6 +211,7 @@ cd ui && npm run build
 │   ├── catalog.json         # Dashboard UI catalog (served by /api/catalog)
 │   ├── catalog/             # Structured Prometheus metric catalog (catalog.json + retrieval/runtime)
 │   ├── executor.py          # Prometheus / Loki / OpenSearch execution engine
+│   ├── telemetry.py         # Prometheus 4 Golden Signals metrics & tracing helpers
 │   └── grafana_tools/       # FastMCP Grafana dashboard authoring & compilation
 ├── cli/                     # `agent-cli` — host-side administration client
 │   ├── main.py              # argparse front end (admin -> users -> add)
@@ -340,7 +348,7 @@ What the backend does with the provider's answer:
 
 | Endpoint | Access |
 |---|---|
-| `/healthz`, `/readyz`, `/api/health` | Public (liveness/readiness) |
+| `/healthz`, `/readyz`, `/api/health`, `/metrics` | Public (liveness/readiness & Prometheus scrape endpoint) |
 | `/api/auth/config` | Public — the login screen's configuration (login path, sign-up flow URL). No secret |
 | `/api/auth/login`, `/api/auth/callback` | Public — they *are* the login |
 | `/` and the UI assets | Public — so that the branded login screen can render for a visitor without a session |
